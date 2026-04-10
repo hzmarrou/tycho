@@ -130,9 +130,14 @@ class DomainDocumentExtractor:
 
     def __init__(
         self,
-        model: str = "azure/gpt-5.2",
+        model: str = "azure/gpt-5.4",
         template_path: Optional[str | Path] = None,
     ):
+        # Default is gpt-5.4 — see PLAYBOOK §12 for the gpt-5.2 vs gpt-5.4
+        # comparison. gpt-5.4 produces ~2.4× more LLM-validated concepts
+        # than gpt-5.2 on regulatory text at the same cost. The CLI default
+        # was already gpt-5.4; this constructor default used to lag behind
+        # and silently downgraded non-CLI callers.
         self.model = model
         self.template_path = Path(template_path) if template_path else TEMPLATE_PATH
         if not self.template_path.exists():

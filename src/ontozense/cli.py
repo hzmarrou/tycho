@@ -48,8 +48,19 @@ def ingest(
         False, "--auto",
         help=(
             "Auto-route without human confirmation. By default the router only "
-            "prints the decisions; pass --auto to also dispatch them. Currently "
-            "only Source A dispatch is wired (other Sources land in later steps)."
+            "prints the decisions; pass --auto to also dispatch them. Per "
+            "PLAYBOOK §5, auto-dispatch only fires for routing decisions with "
+            "confidence > 0.9. Lower-confidence decisions are listed as "
+            "skipped so the human can review them. Currently only Source A "
+            "dispatch is wired (other Sources land in later steps)."
+        ),
+    ),
+    auto_threshold: float = typer.Option(
+        0.9, "--auto-threshold",
+        help=(
+            "Confidence gate for --auto dispatch. Routing decisions below "
+            "this threshold are listed as skipped instead of dispatched. "
+            "Default 0.9 per PLAYBOOK §5."
         ),
     ),
     recursive: bool = typer.Option(
@@ -151,17 +162,69 @@ def ingest(
         )
         return
 
-    # Auto-dispatch (currently only Source A is wired through this path)
-    a_files = [d.file_path for d in decisions if d.primary_source == Source.A]
-    if a_files:
+    # ── Auto-dispatch with confidence gate ──
+    # Per PLAYBOOK §5, --auto only dispatches decisions with confidence
+    # above the threshold. Lower-confidence decisions are listed as
+    # skipped so the human can review them before they run.
+    dispatchable = [d for d in decisions if d.confidence > auto_threshold and not d.is_skip]
+    low_confidence = [d for d in decisions if d.confidence <= auto_threshold and not d.is_skip]
+
+    if low_confidence:
         console.print()
         console.print(
-            f"[bold blue]Auto-dispatching {len(a_files)} file(s) to Source A "
-            f"(extract-a)...[/]"
+            f"[yellow]Skipped {len(low_confidence)} low-confidence decision(s) "
+            f"(confidence ≤ {auto_threshold:.2f}):[/]"
         )
-        # Forward to extract-a — same code path as the standalone command
+        for d in low_confidence:
+            sources_str = "+".join(s.value for s in d.sources)
+            console.print(
+                f"  [dim]•[/] [cyan]{sources_str}[/] "
+                f"[dim]({d.confidence:.0%})[/] {d.file_path.name}"
+            )
+            if domain_dir:
+                append_log(
+                    domain_dir, "ingest-skipped",
+                    source=d.file_path.name,
+                    route="+".join(s.value for s in d.sources),
+                    confidence=f"{d.confidence:.2f}",
+                    reason="below_auto_threshold",
+                    threshold=f"{auto_threshold:.2f}",
+                )
+
+    # ── True multi-source dispatch ──
+    # A single decision may list more than one source (e.g. a markdown
+    # developer guide is both A and D). We dispatch each source leg
+    # independently and log each leg. Currently only Source A is wired;
+    # B/C/D legs produce a "not yet implemented" note but are still
+    # counted and logged so multi-source is visible in the audit trail.
+    buckets: dict[Source, list[Path]] = {
+        Source.A: [],
+        Source.B: [],
+        Source.C: [],
+        Source.D: [],
+    }
+    for d in dispatchable:
+        for s in d.sources:
+            if s in buckets:
+                buckets[s].append(d.file_path)
+                if domain_dir:
+                    append_log(
+                        domain_dir, "ingest-dispatch",
+                        source=d.file_path.name,
+                        route=s.value,
+                        confidence=f"{d.confidence:.2f}",
+                        multi_source="yes" if d.is_multi_source else "no",
+                    )
+
+    # Source A — wired
+    if buckets[Source.A]:
+        console.print()
+        console.print(
+            f"[bold blue]Auto-dispatching {len(buckets[Source.A])} file(s) to "
+            f"Source A (extract-a)...[/]"
+        )
         extract_a(
-            documents=a_files,
+            documents=buckets[Source.A],
             output=Path("source-a-extraction.xlsx"),
             json_output=None,
             domain=None,
@@ -172,14 +235,17 @@ def ingest(
             skip_definitions_pass=False,
         )
 
-    # Sources B/C/D not yet wired through ingest auto-dispatch
-    other = [d for d in decisions if d.primary_source in (Source.B, Source.C, Source.D)]
-    if other:
-        console.print()
-        console.print(
-            f"[yellow]{len(other)} file(s) routed to Source B/C/D — "
-            "auto-dispatch for these sources is not yet implemented.[/]"
-        )
+    # Sources B/C/D — not yet wired; report per source so the human sees
+    # exactly which legs of multi-source decisions were skipped.
+    for src in (Source.B, Source.C, Source.D):
+        if buckets[src]:
+            console.print()
+            console.print(
+                f"[yellow]{len(buckets[src])} file(s) routed to Source "
+                f"{src.value} — auto-dispatch not yet implemented.[/]"
+            )
+            for fp in buckets[src]:
+                console.print(f"  [dim]•[/] {fp.name}")
 
 
 # ─── extract-a (Source A: domain documents) ───────────────────────────────────

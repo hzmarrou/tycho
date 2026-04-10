@@ -313,7 +313,7 @@ Things we'll add as decisions are made:
 
 - Per-domain authority order (currently default A > B > C > D for all domains)
 - Per-domain naming normalization rules (synonym maps live in domain config, not in code)
-- LLM model selection criteria (currently hardcoded to `azure/gpt-5.2`; should become per-step config)
+- Per-step model selection criteria (default for Source A is `azure/gpt-5.4` per §12; Sources B/C are deterministic and model-independent; Source D's LLM labelling pass will need its own default once implemented)
 - Cost / latency budgets (per-document, per-domain)
 - Multi-tenant / SaaS conventions (deferred — single-user CLI for now)
 - Schema-evolution / versioning UI conventions
