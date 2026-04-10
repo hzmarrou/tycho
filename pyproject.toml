@@ -18,6 +18,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "openpyxl>=3.1",
     "psycopg2-binary>=2.9",
+    "sqlglot>=25.0",
 ]
 
 [project.optional-dependencies]

@@ -1,12 +1,5 @@
 from .ontogpt_extractor import OntoGPTExtractor
 from .django_schema import DjangoSchemaParser, SchemaResult
-from .dd_extractor import (
-    DataDictionaryExtractor,
-    DataDictionaryResult,
-    DataElement,
-    FieldConfidence,
-    Provenance,
-)
 from .domain_doc_extractor import (
     DomainDocumentExtractor,
     DomainDocumentExtractionResult,
@@ -18,18 +11,26 @@ from .definitions_extractor import (
     extract_definitions_from_text,
     extract_definitions_from_file,
 )
+from .governance_extractor import (
+    GovernanceExtractor,
+    GovernanceExtractionResult,
+    GovernanceRecord,
+    CANONICAL_COLUMNS,
+)
+from .code_extractor import (
+    CodeExtractor,
+    CodeExtractionResult,
+    CodeRule,
+    CodeProvenance,
+    PythonCodeExtractor,
+    SqlCodeExtractor,
+)
 
 __all__ = [
     "OntoGPTExtractor",
     "DjangoSchemaParser",
     "SchemaResult",
-    # Legacy data-dictionary extractor (kept for compatibility)
-    "DataDictionaryExtractor",
-    "DataDictionaryResult",
-    "DataElement",
-    "FieldConfidence",
-    "Provenance",
-    # Source A — domain document extractor (replaces dd_extractor)
+    # Source A — domain document extractor
     "DomainDocumentExtractor",
     "DomainDocumentExtractionResult",
     "Concept",
@@ -37,4 +38,16 @@ __all__ = [
     "DefinitionMatch",
     "extract_definitions_from_text",
     "extract_definitions_from_file",
+    # Source B — governance extractor (TBD scaffold)
+    "GovernanceExtractor",
+    "GovernanceExtractionResult",
+    "GovernanceRecord",
+    "CANONICAL_COLUMNS",
+    # Source D — code extractor (deterministic layer)
+    "CodeExtractor",
+    "CodeExtractionResult",
+    "CodeRule",
+    "CodeProvenance",
+    "PythonCodeExtractor",
+    "SqlCodeExtractor",
 ]
