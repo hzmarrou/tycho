@@ -296,6 +296,47 @@ class TestConceptBuilder:
         assert c.name == "billing address"
         assert c.definition == ""
 
+    def test_concept_without_definition_is_penalised(self, source_doc: Path):
+        """A concept with only a name (no definition) should NOT score 0.95
+        overall, even when the name is verbatim in source. Half of the
+        expected information is missing — the score must reflect that.
+        """
+        from ontozense.extractors.domain_doc_extractor import DomainDocumentExtractor
+
+        ext = DomainDocumentExtractor()
+        # "billing address" is verbatim in SOURCE_TEXT_CUSTOMER, so the
+        # name field would score 0.95 by itself.
+        c = ext._build_concept("billing address", source_doc, SOURCE_TEXT_CUSTOMER)
+        assert c.name == "billing address"
+        assert c.definition == ""
+        # Two confidence entries: name 0.95 + missing definition 0.0
+        assert len(c.confidence) == 2
+        # Find the definition entry
+        def_entry = next(
+            (fc for fc in c.confidence if fc.field_name == "definition"), None
+        )
+        assert def_entry is not None
+        assert def_entry.score == 0.0
+        assert def_entry.reason == "missing"
+        # Overall: average of 0.95 + 0.0 = 0.475 → flagged for review
+        assert abs(c.overall_confidence() - 0.475) < 0.01
+        assert c.needs_review(threshold=0.7)
+
+    def test_concept_with_definition_not_penalised(self, source_doc: Path):
+        """When the definition is present, the missing-definition penalty
+        does NOT apply — only the actual definition score is recorded."""
+        from ontozense.extractors.domain_doc_extractor import DomainDocumentExtractor
+
+        ext = DomainDocumentExtractor()
+        c = ext._build_concept(
+            "customer identifier :: a unique string assigned to each customer record",
+            source_doc,
+            SOURCE_TEXT_CUSTOMER,
+        )
+        # Should have two entries (name + definition), neither marked "missing"
+        reasons = {fc.reason for fc in c.confidence}
+        assert "missing" not in reasons
+
     def test_concept_strips_quotes(self, source_doc: Path):
         from ontozense.extractors.domain_doc_extractor import DomainDocumentExtractor
 
@@ -379,6 +420,47 @@ class TestRelationshipBuilder:
         )
         assert r.provenance is not None
         assert "customer-master.md" in r.provenance.source_document
+
+    def test_relationship_both_endpoints_in_source_high_score(self, source_doc: Path):
+        from ontozense.extractors.domain_doc_extractor import DomainDocumentExtractor
+
+        ext = DomainDocumentExtractor()
+        # Both 'customer identifier' and 'customer record' appear in SOURCE_TEXT_CUSTOMER
+        r = ext._build_relationship(
+            "customer identifier -> uniquely identifies -> customer record",
+            source_doc,
+            SOURCE_TEXT_CUSTOMER,
+        )
+        assert r.overall_confidence() == 0.95
+
+    def test_relationship_neither_endpoint_in_source_low_score(self, source_doc: Path):
+        """A relationship whose endpoints don't appear in source should be
+        flagged for review, not parked at 0.5 above the review threshold."""
+        from ontozense.extractors.domain_doc_extractor import DomainDocumentExtractor
+
+        ext = DomainDocumentExtractor()
+        r = ext._build_relationship(
+            "fictional widget -> totally invented predicate -> nonexistent thing",
+            source_doc,
+            SOURCE_TEXT_CUSTOMER,
+        )
+        # Both endpoints absent → 0.30 (clearly below review threshold)
+        assert r.overall_confidence() == 0.30
+        # And needs_review (using 0.7 default) reflects that
+        assert r.overall_confidence() < 0.7
+
+    def test_relationship_one_endpoint_in_source_mid_score(self, source_doc: Path):
+        from ontozense.extractors.domain_doc_extractor import DomainDocumentExtractor
+
+        ext = DomainDocumentExtractor()
+        # 'customer identifier' is in source, 'martian widget' is not
+        r = ext._build_relationship(
+            "customer identifier -> orbits around -> martian widget",
+            source_doc,
+            SOURCE_TEXT_CUSTOMER,
+        )
+        # (0.95 + 0.30) / 2 = 0.625
+        assert abs(r.overall_confidence() - 0.625) < 0.01
 
 
 # ─── End-to-end parsing tests (with mocked OntoGPT) ─────────────────────────

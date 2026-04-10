@@ -350,6 +350,17 @@ class DomainDocumentExtractor:
             concept.confidence.append(
                 self._score_text_field(definition, source_text, "definition")
             )
+        else:
+            # No definition is a real gap, not a non-event. Score it as
+            # missing so the overall confidence reflects that half of the
+            # expected information is absent. Without this, a concept with
+            # only a name (verbatim, 0.95) would score 0.95 overall — which
+            # is dishonest because the human reviewer still needs to find
+            # or write the definition. With this penalty: name 0.95 + def
+            # 0.0 → overall 0.475 → flagged needs_review.
+            concept.confidence.append(
+                FieldConfidence("definition", 0.0, "missing")
+            )
 
         snippet = self._find_snippet(name, source_text) or self._find_snippet(definition, source_text)
         concept.provenance = Provenance(
@@ -402,9 +413,20 @@ class DomainDocumentExtractor:
     ) -> Relationship:
         rel = Relationship(subject=subject.strip(), predicate=predicate.strip(), object=obj.strip())
 
-        score_s = 0.95 if self._appears_in(subject, source_text) else 0.5
-        score_o = 0.95 if self._appears_in(obj, source_text) else 0.5
+        # Score each endpoint by source presence:
+        #   verbatim → 0.95
+        #   absent   → 0.30  (was 0.5; lowered so a both-missing triple
+        #                     scores 0.30, clearly below the 0.7 review
+        #                     threshold instead of sitting on the fence)
+        # The predicate is not scored — predicates are usually paraphrased
+        # verb phrases that don't match the source verbatim.
+        score_s = 0.95 if self._appears_in(subject, source_text) else 0.30
+        score_o = 0.95 if self._appears_in(obj, source_text) else 0.30
         avg = (score_s + score_o) / 2
+        # avg cases:
+        #   both verbatim          → 0.95   (both endpoints grounded)
+        #   one verbatim, one not  → 0.625  (mixed grounding)
+        #   neither verbatim       → 0.30   (no source grounding — flagged)
         rel.confidence.append(FieldConfidence("triple", avg, "source_overlap"))
 
         snippet = self._find_snippet(subject, source_text)
