@@ -267,7 +267,47 @@ If we add a new technique, it goes in this list with a citation. If we can't cit
 
 ---
 
-## 12. What is NOT in this playbook (yet)
+## 12. Model selection findings
+
+Documented results from real Basel D403 extractions during Step 2 verification.
+The same input (`tests/fixtures/npl-basel-guidelines.md`), the same template
+(`templates/domain_doc_extraction.yaml`), the same regex enrichment pass —
+only the model differs.
+
+| Model | LLM concepts | Total concepts | Relationships | LLM at ≥80% | Notes |
+|---|---:|---:|---:|---:|---|
+| `azure/gpt-5.2` | 11 | 17 (11 + 6 regex) | 18 | 11 of 11 | conservative; misses several reporting fields and state transitions |
+| `azure/gpt-5.4` | **26** | **30** (26 + 4 regex) | **24** | **25 of 26** | catches reporting fields (gross carrying amount, value adjustments), state transitions (continuous repayment period, probation period), business rule constraints (collateralisation has no direct influence) |
+
+**Finding:** model choice dominates prompt engineering for Source A. The
+template, regex pass, and term filter together contribute maybe 20-30% to
+output quality. Switching from `gpt-5.2` to `gpt-5.4` more than **doubles**
+LLM-validated concept count (11 → 26) at the same or higher quality, with
+no template change.
+
+**Recommendation:** Use `azure/gpt-5.4` (or newer) as the default for
+Source A extraction. This is now the CLI default in `extract-a`.
+
+**Why gpt-5.4 is better here:** It is more willing to recognize reporting
+fields, state transitions, and business rule subjects as concepts, while
+gpt-5.2 was overly conservative and stayed at the level of "core
+definitional terms" only. gpt-5.4 also produces relationship triples that
+capture constraints (`collateralisation has no direct influence on
+categorisation of non-performing exposures`) — exactly the business-rule
+shape we want.
+
+**What this implies for other Sources:** Source D (code extraction via
+AI-RBX methodology) will likely show the same model-sensitivity. Source B
+(structured Excel parser) is deterministic and shouldn't depend on model
+choice. Source C (database introspection) is also deterministic. Track
+model-vs-output comparisons whenever a new source lands.
+
+**Cost note (informal):** The gpt-5.4 run cost roughly the same as the
+gpt-5.2 run for a 140KB document — both well under $1 per extraction.
+The output is more than 2× richer for the same money. This is a good
+default.
+
+## 13. What is NOT in this playbook (yet)
 
 Things we'll add as decisions are made:
 

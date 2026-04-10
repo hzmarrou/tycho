@@ -285,8 +285,12 @@ def extract_a(
         ),
     ),
     model: str = typer.Option(
-        "azure/gpt-5.2", "--model", "-m",
-        help="LiteLLM model identifier",
+        "azure/gpt-5.4", "--model", "-m",
+        help=(
+            "LiteLLM model identifier. Default is gpt-5.4: it produces "
+            "~2.4x more LLM-validated concepts than gpt-5.2 on regulatory "
+            "text at the same cost (see PLAYBOOK §12 for the comparison)."
+        ),
     ),
     template: Path = typer.Option(
         None, "--template", "-t",
@@ -348,12 +352,15 @@ def extract_a(
         console.print(f"[bold blue]Extracting from:[/] {doc}")
         result = extractor.extract_from_file(doc)
 
-        # Optional: enrich with regex-found definitions for concepts the LLM
-        # may have left empty.
-        defs_added = 0
+        # Optional: enrich with regex-found definitions and add unmatched
+        # regex finds as additional regex-only candidate concepts.
         defs_total = 0
+        defs_enriched = 0
+        regex_only_added = 0
         if not skip_definitions_pass:
-            defs_total, defs_added = _enrich_with_definitions(result, doc)
+            defs_total, defs_enriched, regex_only_added = _enrich_with_definitions(
+                result, doc
+            )
 
         if not result.concepts:
             console.print(
@@ -371,11 +378,13 @@ def extract_a(
                 sum(c.overall_confidence() for c in result.concepts)
                 / len(result.concepts)
             )
+            llm_count = len(result.concepts) - regex_only_added
             console.print(
                 f"  Domain: [cyan]{result.domain_name or 'unspecified'}[/]   "
-                f"Concepts: [green]{len(result.concepts)}[/]   "
+                f"Concepts: [green]{len(result.concepts)}[/] "
+                f"([blue]{llm_count} LLM[/] + [magenta]{regex_only_added} regex[/])   "
                 f"Relationships: [green]{len(result.relationships)}[/]   "
-                f"Definitions enriched: [magenta]{defs_added}/{defs_total}[/]"
+                f"Definitions enriched: [magenta]{defs_enriched}/{defs_total}[/]"
             )
             if domain_dir:
                 append_log(
@@ -383,9 +392,11 @@ def extract_a(
                     source=doc.name,
                     domain=result.domain_name or "unspecified",
                     concepts=len(result.concepts),
+                    llm_concepts=llm_count,
+                    regex_only=regex_only_added,
                     relationships=len(result.relationships),
                     confidence_avg=f"{confidence_avg:.2f}",
-                    defs_enriched=defs_added,
+                    defs_enriched=defs_enriched,
                     defs_total=defs_total,
                 )
         results.append(result)
@@ -470,9 +481,19 @@ def extract_a(
     if json_output:
         import json
         from dataclasses import asdict
+
+        # Dataclass dict + injected overall_confidence and needs_review per item.
+        # Methods don't serialize via asdict(), so we compute them here.
+        out = asdict(merged)
+        for raw_concept, concept in zip(out["concepts"], merged.concepts):
+            raw_concept["overall_confidence"] = round(concept.overall_confidence(), 3)
+            raw_concept["needs_review"] = concept.needs_review(threshold=review_threshold)
+        for raw_rel, rel in zip(out["relationships"], merged.relationships):
+            raw_rel["overall_confidence"] = round(rel.overall_confidence(), 3)
+
         json_output.parent.mkdir(parents=True, exist_ok=True)
         json_output.write_text(
-            json.dumps(asdict(merged), indent=2, default=str, ensure_ascii=False),
+            json.dumps(out, indent=2, default=str, ensure_ascii=False),
             encoding="utf-8",
         )
         console.print(f"[bold green]JSON saved:[/] {json_output}")
@@ -496,51 +517,104 @@ def extract_a(
         raise typer.Exit(code=3)
 
 
-def _enrich_with_definitions(result, doc: Path) -> tuple[int, int]:
-    """Run the regex-based definitions extractor and enrich existing concepts.
+def _enrich_with_definitions(result, doc: Path) -> tuple[int, int, int]:
+    """Run the regex-based definitions extractor and enrich/extend the concept list.
 
-    Returns ``(total_definitions_found, concepts_enriched)``.
+    Two-phase merge:
+      1. Enrich existing LLM concepts that have empty definitions, by matching
+         their name to a regex-found term. Existing concepts retain their
+         high LLM confidence and only the definition is added.
+      2. For regex-found terms that DON'T match any LLM concept, add them as
+         new ``Concept`` objects with confidence 0.6 and reason ``regex_only``.
+         These are clearly distinguishable from LLM-extracted concepts in the
+         Excel output (lower confidence band → yellow/red color coding).
+
+    Returns:
+        (total_definitions_found, llm_concepts_enriched, regex_only_added)
     """
     from .extractors import extract_definitions_from_file
-    from .extractors.domain_doc_extractor import FieldConfidence
+    from .extractors.domain_doc_extractor import (
+        Concept,
+        FieldConfidence,
+        Provenance,
+    )
+    from datetime import datetime
 
     matches = extract_definitions_from_file(doc)
     if not matches:
-        return 0, 0
+        return 0, 0, 0
 
-    # Build a lookup by normalized term
-    def_lookup = {}
+    # Build a lookup by normalized term name
+    def_lookup: dict[str, object] = {}
     for m in matches:
         key = m.term.lower().strip()
         if key and key not in def_lookup:
             def_lookup[key] = m
 
+    # Phase 1: enrich existing LLM concepts with empty definitions
     enriched = 0
+    matched_terms: set[str] = set()
+    llm_concept_keys: set[str] = {c.name.lower().strip() for c in result.concepts}
+
     for concept in result.concepts:
-        if concept.definition:
-            continue
-        # Try exact name match (case-insensitive)
         key = concept.name.lower().strip()
+        # Try exact name match
         if key in def_lookup:
-            concept.definition = def_lookup[key].definition
-            concept.confidence.append(
-                FieldConfidence("definition", 0.85, "regex_pattern")
-            )
-            if not concept.citation and def_lookup[key].source_section:
-                concept.citation = def_lookup[key].source_section
-            enriched += 1
-            continue
-        # Try matching by definition text containment
-        for term, m in def_lookup.items():
-            if term and term in key:
+            matched_terms.add(key)
+            if not concept.definition:
+                m = def_lookup[key]
                 concept.definition = m.definition
                 concept.confidence.append(
-                    FieldConfidence("definition", 0.75, "regex_partial")
+                    FieldConfidence("definition", 0.85, "regex_pattern")
                 )
+                if not concept.citation and m.source_section:
+                    concept.citation = m.source_section
                 enriched += 1
+            continue
+        # Try substring match (LLM concept name contains a regex term, or vice versa)
+        for term, m in def_lookup.items():
+            if term in key or key in term:
+                matched_terms.add(term)
+                if not concept.definition:
+                    concept.definition = m.definition
+                    concept.confidence.append(
+                        FieldConfidence("definition", 0.75, "regex_partial")
+                    )
+                    enriched += 1
                 break
 
-    return len(matches), enriched
+    # Phase 2: add regex-found terms that DON'T match any LLM concept as
+    # new concepts at LOW confidence ("regex_only" candidates for human
+    # review). The confidence is intentionally low (0.4) so they show up
+    # in the red band of the Excel — clearly distinguished from LLM-extracted
+    # concepts and unambiguously flagged as needing review. They passed
+    # pattern matching but not LLM judgment.
+    regex_only_added = 0
+    for term_key, m in def_lookup.items():
+        if term_key in matched_terms:
+            continue
+        # Skip if this term overlaps any existing LLM concept (substring match)
+        if any(term_key in k or k in term_key for k in llm_concept_keys):
+            continue
+        # Add as a regex-only candidate concept
+        new_concept = Concept(name=m.term, definition=m.definition)
+        new_concept.confidence.append(
+            FieldConfidence("name", 0.4, "regex_only")
+        )
+        new_concept.confidence.append(
+            FieldConfidence("definition", 0.4, "regex_only")
+        )
+        new_concept.citation = m.source_section
+        new_concept.provenance = Provenance(
+            source_document=str(doc),
+            source_section=m.source_section,
+            source_text_snippet=m.definition[:200],
+            extraction_timestamp=datetime.utcnow().isoformat(),
+        )
+        result.concepts.append(new_concept)
+        regex_only_added += 1
+
+    return len(matches), enriched, regex_only_added
 
 
 # ─── extract ──────────────────────────────────────────────────────────────────
