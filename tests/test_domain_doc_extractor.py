@@ -462,6 +462,32 @@ class TestRelationshipBuilder:
         # (0.95 + 0.30) / 2 = 0.625
         assert abs(r.overall_confidence() - 0.625) < 0.01
 
+    def test_relationship_snippet_falls_back_to_object_when_subject_absent(
+        self, source_doc: Path
+    ):
+        """If the subject isn't in the source but the object is, the
+        provenance snippet should still be populated (anchored on the
+        object). Without this fallback, half of the mixed-grounding
+        relationships would have empty provenance despite having
+        evidence.
+        """
+        from ontozense.extractors.domain_doc_extractor import DomainDocumentExtractor
+
+        ext = DomainDocumentExtractor()
+        # Subject 'martian widget' is absent, object 'customer identifier'
+        # is present in SOURCE_TEXT_CUSTOMER
+        r = ext._build_relationship(
+            "martian widget -> orbits around -> customer identifier",
+            source_doc,
+            SOURCE_TEXT_CUSTOMER,
+        )
+        assert r.provenance is not None
+        assert r.provenance.source_text_snippet, (
+            "Relationship provenance snippet should fall back to the "
+            "object anchor when the subject is absent"
+        )
+        assert "customer identifier" in r.provenance.source_text_snippet.lower()
+
 
 # ─── End-to-end parsing tests (with mocked OntoGPT) ─────────────────────────
 

@@ -434,7 +434,14 @@ class DomainDocumentExtractor:
         #   neither verbatim       → 0.30   (no source grounding — flagged)
         rel.confidence.append(FieldConfidence("triple", avg, "source_overlap"))
 
-        snippet = self._find_snippet(subject, source_text)
+        # Provenance snippet: prefer subject anchor, fall back to object.
+        # Without the fallback, relationships where the subject is absent
+        # but the object is present would have empty provenance even
+        # though the evidence exists.
+        snippet = (
+            self._find_snippet(subject, source_text)
+            or self._find_snippet(obj, source_text)
+        )
         rel.provenance = Provenance(
             source_document=str(source_path),
             source_section=self._find_section(snippet, source_text),

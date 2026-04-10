@@ -83,6 +83,23 @@ Every extracted field gets a confidence score in `[0.0, 1.0]`. The score is hone
 - `0.95` — the field comes from a structured source (database introspection, parsed Excel cell). No LLM involvement, no hallucination risk.
 - This is higher than narrative fields because structured sources are deterministic.
 
+**NAME fields** (concept `name`)
+- Scored with NARRATIVE rules (verbatim → `0.95`, high overlap → `0.75`, partial → `0.55`, low → `0.35`, empty → `0.00`). Most concept names are short phrases that match verbatim, so the common case is `0.95`.
+- A concept that the LLM returns with a name but no definition gets a `FieldConfidence("definition", 0.00, "missing")` entry explicitly added, so its element-level confidence reflects the missing half. Without this, name-only concepts would score `0.95` overall despite being incomplete.
+
+**RELATIONSHIP TRIPLE fields** (S/P/O triples from Source A)
+- `0.95` — both subject and object appear verbatim in the source text (fully grounded)
+- `0.625` — exactly one endpoint appears verbatim (mixed grounding — average of `0.95` and `0.30`)
+- `0.30` — neither endpoint appears verbatim (no source grounding — the LLM invented both)
+- The predicate is not scored. Predicates are usually paraphrased verb phrases that rarely match source verbatim.
+- Stored as a single `FieldConfidence("triple", ...)` entry, not as separate subject/object scores.
+
+**REGEX-ENRICHED fields** (definitions added by the Source A second pass)
+The regex definitions extractor runs as a second pass over the document and produces a new category of scoring rules for the values it contributes:
+- `0.85` — the existing LLM concept's name matches a regex-found term exactly; the regex-extracted definition is appended to the concept. Below the verbatim `0.95` because the match is structural (pattern + name) rather than full-text verbatim.
+- `0.75` — substring match (the LLM concept name contains the regex term or vice versa); the regex definition is appended.
+- `0.40` — a regex-found term does not match any LLM concept and is added as a standalone "regex-only" candidate concept. Both `name` and `definition` score at `0.40`, signalling that the concept passed pattern matching but not LLM judgment and is explicitly a candidate for human review.
+
 ### Element-level confidence
 
 The overall confidence for an element is the **average** of its populated fields' scores. An element with one high-confidence field (say `definition` at 0.95) and ten empty fields (each at 0.00) gets an overall confidence of 0.0865 — and is flagged as needing review even though one of its fields is high-quality.

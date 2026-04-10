@@ -451,21 +451,34 @@ def extract_a(
             )
         raise typer.Exit(code=2)
 
-    high_conf = sum(
+    # Low-confidence gate — PLAYBOOK §8 says "all elements low confidence
+    # → exit code 3". Both concepts AND relationships count as elements.
+    # The earlier implementation checked concepts only, which could miss
+    # the edge case where concepts are empty but relationships are
+    # all-low, or where concepts are all-low and relationships are fine.
+    high_conf_concepts = sum(
         1 for c in merged.concepts if c.overall_confidence() >= 0.5
     )
-    if total_concepts > 0 and high_conf == 0:
+    high_conf_rels = sum(
+        1 for r in merged.relationships if r.overall_confidence() >= 0.5
+    )
+    total_elements = total_concepts + total_rels
+    high_conf = high_conf_concepts + high_conf_rels
+    if total_elements > 0 and high_conf == 0:
         console.print()
         console.print(
-            f"[bold yellow]⚠ All {total_concepts} extracted concepts have "
-            f"confidence < 50%.[/]\n"
+            f"[bold yellow]⚠ All {total_elements} extracted elements "
+            f"({total_concepts} concepts + {total_rels} relationships) "
+            f"have confidence < 50%.[/]\n"
             "  Output will be written but should be discarded or re-run."
         )
         if domain_dir:
             append_log(
                 domain_dir, "extract-a",
                 warning="all_low_confidence",
-                concepts=total_concepts, high_conf=0,
+                concepts=total_concepts,
+                relationships=total_rels,
+                high_conf=0,
             )
 
     # Export Excel
@@ -510,7 +523,7 @@ def extract_a(
         f"[red]low (<50%)[/]: {sum(1 for r in merged.relationships if r.overall_confidence() < 0.5)}"
     )
 
-    if total_concepts > 0 and high_conf == 0:
+    if total_elements > 0 and high_conf == 0:
         raise typer.Exit(code=3)
 
 
