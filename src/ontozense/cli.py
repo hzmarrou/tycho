@@ -251,6 +251,163 @@ def extract_dd(
         raise typer.Exit(code=3)  # all elements low-confidence
 
 
+# ─── ingest (router-based dispatch) ───────────────────────────────────────────
+
+@app.command()
+def ingest(
+    paths: list[Path] = typer.Argument(
+        ...,
+        help="One or more files or directories to route into the knowledge base.",
+    ),
+    domain_dir: Path = typer.Option(
+        None, "--domain-dir",
+        help=(
+            "Per-domain knowledge base directory. If provided, every routing "
+            "decision is logged to <domain-dir>/log.md."
+        ),
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Print routing decisions but don't actually run any extractors.",
+    ),
+    auto: bool = typer.Option(
+        False, "--auto",
+        help=(
+            "Auto-route without human confirmation. By default the router only "
+            "prints the decisions; pass --auto to also dispatch them. Currently "
+            "only Source A dispatch is wired (other Sources land in later steps)."
+        ),
+    ),
+    recursive: bool = typer.Option(
+        True, "--recursive/--no-recursive",
+        help="Recurse into subdirectories when a directory is given.",
+    ),
+) -> None:
+    """Route incoming files to the right Source extractor.
+
+    The router classifies each file by its extension and content patterns
+    into one of:
+
+      - Source A — Authoritative domain documents (prose: PDF, MD, DOCX, ...)
+      - Source B — Governance / data dictionaries (Excel, CSV, ...)
+      - Source C — Database schemas (DDL, JSON Schema, ...)
+      - Source D — Production code (Python, SQL, ...)
+      - skip   — Not useful for ontology extraction (README, LICENSE, ...)
+
+    By default, prints the routing decisions but does NOT dispatch them.
+    Pass --auto to dispatch. Currently only Source A dispatch is wired
+    (Sources B/D and the fusion layer land in later steps).
+    """
+    _load_env()
+
+    from .router import Router, Source
+    from .log import append_log
+
+    router = Router()
+
+    # Collect all decisions across all paths
+    decisions = []
+    for p in paths:
+        if not p.exists():
+            console.print(f"[red]Path not found:[/] {p}")
+            raise typer.Exit(code=1)
+        if p.is_dir():
+            decisions.extend(router.route_directory(p, recursive=recursive))
+        else:
+            decisions.append(router.route(p))
+
+    if not decisions:
+        console.print("[yellow]No files to route.[/]")
+        return
+
+    # Group by source for the summary
+    by_source: dict[str, list] = {}
+    for d in decisions:
+        key = d.primary_source.value
+        by_source.setdefault(key, []).append(d)
+
+    # Print summary
+    console.print()
+    console.print(f"[bold]Routed {len(decisions)} file(s):[/]")
+    for source_key in ("A", "B", "C", "D", "skip"):
+        if source_key in by_source:
+            count = len(by_source[source_key])
+            label = {
+                "A": "Source A — Authoritative domain documents",
+                "B": "Source B — Governance / data dictionaries",
+                "C": "Source C — Database schemas",
+                "D": "Source D — Production code",
+                "skip": "Skipped (README, license, binary, ...)",
+            }[source_key]
+            console.print(f"  [cyan]{source_key}[/] — {count} file(s) — {label}")
+    console.print()
+
+    # Per-file detail
+    for d in decisions:
+        primary = d.primary_source.value
+        marker = "↓" if d.is_skip else "→"
+        sources_str = "+".join(s.value for s in d.sources)
+        console.print(
+            f"  [bold]{marker}[/] [cyan]{sources_str:>6}[/] "
+            f"[dim]({d.confidence:.0%}, {d.layer})[/] "
+            f"{d.file_path.name}"
+        )
+        console.print(f"        [dim]{d.reasoning}[/]")
+        if domain_dir:
+            append_log(
+                domain_dir, "ingest",
+                source=d.file_path.name,
+                route=primary,
+                confidence=f"{d.confidence:.2f}",
+                layer=d.layer,
+                reasoning=d.reasoning,
+            )
+
+    if dry_run:
+        console.print()
+        console.print("[yellow]Dry run — no extractors invoked.[/]")
+        return
+
+    if not auto:
+        console.print()
+        console.print(
+            "[yellow]Routing complete. Pass [bold]--auto[/] to dispatch the "
+            "files to their extractors. Currently only Source A dispatch is "
+            "wired; Sources B/C/D and the fusion layer land in later steps.[/]"
+        )
+        return
+
+    # Auto-dispatch (currently only Source A is wired through this path)
+    a_files = [d.file_path for d in decisions if d.primary_source == Source.A]
+    if a_files:
+        console.print()
+        console.print(
+            f"[bold blue]Auto-dispatching {len(a_files)} file(s) to Source A "
+            f"(extract-a)...[/]"
+        )
+        # Forward to extract-a — same code path as the standalone command
+        extract_a(
+            documents=a_files,
+            output=Path("source-a-extraction.xlsx"),
+            json_output=None,
+            domain=None,
+            domain_dir=domain_dir,
+            model="azure/gpt-5.4",
+            template=None,
+            review_threshold=0.7,
+            skip_definitions_pass=False,
+        )
+
+    # Sources B/C/D not yet wired through ingest auto-dispatch
+    other = [d for d in decisions if d.primary_source in (Source.B, Source.C, Source.D)]
+    if other:
+        console.print()
+        console.print(
+            f"[yellow]{len(other)} file(s) routed to Source B/C/D — "
+            "auto-dispatch for these sources is not yet implemented.[/]"
+        )
+
+
 # ─── extract-a (Source A: domain documents) ───────────────────────────────────
 
 @app.command(name="extract-a")
