@@ -16,6 +16,8 @@ dependencies = [
     "typer>=0.12",
     "rich>=13.0",
     "python-dotenv>=1.0",
+    "openpyxl>=3.1",
+    "psycopg2-binary>=2.9",
 ]
 
 [project.optional-dependencies]
@@ -34,6 +36,9 @@ ontozense = "ontozense.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ontozense"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/ontozense/templates" = "ontozense/templates"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

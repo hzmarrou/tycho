@@ -1,0 +1,75 @@
+id: http://w3id.org/ontozense/domain_doc_extraction
+name: domain_doc_extraction
+title: Domain Document Extraction Template
+description: >-
+  Extract concepts and relationships from authoritative domain documents —
+  any prose-shaped artifact the domain experts treat as canonical
+  (formal regulations, internal policies, academic papers, industry standards,
+  vendor specifications, white papers, technical guidelines).
+
+  This template asks the LLM for a flat list of concepts (with optional
+  inline definitions) and a flat list of subject-predicate-object
+  relationship triples. The output format is intentionally simple because
+  SPIRES recursion does not work for "many independent items extracted from
+  a long document." Ontozense reads the LLM's raw_completion_output directly
+  to recover the full lists, bypassing SPIRES's structured parser.
+license: https://creativecommons.org/publicdomain/zero/1.0/
+
+prefixes:
+  rdf: http://www.w3.org/1999/02/22-rdf-syntax-ns#
+  ddoc: http://w3id.org/ontozense/domain_doc_extraction/
+  linkml: https://w3id.org/linkml/
+
+default_prefix: ddoc
+default_range: string
+
+imports:
+  - linkml:types
+
+classes:
+  DomainDocumentExtraction:
+    tree_root: true
+    description: >-
+      Knowledge extracted from one authoritative domain document.
+    attributes:
+      domain_name:
+        description: >-
+          The high-level business domain or sub-domain this document describes.
+          Use a noun phrase that names the area of knowledge covered by the
+          document. Use the most specific name supported by the text.
+
+      concepts:
+        description: >-
+          A list of distinct concepts found in the source document. Each item
+          must be a single line in one of these formats:
+
+          1. Just the concept name (when no definition is given):
+             concept name
+
+          2. Concept name followed by an inline definition using the "::"
+             separator (when the document explicitly defines the concept):
+             concept name :: definition text
+
+          Include a concept ONLY if the source document EXPLICITLY defines
+          it, formally specifies it, sets a value range, gives a rule, or
+          treats it as a reportable field. DO NOT include terms that are
+          only mentioned casually in passing without any definitional
+          content. Output the list as a YAML list (each item on its own
+          line prefixed by "- ") OR as a JSON array.
+        multivalued: true
+
+      relationships:
+        description: >-
+          A list of subject-predicate-object triples expressing relationships
+          between the concepts identified above. Each item must be a single
+          line in this exact format:
+
+             subject -> predicate -> object
+
+          The subject and object should match concept names from the concepts
+          list when possible. The predicate should be a short verb phrase
+          describing the relationship (for example: "defined by",
+          "is a kind of", "requires", "triggers", "applies to", "excludes").
+          Only include relationships that are EXPLICITLY stated in the source
+          document. Output the list as a YAML list or a JSON array.
+        multivalued: true

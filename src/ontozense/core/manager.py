@@ -67,30 +67,55 @@ class MergeResult:
     conflicts: list[dict] = field(default_factory=list)
 
 
-# ─── Fabric IQ naming rules ──────────────────────────────────────────────────
+# ─── Naming policies ─────────────────────────────────────────────────────────
+#
+# A naming policy enforces a target system's identifier rules. The engine
+# itself is target-agnostic; pass a NamingPolicy if you need to validate or
+# normalize names for a specific consumer (e.g. Microsoft Fabric IQ, Snowflake,
+# BigQuery, etc.).
 
-FABRIC_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,24}[a-zA-Z0-9]$")
-FABRIC_NAME_SINGLE_CHAR = re.compile(r"^[a-zA-Z0-9]$")
+@dataclass
+class NamingPolicy:
+    """A naming convention enforced by some target system."""
+    name: str                       # human-readable identifier (e.g. "fabric_iq")
+    pattern: re.Pattern             # regex the name must match
+    single_char_pattern: re.Pattern # regex for single-char edge case
+    max_length: int                 # truncation length
+
+    def is_compliant(self, name: str) -> bool:
+        if not name:
+            return False
+        if len(name) == 1:
+            return bool(self.single_char_pattern.match(name))
+        return bool(self.pattern.match(name))
+
+    def normalize(self, name: str) -> str:
+        """Normalize a name to comply with this policy."""
+        normalized = re.sub(r"[^a-zA-Z0-9_-]", "-", name)
+        normalized = re.sub(r"-+", "-", normalized)
+        normalized = normalized.strip("-_")
+        normalized = normalized[: self.max_length].rstrip("-_")
+        return normalized or "unnamed"
 
 
+# Fabric IQ is provided as a built-in policy *example*. Users targeting other
+# systems can construct their own NamingPolicy instances. Nothing in the
+# extraction or fusion pipeline depends on Fabric IQ specifically.
+FABRIC_IQ_POLICY = NamingPolicy(
+    name="fabric_iq",
+    pattern=re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,24}[a-zA-Z0-9]$"),
+    single_char_pattern=re.compile(r"^[a-zA-Z0-9]$"),
+    max_length=26,
+)
+
+
+# Backwards-compat shims for code that imported the old function names
 def is_fabric_iq_compliant(name: str) -> bool:
-    """Check if a name meets Fabric IQ naming rules (1-26 chars, alphanumeric + hyphens/underscores)."""
-    if len(name) == 1:
-        return bool(FABRIC_NAME_SINGLE_CHAR.match(name))
-    return bool(FABRIC_NAME_PATTERN.match(name))
+    return FABRIC_IQ_POLICY.is_compliant(name)
 
 
 def normalize_to_fabric_iq(name: str) -> str:
-    """Normalize a name to be Fabric IQ compliant."""
-    # Replace spaces and special chars with hyphens
-    normalized = re.sub(r"[^a-zA-Z0-9_-]", "-", name)
-    # Collapse multiple hyphens
-    normalized = re.sub(r"-+", "-", normalized)
-    # Strip leading/trailing non-alphanumeric
-    normalized = normalized.strip("-_")
-    # Truncate to 26 chars
-    normalized = normalized[:26].rstrip("-_")
-    return normalized or "unnamed"
+    return FABRIC_IQ_POLICY.normalize(name)
 
 
 # ─── OntologyManager ─────────────────────────────────────────────────────────
@@ -323,8 +348,16 @@ class OntologyManager:
 
     # ─── Validation ──────────────────────────────────────────────────────
 
-    def validate(self) -> list[ValidationIssue]:
-        """Validate the ontology and return issues."""
+    def validate(
+        self,
+        naming_policy: NamingPolicy | None = None,
+    ) -> list[ValidationIssue]:
+        """Validate the ontology and return issues.
+
+        Args:
+            naming_policy: Optional naming policy to enforce
+                (e.g. FABRIC_IQ_POLICY). If None, no naming compliance checks.
+        """
         issues: list[ValidationIssue] = []
         classes = self.get_classes()
         obj_props = self.get_object_properties()
@@ -399,29 +432,40 @@ class OntologyManager:
                     category="naming",
                 ))
 
-        # Check: Fabric IQ naming compliance
-        for cls in classes:
-            if not is_fabric_iq_compliant(cls["name"]):
-                issues.append(ValidationIssue(
-                    "info",
-                    f"Class '{cls['name']}' is not Fabric IQ naming compliant",
-                    subject=cls["name"],
-                    category="fabric_iq",
-                ))
+        # Check: naming policy compliance (if a policy was provided)
+        if naming_policy is not None:
+            for cls in classes:
+                if not naming_policy.is_compliant(cls["name"]):
+                    issues.append(ValidationIssue(
+                        "info",
+                        f"Class '{cls['name']}' is not compliant with naming policy '{naming_policy.name}'",
+                        subject=cls["name"],
+                        category=f"naming_policy_{naming_policy.name}",
+                    ))
 
         return issues
 
     # ─── Normalization ───────────────────────────────────────────────────
 
-    def normalize_names(self, fabric_iq: bool = True) -> dict[str, str]:
-        """Normalize class and property names. Returns mapping of old → new names."""
+    def normalize_names(
+        self,
+        naming_policy: NamingPolicy | None = None,
+    ) -> dict[str, str]:
+        """Normalize class and property names per a naming policy.
+
+        Args:
+            naming_policy: Policy to enforce. If None, no normalization.
+
+        Returns:
+            Mapping of old → new names for renamed classes.
+        """
         renames: dict[str, str] = {}
-        if not fabric_iq:
+        if naming_policy is None:
             return renames
 
         for cls in self.get_classes():
-            if not is_fabric_iq_compliant(cls["name"]):
-                new_name = normalize_to_fabric_iq(cls["name"])
+            if not naming_policy.is_compliant(cls["name"]):
+                new_name = naming_policy.normalize(cls["name"])
                 if new_name != cls["name"]:
                     renames[cls["name"]] = new_name
 

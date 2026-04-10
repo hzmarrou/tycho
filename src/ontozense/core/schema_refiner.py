@@ -35,11 +35,26 @@ class RefinementReport:
 
 
 class SchemaRefiner:
-    """Refines an extracted ontology using a database schema."""
+    """Refines an extracted ontology using a database schema.
 
-    def __init__(self, schema: SchemaResult, extraction: ExtractionResult):
+    Domain-agnostic. To improve matching for a specific domain, pass a
+    `synonym_map` that maps concept names (extracted from documents) to
+    schema model names (from the database). The synonym map is the only
+    domain-specific input — the matcher itself is generic.
+
+    Example synonym_map (terms shaped like {extracted_name: schema_table_name}):
+        {"client": "customer", "purchase": "order", ...}
+    """
+
+    def __init__(
+        self,
+        schema: SchemaResult,
+        extraction: ExtractionResult,
+        synonym_map: dict[str, str] | None = None,
+    ):
         self.schema = schema
         self.extraction = extraction
+        self.synonym_map = synonym_map or {}
         # Build lookup maps
         self._concept_map: dict[str, dict] = {}
         for c in extraction.concepts:
@@ -192,32 +207,6 @@ class SchemaRefiner:
 
     # ─── Matching logic ──────────────────────────────────────────────────
 
-    # Known synonyms: concept term → model name
-    SYNONYM_MAP: dict[str, str] = {
-        "borrower": "counterparty",
-        "borrowers": "counterparty",
-        "counterparties": "counterparty",
-        "debtor": "counterparty",
-        "obligor": "counterparty",
-        "loans": "loan",
-        "loan": "loan",
-        "credit": "loan",
-        "exposure": "loan",
-        "exposures": "loan",
-        "collateral": "propertycollateral",
-        "property collateral": "propertycollateral",
-        "non property collateral": "nonpropertycollateral",
-        "guarantee": "nonpropertycollateral",
-        "forbearance": "forbearance",
-        "forborne": "forbearance",
-        "enforcement": "enforcement",
-        "external collection": "externalcollection",
-        "collection": "externalcollection",
-        "counterparty group": "counterpartygroup",
-        "group": "counterpartygroup",
-        "portfolio": "portfolio",
-    }
-
     def _match_models_to_concepts(self) -> dict[str, str]:
         """Match schema models to extracted concepts by name similarity.
 
@@ -235,8 +224,8 @@ class SchemaRefiner:
                 concept_norm = self._normalize(concept["name"])
                 score = self._match_score(model_norm, concept_norm)
 
-                # Also check synonyms
-                synonym_target = self.SYNONYM_MAP.get(concept_norm)
+                # Also check user-supplied synonym map
+                synonym_target = self.synonym_map.get(concept_norm)
                 if synonym_target and self._normalize(synonym_target) == model_norm.replace(" ", ""):
                     score = max(score, 0.9)
 
@@ -253,7 +242,7 @@ class SchemaRefiner:
         """Score how well two normalized names match."""
         if a == b:
             return 1.0
-        # Remove spaces for compound name comparison (e.g. "counterparty" vs "counter party")
+        # Remove spaces for compound name comparison (e.g. "linecount" vs "line count")
         a_compact = a.replace(" ", "")
         b_compact = b.replace(" ", "")
         if a_compact == b_compact:
@@ -282,7 +271,7 @@ class SchemaRefiner:
         mn = self._normalize(model_name)
         if self._match_score(cn, mn) >= 0.4:
             return True
-        synonym_target = self.SYNONYM_MAP.get(cn)
+        synonym_target = self.synonym_map.get(cn)
         if synonym_target and self._normalize(synonym_target) == mn.replace(" ", ""):
             return True
         return False

@@ -26,6 +26,31 @@ def extraction():
     return load_existing_extraction(path)
 
 
+# NPL-domain synonym map used by tests. The engine itself is generic — this
+# map is supplied by the test (representing what a user of Ontozense would
+# configure for their specific domain).
+NPL_SYNONYMS = {
+    "borrower": "counterparty",
+    "borrowers": "counterparty",
+    "counterparties": "counterparty",
+    "debtor": "counterparty",
+    "obligor": "counterparty",
+    "loans": "loan",
+    "credit": "loan",
+    "exposure": "loan",
+    "exposures": "loan",
+    "collateral": "propertycollateral",
+    "property collateral": "propertycollateral",
+    "non property collateral": "nonpropertycollateral",
+    "guarantee": "nonpropertycollateral",
+    "forborne": "forbearance",
+    "external collection": "externalcollection",
+    "collection": "externalcollection",
+    "counterparty group": "counterpartygroup",
+    "group": "counterpartygroup",
+}
+
+
 class TestDjangoSchemaParser:
     def test_parses_all_models(self, schema):
         model_names = {m.name for m in schema.models}
@@ -77,7 +102,7 @@ class TestSchemaRefiner:
     def test_refinement_produces_valid_playground_format(self, schema, extraction):
         from ontozense.core.schema_refiner import SchemaRefiner
 
-        refiner = SchemaRefiner(schema, extraction)
+        refiner = SchemaRefiner(schema, extraction, synonym_map=NPL_SYNONYMS)
         ontology, report = refiner.refine()
 
         ont = ontology["ontology"]
@@ -97,7 +122,7 @@ class TestSchemaRefiner:
     def test_matching_finds_key_entities(self, schema, extraction):
         from ontozense.core.schema_refiner import SchemaRefiner
 
-        refiner = SchemaRefiner(schema, extraction)
+        refiner = SchemaRefiner(schema, extraction, synonym_map=NPL_SYNONYMS)
         _, report = refiner.refine()
 
         matched_models = {m for _, m in report.matched_entities}
@@ -107,7 +132,7 @@ class TestSchemaRefiner:
     def test_enums_populated(self, schema, extraction):
         from ontozense.core.schema_refiner import SchemaRefiner
 
-        refiner = SchemaRefiner(schema, extraction)
+        refiner = SchemaRefiner(schema, extraction, synonym_map=NPL_SYNONYMS)
         _, report = refiner.refine()
 
         assert report.enums_populated > 20  # Many choice fields across models
@@ -124,7 +149,7 @@ class TestSchemaRefiner:
         unrefined = PlaygroundExporter(mgr).export()
 
         # Refined: schema-grounded
-        refiner = SchemaRefiner(schema, extraction)
+        refiner = SchemaRefiner(schema, extraction, synonym_map=NPL_SYNONYMS)
         refined, _ = refiner.refine()
 
         unrefined_count = len(unrefined["ontology"]["entityTypes"])

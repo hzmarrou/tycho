@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,7 +24,7 @@ id: http://w3id.org/ontogpt/domain_ontology
 name: domain_ontology
 title: Domain Ontology Extraction Template
 description: >-
-  Extract domain concepts, their definitions, and relationships from regulatory
+  Extract domain concepts, their definitions, and relationships from authoritative domain
   or policy documents to build a domain ontology.
 license: https://creativecommons.org/publicdomain/zero/1.0/
 prefixes:
@@ -229,9 +230,17 @@ class OntoGPTExtractor:
         return Path(temp.name)
 
     def _run_ontogpt(self, input_path: Path, template_path: Path) -> str:
-        """Run OntoGPT CLI extraction."""
+        """Run OntoGPT CLI extraction.
+
+        Azure OpenAI auth is passed via explicit --api-base / --api-version
+        CLI flags plus the AZURE_API_KEY env var. This avoids the unreliable
+        runoak/oaklib keyring path and works with both the legacy
+        '<resource>.openai.azure.com' and the new Foundry-style
+        '<resource>.cognitiveservices.azure.com' endpoints.
+        """
+        ontogpt_exe = self._resolve_ontogpt_executable()
         cmd = [
-            "ontogpt", "extract",
+            ontogpt_exe, "extract",
             "-i", str(input_path),
             "-t", str(template_path),
             "-m", self.model,
@@ -239,18 +248,40 @@ class OntoGPTExtractor:
         ]
 
         env = os.environ.copy()
-        # Ensure Azure OpenAI env vars are passed through
-        for key in ("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT",
-                     "AZURE_OPENAI_API_VERSION", "AZURE_OPENAI_CHAT_DEPLOYMENT"):
-            if key in os.environ:
-                env[key] = os.environ[key]
+        # If the user provided AZURE_OPENAI_* env vars (the newer naming),
+        # alias them to the legacy AZURE_API_* names that litellm reads,
+        # and pass --api-base / --api-version explicitly to OntoGPT.
+        api_key = (
+            os.environ.get("AZURE_API_KEY")
+            or os.environ.get("AZURE_OPENAI_API_KEY")
+        )
+        api_base = (
+            os.environ.get("AZURE_API_BASE")
+            or os.environ.get("AZURE_OPENAI_ENDPOINT", "").rstrip("/") or None
+        )
+        api_version = (
+            os.environ.get("AZURE_API_VERSION")
+            or os.environ.get("AZURE_OPENAI_API_VERSION")
+        )
+
+        if api_key:
+            env["AZURE_API_KEY"] = api_key
+            # litellm fallback — some code paths read OPENAI_API_KEY when
+            # routing through Azure with explicit api_base
+            env["OPENAI_API_KEY"] = api_key
+        if api_base:
+            env["AZURE_API_BASE"] = api_base
+            cmd.extend(["--api-base", api_base])
+        if api_version:
+            env["AZURE_API_VERSION"] = api_version
+            cmd.extend(["--api-version", api_version])
 
         try:
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=300,  # 5 min timeout for LLM calls
+                timeout=600,  # 10 min timeout for long documents
                 env=env,
             )
             if result.returncode != 0:
@@ -258,8 +289,30 @@ class OntoGPTExtractor:
             return result.stdout
         except FileNotFoundError:
             raise RuntimeError(
-                "OntoGPT not found. Install it with: pip install ontogpt"
+                f"OntoGPT executable not found at: {ontogpt_exe}\n"
+                f"Install it with: {sys.executable} -m pip install ontogpt"
             )
+
+    @staticmethod
+    def _resolve_ontogpt_executable() -> str:
+        """Find the ontogpt executable in the same venv as the running Python.
+
+        On Windows, scripts live in <venv>/Scripts/; on Unix in <venv>/bin/.
+        Falls back to bare 'ontogpt' if not found in the venv (PATH lookup).
+        """
+        import shutil
+        # Same directory as the running Python interpreter
+        python_dir = Path(sys.executable).parent
+        for candidate_name in ("ontogpt.exe", "ontogpt"):
+            candidate = python_dir / candidate_name
+            if candidate.exists():
+                return str(candidate)
+        # Fall back to PATH lookup
+        on_path = shutil.which("ontogpt")
+        if on_path:
+            return on_path
+        # Last resort: bare name (will fail with a clear error)
+        return "ontogpt"
 
     def _parse_output(self, raw_output: str) -> ExtractionResult:
         """Parse OntoGPT JSON output into ExtractionResult."""

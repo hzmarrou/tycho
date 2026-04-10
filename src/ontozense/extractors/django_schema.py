@@ -316,20 +316,12 @@ class DjangoSchemaParser:
         return kwargs
 
 
-def parse_openNPL(models_dir: str | Path | None = None) -> SchemaResult:
-    """Convenience function to parse the OpenNPL Django models."""
-    if models_dir is None:
-        # Try common locations
-        candidates = [
-            Path(__file__).parent.parent.parent.parent / "openNPL" / "npl_portfolio",
-            Path.home() / "openNPL" / "npl_portfolio",
-        ]
-        for candidate in candidates:
-            if candidate.exists():
-                models_dir = candidate
-                break
-        if models_dir is None:
-            raise FileNotFoundError("OpenNPL npl_portfolio directory not found")
+def parse_django_app(models_dir: str | Path) -> SchemaResult:
+    """Convenience function to parse a Django app's models directory.
 
+    Args:
+        models_dir: Path to a Django app directory containing model files
+            (one model class per .py file or a single models.py).
+    """
     parser = DjangoSchemaParser(models_dir)
     return parser.parse()
