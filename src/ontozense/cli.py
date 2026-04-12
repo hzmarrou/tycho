@@ -527,6 +527,129 @@ def extract_a(
         raise typer.Exit(code=3)
 
 
+# ─── suggest-bridges (LLM-suggested bridging for structural gaps) ────────────
+
+
+@app.command(name="suggest-bridges")
+def suggest_bridges_cmd(
+    fused_json: Path = typer.Argument(
+        ...,
+        help="Path to a fused dictionary JSON (output of the fuse command).",
+    ),
+    output: Path = typer.Option(
+        None, "--output", "-o",
+        help="Save suggestions as a markdown file (for file-back).",
+    ),
+    model: str = typer.Option(
+        "azure/gpt-5.4", "--model", "-m",
+        help="LLM model for litellm (e.g. 'azure/gpt-5.4', 'openai/gpt-4o').",
+    ),
+    domain_dir: Path = typer.Option(
+        None, "--domain-dir",
+        help="Per-domain knowledge base directory for audit log and auto file-back.",
+    ),
+) -> None:
+    """Suggest bridging concepts for structural gaps using an LLM.
+
+    First runs structural gap analysis from the lint layer. For each
+    gap found, constructs a targeted prompt with the two disconnected
+    clusters and their definitions, then asks the LLM to suggest
+    bridging relationships.
+
+    Output is markdown suitable for ``ontozense file-back``.
+    """
+    import json
+    from .core.lint import _build_concept_graph, _find_structural_holes
+    from .core.bridging import suggest_bridges, format_suggestions_markdown
+    from .log import append_log
+
+    _load_env()
+
+    if not fused_json.exists():
+        console.print(f"[red]File not found:[/] {fused_json}")
+        raise typer.Exit(code=1)
+
+    raw = json.loads(fused_json.read_text(encoding="utf-8"))
+    fusion_result = _reconstruct_fusion_result(raw)
+
+    # Build graph and find structural holes
+    if len(fusion_result.relationships) == 0:
+        console.print("[yellow]No relationships in the fused output — "
+                      "structural gap analysis requires relationships.[/]")
+        raise typer.Exit(code=0)
+
+    G = _build_concept_graph(fusion_result)
+    if len(G.nodes) < 3:
+        console.print("[yellow]Too few elements for structural analysis.[/]")
+        raise typer.Exit(code=0)
+
+    import networkx as nx
+    from networkx.algorithms.community import greedy_modularity_communities
+
+    communities = list(greedy_modularity_communities(G))
+    holes = _find_structural_holes(G, communities)
+
+    if not holes:
+        console.print("[bold green]No structural gaps found — "
+                      "the knowledge graph is well-connected.[/]")
+        raise typer.Exit(code=0)
+
+    console.print(
+        f"[bold magenta]Found {len(holes)} structural gap(s). "
+        f"Asking LLM for bridging suggestions...[/]"
+    )
+
+    # Build definitions dict for the prompt
+    element_definitions = {
+        el.element_name: el.definition
+        for el in fusion_result.elements
+    }
+
+    # Convert holes to (community_a, community_b) pairs
+    hole_pairs = [(a, b) for a, b, _, _ in holes]
+
+    try:
+        suggestions = suggest_bridges(
+            hole_pairs, element_definitions, model=model,
+        )
+    except Exception as e:
+        error_msg = str(e)
+        if "auth" in error_msg.lower() or "api" in error_msg.lower():
+            console.print(
+                f"[red]LLM authentication failed.[/] Check your API key.\n"
+                f"  Set AZURE_API_KEY in .env (or the key your model requires).\n"
+                f"  Error: {error_msg}"
+            )
+        else:
+            console.print(f"[red]LLM call failed:[/] {error_msg}")
+        raise typer.Exit(code=1)
+
+    md = format_suggestions_markdown(suggestions)
+    console.print()
+    console.print(md)
+
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(md, encoding="utf-8")
+        console.print(f"[bold green]Saved:[/] {output}")
+
+        if domain_dir:
+            from .core.fileback import file_back
+            dest = file_back(output, domain_dir, category="analyses")
+            console.print(
+                f"[bold green]Filed back:[/] {dest.relative_to(domain_dir)}"
+            )
+
+    if domain_dir:
+        append_log(
+            domain_dir, "suggest-bridges",
+            source=fused_json.name,
+            gaps=len(holes),
+            suggestions=len(suggestions),
+            model=model,
+        )
+
+
 # ─── query (Step 8: look up elements in fused output) ────────────────────────
 
 

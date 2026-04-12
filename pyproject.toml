@@ -20,6 +20,7 @@ dependencies = [
     "psycopg2-binary>=2.9",
     "sqlglot>=25.0",
     "networkx>=3.2",
+    "litellm>=1.40",
 ]
 
 [project.optional-dependencies]
