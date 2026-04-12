@@ -88,6 +88,7 @@ def lint(result: FusionResult) -> LintReport:
     _check_orphan_terms(result, report)
     _check_undefined_used(result, report)
     _check_coverage_gaps(result, report)
+    _check_structural_gaps(result, report)
 
     return report
 
@@ -195,3 +196,151 @@ def _check_coverage_gaps(result: FusionResult, report: LintReport) -> None:
                     details={"missing_fields": missing},
                 )
             )
+
+
+# ─── Structural gap analysis (networkx) ─────────────────────────────────────
+
+
+def _build_concept_graph(result: FusionResult):
+    """Build an undirected weighted graph from fused relationships.
+
+    Nodes = element names (normalised). Edges = relationships, weighted
+    by confidence. Element definitions are stored as node attributes
+    so the downstream bridging module can include them in LLM prompts.
+
+    Returns a networkx.Graph. Imported lazily to avoid paying the import
+    cost when the graph check isn't needed.
+    """
+    import networkx as nx
+
+    G = nx.Graph()
+
+    # Add all elements as nodes (ensures orphans appear in the graph)
+    for el in result.elements:
+        key = normalise_name(el.element_name)
+        G.add_node(key, label=el.element_name, definition=el.definition)
+
+    # Add edges from relationships
+    for rel in result.relationships:
+        src = normalise_name(rel.subject)
+        tgt = normalise_name(rel.object)
+        if src in G and tgt in G and src != tgt:
+            G.add_edge(src, tgt, weight=rel.confidence, predicate=rel.predicate)
+
+    return G
+
+
+def _find_structural_holes(
+    G,
+    communities: list,
+    hole_threshold: float = 0.05,
+) -> list[tuple[list[str], list[str], int, float]]:
+    """Find pairs of communities with weak or no cross-connections.
+
+    A structural hole exists when the ratio of actual cross-edges to
+    possible cross-edges between two communities is below the threshold.
+
+    Returns a list of (community_a_labels, community_b_labels,
+    cross_edge_count, density) tuples. Labels are the original
+    (non-normalised) element names read from node attributes.
+    """
+    holes = []
+    community_list = [set(c) for c in communities]
+
+    for i in range(len(community_list)):
+        for j in range(i + 1, len(community_list)):
+            ci, cj = community_list[i], community_list[j]
+            cross = sum(
+                1 for u in ci for v in cj if G.has_edge(u, v)
+            )
+            possible = len(ci) * len(cj)
+            density = cross / possible if possible > 0 else 0.0
+
+            if density < hole_threshold:
+                labels_i = sorted(G.nodes[n].get("label", n) for n in ci)
+                labels_j = sorted(G.nodes[n].get("label", n) for n in cj)
+                holes.append((labels_i, labels_j, cross, density))
+
+    return holes
+
+
+def _check_structural_gaps(
+    result: FusionResult,
+    report: LintReport,
+    *,
+    min_communities: int = 2,
+    hole_threshold: float = 0.05,
+) -> None:
+    """Detect structural gaps using graph community detection.
+
+    Builds a concept graph from relationships, runs community detection,
+    computes betweenness centrality for bridge concepts, and identifies
+    structural holes between weakly-connected communities.
+    """
+    import networkx as nx
+    from networkx.algorithms.community import greedy_modularity_communities
+
+    # Need enough structure for meaningful analysis
+    if len(result.relationships) == 0:
+        return
+    G = _build_concept_graph(result)
+    if len(G.nodes) < 3:
+        return
+
+    # Community detection
+    communities = list(greedy_modularity_communities(G))
+    if len(communities) < min_communities:
+        return
+
+    # Structural holes
+    holes = _find_structural_holes(G, communities, hole_threshold)
+    for labels_a, labels_b, cross, density in holes:
+        a_str = ", ".join(labels_a[:5])
+        b_str = ", ".join(labels_b[:5])
+        if len(labels_a) > 5:
+            a_str += f" (+{len(labels_a) - 5} more)"
+        if len(labels_b) > 5:
+            b_str += f" (+{len(labels_b) - 5} more)"
+
+        report.findings.append(
+            LintFinding(
+                category="structural_gap",
+                severity="warning",
+                element_name="",
+                message=(
+                    f"Communities {{{a_str}}} and {{{b_str}}} have "
+                    f"{'no' if cross == 0 else f'only {cross}'} "
+                    f"cross-connection(s) (density {density:.2f}). "
+                    f"Consider adding bridging relationships."
+                ),
+                details={
+                    "community_a": labels_a,
+                    "community_b": labels_b,
+                    "cross_edges": cross,
+                    "density": density,
+                },
+            )
+        )
+
+    # Bridge concepts (high betweenness centrality)
+    if len(G.edges) > 0:
+        centrality = nx.betweenness_centrality(G, weight="weight")
+        threshold = 1.0 / max(len(G.nodes) - 1, 1)
+        for node, score in sorted(centrality.items(), key=lambda x: -x[1]):
+            if score > threshold:
+                label = G.nodes[node].get("label", node)
+                report.findings.append(
+                    LintFinding(
+                        category="structural_gap",
+                        severity="info",
+                        element_name=label,
+                        message=(
+                            f"'{label}' is a bridge concept "
+                            f"(betweenness centrality {score:.2f}). "
+                            f"It connects otherwise separate concept clusters."
+                        ),
+                        details={
+                            "centrality": round(score, 3),
+                        },
+                    )
+                )

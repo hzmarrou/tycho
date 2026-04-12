@@ -37,13 +37,16 @@ class TestRealGovernanceFile:
         if not REAL_EXAMPLE.exists():
             pytest.skip("governance_example.json not found")
         result = extractor.extract_from_file(REAL_EXAMPLE)
-        assert len(result.records) == 1
-        assert result.records[0].element_name == "Default"
+        assert len(result.records) == 18
+        assert result.records[0].element_name == "Borrower"
         assert result.records[0].domain_name == "Risk Management"
         assert result.records[0].is_critical is True
-        assert result.records[0].definition.startswith("Default is a status")
-        assert "Collibra" in result.records[0].citation
+        assert "data marketplace" in result.records[0].citation
         assert result.records[0].confidence == 0.95
+        # Check a non-critical entry
+        receiver = result.get_record("Receiver")
+        assert receiver is not None
+        assert receiver.is_critical is False
 
 
 # ─── Single object vs array ─────────────────────────────────────────────────

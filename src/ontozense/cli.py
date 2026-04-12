@@ -766,7 +766,7 @@ def lint(
         console.print("[bold green]No issues found.[/]")
     else:
         # Group by category
-        for category in ["contradiction", "undefined_used", "orphan", "coverage_gap"]:
+        for category in ["contradiction", "undefined_used", "orphan", "coverage_gap", "structural_gap"]:
             findings = report.by_category(category)
             if not findings:
                 continue
@@ -775,12 +775,14 @@ def lint(
                 "undefined_used": "Undefined but used",
                 "orphan": "Orphan terms",
                 "coverage_gap": "Coverage gaps",
+                "structural_gap": "Structural gaps",
             }[category]
             color = {
                 "contradiction": "red",
                 "undefined_used": "yellow",
                 "orphan": "cyan",
                 "coverage_gap": "yellow",
+                "structural_gap": "magenta",
             }[category]
             console.print(f"[bold {color}]{label} ({len(findings)}):[/]")
             for f in findings:
