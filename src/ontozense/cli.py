@@ -527,6 +527,160 @@ def extract_a(
         raise typer.Exit(code=3)
 
 
+# ─── lint (Step 7: consistency check on fused output) ────────────────────────
+
+
+@app.command()
+def lint(
+    fused_json: Path = typer.Argument(
+        ...,
+        help="Path to a fused dictionary JSON (output of the fuse command).",
+    ),
+    domain_dir: Path = typer.Option(
+        None, "--domain-dir",
+        help="Per-domain knowledge base directory for audit log.",
+    ),
+) -> None:
+    """Run consistency checks on a fused data dictionary.
+
+    Checks for contradictions between sources, orphan terms not
+    referenced by any relationship, undefined relationship endpoints,
+    and coverage gaps (missing definitions or citations).
+    """
+    import json
+    from .core.fusion import (
+        FusedElement,
+        FusedRelationship,
+        FieldConflict,
+        FieldProvenance,
+        FusionResult,
+    )
+    from .core.lint import lint as run_lint
+    from .log import append_log
+
+    if not fused_json.exists():
+        console.print(f"[red]File not found:[/] {fused_json}")
+        raise typer.Exit(code=1)
+
+    raw = json.loads(fused_json.read_text(encoding="utf-8"))
+
+    # Reconstruct a FusionResult from the JSON
+    elements = []
+    for re_ in raw.get("elements", []):
+        el = FusedElement(
+            element_name=re_.get("element_name", ""),
+            domain_name=re_.get("domain_name", ""),
+            definition=re_.get("definition", ""),
+            is_critical=re_.get("is_critical", False),
+            citation=re_.get("citation", ""),
+            data_type=re_.get("data_type", ""),
+            enum_values=re_.get("enum_values", []),
+            business_rules=re_.get("business_rules", []),
+            extra_fields=re_.get("extra_fields", {}),
+            sources=re_.get("sources", []),
+            governance_validated=re_.get("governance_validated", False),
+            confidence=re_.get("confidence", 0.0),
+        )
+        # Reconstruct conflicts
+        for rc in re_.get("conflicts", []):
+            w = rc.get("winner", {})
+            el.conflicts.append(FieldConflict(
+                field_name=rc.get("field", ""),
+                winner=FieldProvenance(
+                    source=w.get("source", ""),
+                    confidence=0.0,
+                    original_value=w.get("value", ""),
+                ),
+                rejected=[
+                    FieldProvenance(
+                        source=rj.get("source", ""),
+                        confidence=0.0,
+                        original_value=rj.get("value", ""),
+                    )
+                    for rj in rc.get("rejected", [])
+                ],
+                resolution=rc.get("resolution", ""),
+            ))
+        elements.append(el)
+
+    relationships = []
+    for rr in raw.get("relationships", []):
+        relationships.append(FusedRelationship(
+            subject=rr.get("subject", ""),
+            predicate=rr.get("predicate", ""),
+            object=rr.get("object", ""),
+            source=rr.get("source", ""),
+            confidence=rr.get("confidence", 0.0),
+        ))
+
+    fusion_result = FusionResult(
+        elements=elements,
+        relationships=relationships,
+        sources_used=raw.get("sources_used", []),
+        fusion_timestamp=raw.get("fusion_timestamp", ""),
+    )
+
+    # Run lint
+    report = run_lint(fusion_result)
+
+    # Display results
+    console.print()
+    console.print(f"[bold]Lint report for[/] {fused_json.name}")
+    console.print(
+        f"  Elements: {len(elements)}   "
+        f"Relationships: {len(relationships)}   "
+        f"Sources: {'+'.join(fusion_result.sources_used)}"
+    )
+    console.print()
+
+    if not report.findings:
+        console.print("[bold green]No issues found.[/]")
+    else:
+        # Group by category
+        for category in ["contradiction", "undefined_used", "orphan", "coverage_gap"]:
+            findings = report.by_category(category)
+            if not findings:
+                continue
+            label = {
+                "contradiction": "Contradictions",
+                "undefined_used": "Undefined but used",
+                "orphan": "Orphan terms",
+                "coverage_gap": "Coverage gaps",
+            }[category]
+            color = {
+                "contradiction": "red",
+                "undefined_used": "yellow",
+                "orphan": "cyan",
+                "coverage_gap": "yellow",
+            }[category]
+            console.print(f"[bold {color}]{label} ({len(findings)}):[/]")
+            for f in findings:
+                icon = {"error": "x", "warning": "!", "info": "-"}[f.severity]
+                console.print(f"  [{f.severity}] {icon} {f.message}")
+            console.print()
+
+    summary = report.summary
+    console.print(
+        f"[bold]Summary:[/] "
+        f"{report.error_count} errors, "
+        f"{report.warning_count} warnings, "
+        f"{len(report.findings) - report.error_count - report.warning_count} info"
+    )
+
+    if domain_dir:
+        append_log(
+            domain_dir, "lint",
+            source=fused_json.name,
+            **{k: v for k, v in summary.items()},
+            errors=report.error_count,
+            warnings=report.warning_count,
+        )
+
+    # Exit code reflects lint severity
+    if report.error_count > 0:
+        raise typer.Exit(code=1)
+
+
 # ─── fuse (Step 6: combine sources into rich data dictionary) ────────────────
 
 
