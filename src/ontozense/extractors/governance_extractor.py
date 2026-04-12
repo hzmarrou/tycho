@@ -1,101 +1,71 @@
 """Governance extractor — Source B of the four-source pipeline.
 
-**STATUS: TBD scaffold.** This module declares the dataclasses and the
-public API surface for Source B but the parser implementation is left as a
-placeholder for the next iteration. The shape is locked so the fusion
-layer (Step 6) can be designed against it.
+Source B reads a curated governance reference file (JSON) that contains
+canonical terms with their definitions, criticality flags, and citations
+to authoritative systems (Collibra, A-LEX, OpenMetadata, etc.).
 
-Source B reads governance / data quality dictionaries that have been
-converted to the canonical CSV format defined in
-``docs/CANONICAL_GOVERNANCE_FORMAT.md``. The contract:
+Its role in the pipeline is **validation, not extraction**: the fusion
+layer uses Source B to confirm that concepts extracted by Source A
+(domain documents) actually exist in the governance system, to prefer
+governance definitions when they're richer, and to flag governance-only
+terms that Source A missed.
 
-  - Input: ONE CSV file in canonical format
-  - Output: ``GovernanceExtractionResult`` with one ``GovernanceRecord``
-    per data row
-  - No Excel reading, no fuzzy header matching, no LLM
-  - Customer is responsible for converting their existing dictionaries to
-    the canonical format before upload
+Source B is **optional**. The fusion layer works without it — concepts
+from Source A simply won't have governance validation.
 
-Why this is a separate Source from A:
+Input format: a JSON file containing either a single object or an array
+of objects. Each object has ``element_name`` (required) plus optional
+fields (``domain_name``, ``definition``, ``is_critical``, ``citation``).
+Any extra fields are preserved in ``extra_fields``.
 
-  - Source A extracts from prose (regulations, policies, papers) using an
-    LLM. Output has confidence scores reflecting how grounded the LLM
-    extractions are in the source text.
-  - Source B reads structured tabular data the human already produced.
-    Confidence is uniformly high (the human typed it; we just parse it).
-    No hallucination risk.
+Example input::
 
-The fusion layer (Step 6) will merge Source A and Source B records on the
-``element_name`` field, taking governance fields (criticality, M/O, DQ
-rules) from Source B because Source A can rarely extract those reliably
-from prose.
+    [
+      {
+        "domain_name": "Customer Management",
+        "element_name": "Customer Identifier",
+        "definition": "A unique alphanumeric code assigned to each customer record.",
+        "is_critical": true,
+        "citation": "Collibra, OpenMetadata"
+      }
+    ]
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 
-# ─── Canonical column names ──────────────────────────────────────────────────
-#
-# These are the ONLY column names Source B accepts. Customers convert their
-# existing dictionaries to a CSV with these column headers (case-insensitive,
-# leading/trailing whitespace ignored). See
-# ``docs/CANONICAL_GOVERNANCE_FORMAT.md`` for the full spec.
-
-REQUIRED_COLUMNS = ("element_name",)
-
-OPTIONAL_COLUMNS = (
-    "domain",
-    "sub_domain",
+# The fields we recognise and map to typed GovernanceRecord attributes.
+# Anything else the JSON contains gets carried in extra_fields.
+KNOWN_FIELDS = frozenset({
+    "element_name",
+    "domain_name",
     "definition",
-    "term_definition",
     "is_critical",
-    "mandatory_optional",
     "citation",
-    "dq_completeness",
-    "dq_accuracy",
-    "dq_uniqueness",
-    "dq_timeliness",
-    "dq_consistency",
-    "dq_validity",
-)
-
-CANONICAL_COLUMNS = REQUIRED_COLUMNS + OPTIONAL_COLUMNS
-
-
-# ─── Dataclasses ─────────────────────────────────────────────────────────────
+})
 
 
 @dataclass
 class GovernanceRecord:
-    """One row from a canonical governance CSV.
+    """One governance entry from the curated reference file.
 
-    Confidence is uniformly 0.95 because Source B reads structured input the
-    human already produced — there is no LLM judgment, no hallucination risk.
-    The 0.95 (rather than 1.0) leaves a small margin for "the human might
-    have made a typo," which is the only realistic failure mode.
+    Confidence is uniformly 0.95 because Source B reads structured input
+    the human already curated — no LLM judgment, no hallucination risk.
     """
     element_name: str
-    domain: str = ""
-    sub_domain: str = ""
+    domain_name: str = ""
     definition: str = ""
-    term_definition: str = ""
-    is_critical: str = ""
-    mandatory_optional: str = ""
+    is_critical: bool = False
     citation: str = ""
-    dq_completeness: str = ""
-    dq_accuracy: str = ""
-    dq_uniqueness: str = ""
-    dq_timeliness: str = ""
-    dq_consistency: str = ""
-    dq_validity: str = ""
+    extra_fields: dict[str, Any] = field(default_factory=dict)
     source_file: str = ""
-    source_row_number: int = 0  # 1-indexed row in the CSV
-    confidence: float = 0.95  # uniform; structured human input
+    confidence: float = 0.95
 
     def needs_review(self, threshold: float = 0.7) -> bool:
         return self.confidence < threshold
@@ -103,7 +73,7 @@ class GovernanceRecord:
 
 @dataclass
 class GovernanceExtractionResult:
-    """Result of parsing one canonical governance CSV file."""
+    """Result of parsing a governance reference file."""
     source_file: str = ""
     records: list[GovernanceRecord] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -117,44 +87,76 @@ class GovernanceExtractionResult:
         return None
 
 
-# ─── Extractor ───────────────────────────────────────────────────────────────
-
-
 class GovernanceExtractor:
-    """Reads governance dictionaries in the canonical CSV format.
+    """Reads a curated governance reference file (JSON).
 
-    **STATUS: TBD scaffold.** Public API is locked so downstream callers
-    (the fusion layer) can be designed against it. Implementation is the
-    next iteration.
+    The input is a JSON file containing either a single object or an
+    array of objects. Each object must have at least ``element_name``.
     """
 
-    def __init__(self) -> None:
-        pass
-
-    def extract_from_file(self, file_path: str | Path) -> GovernanceExtractionResult:
-        """Parse a canonical governance CSV file.
-
-        Args:
-            file_path: Path to a CSV file in the canonical format defined
-                in ``docs/CANONICAL_GOVERNANCE_FORMAT.md``.
-
-        Returns:
-            A ``GovernanceExtractionResult`` with one record per valid data
-            row, plus per-row warnings for invalid rows.
-
-        Raises:
-            FileNotFoundError: if ``file_path`` does not exist.
-            NotImplementedError: until Step 4 implementation lands.
-        """
+    def extract_from_file(
+        self, file_path: str | Path
+    ) -> GovernanceExtractionResult:
         file_path = Path(file_path)
         if not file_path.exists():
-            raise FileNotFoundError(f"Governance CSV not found: {file_path}")
-        # TBD — actual parser implementation comes in the next iteration.
-        # The current placeholder returns an empty result with a warning so
-        # the fusion layer can be designed against the shape.
-        raise NotImplementedError(
-            "GovernanceExtractor is currently a TBD scaffold. The dataclasses "
-            "and public API are locked so the fusion layer can be designed "
-            "against this shape. Implementation lands in the next iteration. "
-            "See docs/CANONICAL_GOVERNANCE_FORMAT.md for the input contract."
+            raise FileNotFoundError(f"Governance file not found: {file_path}")
+
+        try:
+            raw = json.loads(file_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            return GovernanceExtractionResult(
+                source_file=str(file_path),
+                warnings=[f"Invalid JSON: {e}"],
+                extraction_timestamp=datetime.utcnow().isoformat(),
+            )
+
+        # Accept single object or array
+        entries = raw if isinstance(raw, list) else [raw]
+
+        result = GovernanceExtractionResult(
+            source_file=str(file_path),
+            extraction_timestamp=datetime.utcnow().isoformat(),
         )
+
+        for idx, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                result.warnings.append(
+                    f"Entry {idx}: expected an object, got {type(entry).__name__}"
+                )
+                continue
+
+            element_name = entry.get("element_name", "")
+            if not element_name or not str(element_name).strip():
+                result.warnings.append(
+                    f"Entry {idx}: missing or empty 'element_name', skipped"
+                )
+                continue
+
+            # Separate known fields from extras
+            extras = {
+                k: v for k, v in entry.items() if k not in KNOWN_FIELDS
+            }
+
+            # is_critical can be bool, string, or absent
+            is_critical_raw = entry.get("is_critical", False)
+            if isinstance(is_critical_raw, bool):
+                is_critical = is_critical_raw
+            elif isinstance(is_critical_raw, str):
+                is_critical = is_critical_raw.strip().lower() in (
+                    "true", "yes", "y", "1",
+                )
+            else:
+                is_critical = bool(is_critical_raw)
+
+            record = GovernanceRecord(
+                element_name=str(element_name).strip(),
+                domain_name=str(entry.get("domain_name", "")).strip(),
+                definition=str(entry.get("definition", "")).strip(),
+                is_critical=is_critical,
+                citation=str(entry.get("citation", "")).strip(),
+                extra_fields=extras,
+                source_file=str(file_path),
+            )
+            result.records.append(record)
+
+        return result

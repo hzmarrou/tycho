@@ -39,7 +39,7 @@ from ontozense.extractors.domain_doc_extractor import (
     Relationship,
 )
 from ontozense.extractors.governance_extractor import (
-    CANONICAL_COLUMNS,
+    KNOWN_FIELDS,
     GovernanceExtractionResult,
     GovernanceRecord,
 )
@@ -234,41 +234,39 @@ class TestSourceAContract:
 class TestSourceBContract:
     """Shape contract for Source B output.
 
-    The real extractor is a TBD scaffold (Step 4), but the dataclasses
-    are locked. We assert the invariants the scaffold guarantees so the
-    fusion layer can be designed against them.
+    Source B reads a curated JSON governance reference file. Its role is
+    validation: confirming that Source A concepts exist in the governance
+    system and providing canonical definitions, criticality flags, and
+    citations.
     """
 
     @pytest.fixture
     def sample_result(self) -> GovernanceExtractionResult:
         return GovernanceExtractionResult(
-            source_file="governance.csv",
+            source_file="governance.json",
             records=[
                 GovernanceRecord(
-                    element_name="customer_id",
-                    domain="Customer",
-                    sub_domain="Identification",
-                    is_critical="Y",
-                    mandatory_optional="M",
-                    dq_completeness="100",
-                    dq_accuracy="99.9",
-                    source_file="governance.csv",
-                    source_row_number=1,
+                    element_name="Default",
+                    domain_name="Risk Management",
+                    definition="Default is a status of a counterparty...",
+                    is_critical=True,
+                    citation="A-lex, Collibra, OpenMetadata",
+                    source_file="governance.json",
                     confidence=0.95,
                 ),
                 GovernanceRecord(
-                    element_name="email_address",
-                    source_file="governance.csv",
-                    source_row_number=2,
+                    element_name="Forbearance",
+                    domain_name="Risk Management",
+                    source_file="governance.json",
                     confidence=0.95,
                 ),
             ],
-            extraction_timestamp="2026-04-10T12:00:00",
+            extraction_timestamp="2026-04-12T12:00:00",
         )
 
-    def test_canonical_columns_include_element_name(self):
+    def test_known_fields_include_element_name(self):
         """element_name is the primary key for fusion matching."""
-        assert "element_name" in CANONICAL_COLUMNS
+        assert "element_name" in KNOWN_FIELDS
 
     def test_every_record_has_non_empty_element_name(self, sample_result):
         for r in sample_result.records:
@@ -283,12 +281,9 @@ class TestSourceBContract:
                 r.confidence, f"GovernanceRecord {r.element_name!r}"
             )
 
-    def test_every_record_has_source_trace(self, sample_result):
+    def test_every_record_has_source_file(self, sample_result):
         for r in sample_result.records:
             assert r.source_file, f"{r.element_name!r}: empty source_file"
-            assert r.source_row_number > 0, (
-                f"{r.element_name!r}: source_row_number must be 1-indexed"
-            )
 
     def test_structured_source_confidence_matches_playbook(self, sample_result):
         """PLAYBOOK §3 STRUCTURED-SOURCE rule: structured sources score 0.95."""
@@ -296,6 +291,14 @@ class TestSourceBContract:
             assert r.confidence == 0.95, (
                 f"{r.element_name!r}: Source B records should score 0.95 "
                 f"per PLAYBOOK §3 STRUCTURED-SOURCE, got {r.confidence}"
+            )
+
+    def test_is_critical_is_bool(self, sample_result):
+        """is_critical must be a real boolean, not a string."""
+        for r in sample_result.records:
+            assert isinstance(r.is_critical, bool), (
+                f"{r.element_name!r}: is_critical should be bool, "
+                f"got {type(r.is_critical).__name__}"
             )
 
 

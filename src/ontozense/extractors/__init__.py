@@ -15,7 +15,7 @@ from .governance_extractor import (
     GovernanceExtractor,
     GovernanceExtractionResult,
     GovernanceRecord,
-    CANONICAL_COLUMNS,
+    KNOWN_FIELDS as GOVERNANCE_KNOWN_FIELDS,
 )
 from .code_extractor import (
     CodeExtractor,
@@ -38,11 +38,11 @@ __all__ = [
     "DefinitionMatch",
     "extract_definitions_from_text",
     "extract_definitions_from_file",
-    # Source B — governance extractor (TBD scaffold)
+    # Source B — governance extractor (JSON reference file)
     "GovernanceExtractor",
     "GovernanceExtractionResult",
     "GovernanceRecord",
-    "CANONICAL_COLUMNS",
+    "GOVERNANCE_KNOWN_FIELDS",
     # Source D — code extractor (deterministic layer)
     "CodeExtractor",
     "CodeExtractionResult",

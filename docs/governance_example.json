@@ -1,0 +1,7 @@
+{
+  "domain_name": "Risk Management",
+  "element_name": "Default",
+  "definition": "Default is a status of a counterparty, credit facility and/or product that is assigned when the counterparty is no longer able to meet its obligations or is (considered) unlikely to pay",
+  "is_critical": true,
+  "citation": "A-lex, Altlan, Collibra, OpenMetadata, etc."
+}
