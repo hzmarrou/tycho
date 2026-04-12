@@ -527,25 +527,39 @@ def extract_a(
         raise typer.Exit(code=3)
 
 
-# ─── lint (Step 7: consistency check on fused output) ────────────────────────
+# ─── query (Step 8: look up elements in fused output) ────────────────────────
 
 
 @app.command()
-def lint(
-    fused_json: Path = typer.Argument(
+def query(
+    term: str = typer.Argument(
         ...,
+        help="Element name to look up, or a search term to find matching elements.",
+    ),
+    fused_json: Path = typer.Option(
+        ..., "--fused", "-f",
         help="Path to a fused dictionary JSON (output of the fuse command).",
+    ),
+    output: Path = typer.Option(
+        None, "--output", "-o",
+        help="Save the query result as a markdown file (for file-back).",
     ),
     domain_dir: Path = typer.Option(
         None, "--domain-dir",
-        help="Per-domain knowledge base directory for audit log.",
+        help="Per-domain knowledge base directory. When combined with "
+             "--output, automatically files back the result.",
     ),
 ) -> None:
-    """Run consistency checks on a fused data dictionary.
+    """Query the fused data dictionary for an element or search term.
 
-    Checks for contradictions between sources, orphan terms not
-    referenced by any relationship, undefined relationship endpoints,
-    and coverage gaps (missing definitions or citations).
+    Looks up a single element by name (exact, case-insensitive) or
+    searches for all elements containing the term. Renders a rich
+    markdown view showing all fields, sources, conflicts, business
+    rules, and relationships.
+
+    With --output, saves the result as a markdown file. With both
+    --output and --domain-dir, automatically files it back into
+    <domain-dir>/derived/analyses/ and logs the operation.
     """
     import json
     from .core.fusion import (
@@ -555,7 +569,7 @@ def lint(
         FieldProvenance,
         FusionResult,
     )
-    from .core.lint import lint as run_lint
+    from .core.query import query_element, search_elements, render_search_results
     from .log import append_log
 
     if not fused_json.exists():
@@ -563,8 +577,92 @@ def lint(
         raise typer.Exit(code=1)
 
     raw = json.loads(fused_json.read_text(encoding="utf-8"))
+    fusion_result = _reconstruct_fusion_result(raw)
 
-    # Reconstruct a FusionResult from the JSON
+    # Try exact lookup first
+    md = query_element(fusion_result, term)
+    if md is None:
+        # Fall back to search
+        matches = search_elements(fusion_result, term)
+        if not matches:
+            console.print(f"[yellow]No elements found matching '{term}'.[/]")
+            raise typer.Exit(code=0)
+        md = render_search_results(matches, term, fusion_result)
+
+    console.print(md)
+
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(md, encoding="utf-8")
+        console.print(f"\n[bold green]Saved:[/] {output}")
+
+        # Auto file-back if domain-dir is also provided
+        if domain_dir:
+            from .core.fileback import file_back
+            dest = file_back(output, domain_dir, category="analyses")
+            console.print(
+                f"[bold green]Filed back:[/] {dest.relative_to(domain_dir)}"
+            )
+
+
+# ─── file-back (Step 8: save derived artifact) ──────────────────────────────
+
+
+@app.command(name="file-back")
+def file_back_cmd(
+    source_file: Path = typer.Argument(
+        ...,
+        help="The file to file back (markdown, CSV, Excel, ...).",
+    ),
+    domain_dir: Path = typer.Option(
+        ..., "--domain-dir",
+        help="Per-domain knowledge base directory.",
+    ),
+    category: str = typer.Option(
+        "analyses", "--category",
+        help="Sub-directory under derived/ (default: 'analyses').",
+    ),
+) -> None:
+    """File a derived artifact back into the domain knowledge base.
+
+    Copies the file to <domain-dir>/derived/<category>/<filename> and
+    appends a log entry. If a file with the same name already exists,
+    a timestamp suffix is added to avoid overwriting.
+
+    This is the Karpathy 'LLM Wiki' pattern: human-curated artifacts
+    (expert reviews, annotated comparisons, corrected definitions)
+    accumulate in the knowledge base alongside automated extractions.
+    """
+    from .core.fileback import file_back
+
+    if not source_file.exists():
+        console.print(f"[red]File not found:[/] {source_file}")
+        raise typer.Exit(code=1)
+
+    dest = file_back(source_file, domain_dir, category=category)
+    console.print(
+        f"[bold green]Filed back:[/] {dest.relative_to(domain_dir)}"
+    )
+    console.print(f"[dim]Log entry appended to {domain_dir / 'log.md'}[/]")
+
+
+# ─── Helper: reconstruct FusionResult from JSON ─────────────────────────────
+
+
+def _reconstruct_fusion_result(raw: dict) -> "FusionResult":
+    """Reconstruct a FusionResult from the fused JSON output.
+
+    Used by both the lint and query CLI commands. Centralised here to
+    avoid duplicating the reconstruction logic.
+    """
+    from .core.fusion import (
+        FusedElement,
+        FusedRelationship,
+        FieldConflict,
+        FieldProvenance,
+        FusionResult,
+    )
+
     elements = []
     for re_ in raw.get("elements", []):
         el = FusedElement(
@@ -581,7 +679,6 @@ def lint(
             governance_validated=re_.get("governance_validated", False),
             confidence=re_.get("confidence", 0.0),
         )
-        # Reconstruct conflicts
         for rc in re_.get("conflicts", []):
             w = rc.get("winner", {})
             el.conflicts.append(FieldConflict(
@@ -613,12 +710,44 @@ def lint(
             confidence=rr.get("confidence", 0.0),
         ))
 
-    fusion_result = FusionResult(
+    return FusionResult(
         elements=elements,
         relationships=relationships,
         sources_used=raw.get("sources_used", []),
         fusion_timestamp=raw.get("fusion_timestamp", ""),
     )
+
+
+# ─── lint (Step 7: consistency check on fused output) ────────────────────────
+
+
+@app.command()
+def lint(
+    fused_json: Path = typer.Argument(
+        ...,
+        help="Path to a fused dictionary JSON (output of the fuse command).",
+    ),
+    domain_dir: Path = typer.Option(
+        None, "--domain-dir",
+        help="Per-domain knowledge base directory for audit log.",
+    ),
+) -> None:
+    """Run consistency checks on a fused data dictionary.
+
+    Checks for contradictions between sources, orphan terms not
+    referenced by any relationship, undefined relationship endpoints,
+    and coverage gaps (missing definitions or citations).
+    """
+    import json
+    from .core.lint import lint as run_lint
+    from .log import append_log
+
+    if not fused_json.exists():
+        console.print(f"[red]File not found:[/] {fused_json}")
+        raise typer.Exit(code=1)
+
+    raw = json.loads(fused_json.read_text(encoding="utf-8"))
+    fusion_result = _reconstruct_fusion_result(raw)
 
     # Run lint
     report = run_lint(fusion_result)
@@ -627,8 +756,8 @@ def lint(
     console.print()
     console.print(f"[bold]Lint report for[/] {fused_json.name}")
     console.print(
-        f"  Elements: {len(elements)}   "
-        f"Relationships: {len(relationships)}   "
+        f"  Elements: {len(fusion_result.elements)}   "
+        f"Relationships: {len(fusion_result.relationships)}   "
         f"Sources: {'+'.join(fusion_result.sources_used)}"
     )
     console.print()
