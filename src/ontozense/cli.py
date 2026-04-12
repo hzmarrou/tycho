@@ -527,6 +527,249 @@ def extract_a(
         raise typer.Exit(code=3)
 
 
+# ─── fuse (Step 6: combine sources into rich data dictionary) ────────────────
+
+
+@app.command()
+def fuse(
+    source_a_json: Path = typer.Option(
+        None, "--source-a", "-a",
+        help="Source A extraction result (JSON from extract-a --json).",
+    ),
+    source_b_json: Path = typer.Option(
+        None, "--source-b", "-b",
+        help="Source B governance reference file (JSON).",
+    ),
+    source_c_dir: Path = typer.Option(
+        None, "--source-c", "-c",
+        help="Source C schema: path to a Django models directory.",
+    ),
+    source_d_dir: Path = typer.Option(
+        None, "--source-d", "-d",
+        help="Source D code: path to a directory of Python/SQL files.",
+    ),
+    output: Path = typer.Option(
+        "fused-dictionary.json",
+        "--output", "-o",
+        help="Output JSON file for the fused rich data dictionary.",
+    ),
+    domain_dir: Path = typer.Option(
+        None, "--domain-dir",
+        help="Per-domain knowledge base directory for audit log.",
+    ),
+    priority: str = typer.Option(
+        "A,B,C,D", "--priority",
+        help="Conflict resolution priority order (comma-separated).",
+    ),
+) -> None:
+    """Fuse Sources A, B, C, D into a rich data dictionary.
+
+    Takes extraction results from individual sources and combines them
+    into a single fused output with per-field provenance, governance
+    validation status, conflict detection, and confidence scoring.
+
+    At least one source must be provided. All sources are optional —
+    the minimum viable fusion is Source A alone.
+    """
+    import json
+    from dataclasses import asdict
+    from .core.fusion import FusionEngine
+    from .log import append_log
+
+    # ── Load sources ──
+    sa = sb = sc = sd = None
+
+    if source_a_json:
+        from .extractors.domain_doc_extractor import (
+            Concept,
+            DomainDocumentExtractionResult,
+            FieldConfidence,
+            Provenance,
+            Relationship,
+        )
+        raw = json.loads(source_a_json.read_text(encoding="utf-8"))
+        # Reconstruct from JSON (extract-a --json output)
+        concepts = []
+        for rc in raw.get("concepts", []):
+            c = Concept(
+                name=rc.get("name", ""),
+                definition=rc.get("definition", ""),
+                citation=rc.get("citation", ""),
+            )
+            for fc in rc.get("confidence", []):
+                c.confidence.append(FieldConfidence(
+                    fc.get("field_name", ""),
+                    fc.get("score", 0.0),
+                    fc.get("reason", ""),
+                ))
+            prov = rc.get("provenance")
+            if prov:
+                c.provenance = Provenance(
+                    source_document=prov.get("source_document", ""),
+                    source_section=prov.get("source_section", ""),
+                    source_text_snippet=prov.get("source_text_snippet", ""),
+                    extraction_timestamp=prov.get("extraction_timestamp", ""),
+                )
+            concepts.append(c)
+
+        relationships = []
+        for rr in raw.get("relationships", []):
+            r = Relationship(
+                subject=rr.get("subject", ""),
+                predicate=rr.get("predicate", ""),
+                object=rr.get("object", ""),
+            )
+            for fc in rr.get("confidence", []):
+                r.confidence.append(FieldConfidence(
+                    fc.get("field_name", ""),
+                    fc.get("score", 0.0),
+                    fc.get("reason", ""),
+                ))
+            relationships.append(r)
+
+        sa = DomainDocumentExtractionResult(
+            domain_name=raw.get("domain_name", ""),
+            concepts=concepts,
+            relationships=relationships,
+            source_documents=raw.get("source_documents", []),
+            extraction_timestamp=raw.get("extraction_timestamp", ""),
+        )
+        console.print(
+            f"[bold blue]Source A:[/] {len(concepts)} concepts, "
+            f"{len(relationships)} relationships from {source_a_json.name}"
+        )
+
+    if source_b_json:
+        from .extractors.governance_extractor import GovernanceExtractor
+        sb = GovernanceExtractor().extract_from_file(source_b_json)
+        console.print(
+            f"[bold blue]Source B:[/] {len(sb.records)} governance records "
+            f"from {source_b_json.name}"
+        )
+
+    if source_c_dir:
+        from .extractors.django_schema import DjangoSchemaParser
+        sc = DjangoSchemaParser(source_c_dir).parse()
+        console.print(
+            f"[bold blue]Source C:[/] {len(sc.models)} schema models "
+            f"from {source_c_dir}"
+        )
+
+    if source_d_dir:
+        from .extractors.code_extractor import CodeExtractor
+        sd = CodeExtractor().extract_from_directory(source_d_dir)
+        console.print(
+            f"[bold blue]Source D:[/] {len(sd.rules)} code rules "
+            f"from {source_d_dir}"
+        )
+
+    if not any([sa, sb, sc, sd]):
+        console.print("[red]No sources provided. Use --source-a, --source-b, "
+                      "--source-c, and/or --source-d.[/]")
+        raise typer.Exit(code=1)
+
+    # ── Fuse ──
+    priority_list = [p.strip().upper() for p in priority.split(",")]
+    engine = FusionEngine(priority_order=priority_list)
+    result = engine.fuse(source_a=sa, source_b=sb, source_c=sc, source_d=sd)
+
+    # ── Summary ──
+    console.print()
+    console.print(f"[bold green]Fused {len(result.elements)} elements[/] "
+                  f"from sources {'+'.join(result.sources_used)}")
+    console.print(
+        f"  Governance-validated: [cyan]{result.governance_validated_count}[/]   "
+        f"Conflicts: [yellow]{result.conflict_count}[/]   "
+        f"Relationships: [cyan]{len(result.relationships)}[/]"
+    )
+    if result.unmatched_governance:
+        console.print(
+            f"  [yellow]Governance-only (not in Source A): "
+            f"{len(result.unmatched_governance)}[/]"
+        )
+    if result.unmatched_schema_fields:
+        console.print(
+            f"  [yellow]Schema-only fields: "
+            f"{len(result.unmatched_schema_fields)}[/]"
+        )
+    if result.unmatched_code_rules:
+        console.print(
+            f"  [yellow]Unmatched code rules: "
+            f"{len(result.unmatched_code_rules)}[/]"
+        )
+
+    # ── Write output ──
+    out_data = {
+        "fusion_timestamp": result.fusion_timestamp,
+        "sources_used": result.sources_used,
+        "summary": {
+            "total_elements": len(result.elements),
+            "governance_validated": result.governance_validated_count,
+            "conflicts": result.conflict_count,
+            "relationships": len(result.relationships),
+            "unmatched_governance": len(result.unmatched_governance),
+            "unmatched_schema_fields": len(result.unmatched_schema_fields),
+            "unmatched_code_rules": len(result.unmatched_code_rules),
+        },
+        "elements": [
+            {
+                "element_name": el.element_name,
+                "domain_name": el.domain_name,
+                "definition": el.definition,
+                "is_critical": el.is_critical,
+                "citation": el.citation,
+                "data_type": el.data_type,
+                "enum_values": el.enum_values,
+                "business_rules": el.business_rules,
+                "governance_validated": el.governance_validated,
+                "confidence": round(el.confidence, 3),
+                "sources": el.sources,
+                "needs_review": el.needs_review(),
+                "conflicts": [
+                    {
+                        "field": c.field_name,
+                        "winner": {"source": c.winner.source, "value": c.winner.original_value},
+                        "rejected": [{"source": r.source, "value": r.original_value} for r in c.rejected],
+                        "resolution": c.resolution,
+                    }
+                    for c in el.conflicts
+                ],
+                "extra_fields": el.extra_fields,
+            }
+            for el in result.elements
+        ],
+        "relationships": [
+            {
+                "subject": r.subject,
+                "predicate": r.predicate,
+                "object": r.object,
+                "source": r.source,
+                "confidence": round(r.confidence, 3),
+            }
+            for r in result.relationships
+        ],
+    }
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(out_data, indent=2, default=str, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    console.print(f"[bold green]Fused dictionary saved:[/] {output}")
+
+    # ── Log ──
+    if domain_dir:
+        append_log(
+            domain_dir, "fuse",
+            sources="+".join(result.sources_used),
+            elements=len(result.elements),
+            governance_validated=result.governance_validated_count,
+            conflicts=result.conflict_count,
+            relationships=len(result.relationships),
+            output=str(output),
+        )
+
+
 def _enrich_with_definitions(result, doc: Path) -> tuple[int, int, int]:
     """Run the regex-based definitions extractor and enrich/extend the concept list.
 
