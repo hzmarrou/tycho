@@ -115,7 +115,7 @@ def format_suggestions_markdown(suggestions: list[BridgeSuggestion]) -> str:
     for i, s in enumerate(suggestions, 1):
         a_str = ", ".join(s.community_a[:5])
         b_str = ", ".join(s.community_b[:5])
-        lines.append(f"## Gap {i}: {{{a_str}}} ↔ {{{b_str}}}\n")
+        lines.append(f"## Gap {i}: {{{a_str}}} <-> {{{b_str}}}\n")
 
         if s.suggested_concept:
             lines.append(f"**Suggested concept:** {s.suggested_concept}\n")

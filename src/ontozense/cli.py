@@ -2,11 +2,35 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import typer
 from rich.console import Console
 from rich.table import Table
+
+
+def _ensure_utf8_stdio() -> None:
+    """Reconfigure stdout/stderr to UTF-8 on Windows so Rich-rendered
+    output doesn't crash on cp1252 consoles. Safe no-op on systems
+    where stdio is already UTF-8. Called at module import so every
+    CLI invocation benefits.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            if (stream.encoding or "").lower().replace("-", "") != "utf8":
+                reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            # Some environments (e.g. CI capturing streams) refuse to
+            # reconfigure. Errors="replace" in the CLI output handlers
+            # is our backup.
+            pass
+
+
+_ensure_utf8_stdio()
 
 app = typer.Typer(
     name="ontozense",
@@ -130,7 +154,7 @@ def ingest(
     # Per-file detail
     for d in decisions:
         primary = d.primary_source.value
-        marker = "↓" if d.is_skip else "→"
+        marker = "v" if d.is_skip else "->"
         sources_str = "+".join(s.value for s in d.sources)
         console.print(
             f"  [bold]{marker}[/] [cyan]{sources_str:>6}[/] "
@@ -173,12 +197,12 @@ def ingest(
         console.print()
         console.print(
             f"[yellow]Skipped {len(low_confidence)} low-confidence decision(s) "
-            f"(confidence ≤ {auto_threshold:.2f}):[/]"
+            f"(confidence <= {auto_threshold:.2f}):[/]"
         )
         for d in low_confidence:
             sources_str = "+".join(s.value for s in d.sources)
             console.print(
-                f"  [dim]•[/] [cyan]{sources_str}[/] "
+                f"  [dim]*[/] [cyan]{sources_str}[/] "
                 f"[dim]({d.confidence:.0%})[/] {d.file_path.name}"
             )
             if domain_dir:
@@ -245,7 +269,7 @@ def ingest(
                 f"{src.value} — auto-dispatch not yet implemented.[/]"
             )
             for fp in buckets[src]:
-                console.print(f"  [dim]•[/] {fp.name}")
+                console.print(f"  [dim]*[/] {fp.name}")
 
 
 # ─── extract-a (Source A: domain documents) ───────────────────────────────────
@@ -361,7 +385,7 @@ def extract_a(
 
         if not result.concepts:
             console.print(
-                f"  [yellow]⚠ Warning:[/] no concepts extracted from {doc.name}."
+                f"  [yellow][!] Warning:[/] no concepts extracted from {doc.name}."
             )
             if domain_dir:
                 append_log(
@@ -436,11 +460,11 @@ def extract_a(
     if total_concepts == 0 and total_rels == 0:
         console.print()
         console.print(
-            "[bold red]✗ Extraction produced 0 concepts and 0 relationships.[/]\n"
+            "[bold red][x] Extraction produced 0 concepts and 0 relationships.[/]\n"
             "  No output written. Possible causes:\n"
-            "    • OntoGPT failed silently (check Azure OpenAI credentials in .env)\n"
-            "    • The documents contain no definitional content\n"
-            "    • The LinkML template is mismatched to the document format\n"
+            "    * OntoGPT failed silently (check Azure OpenAI credentials in .env)\n"
+            "    * The documents contain no definitional content\n"
+            "    * The LinkML template is mismatched to the document format\n"
             "  To debug, run OntoGPT directly:\n"
             "    ontogpt extract -i <document> -t <template> -m <model> -O json"
         )
@@ -467,7 +491,7 @@ def extract_a(
     if total_elements > 0 and high_conf == 0:
         console.print()
         console.print(
-            f"[bold yellow]⚠ All {total_elements} extracted elements "
+            f"[bold yellow][!] All {total_elements} extracted elements "
             f"({total_concepts} concepts + {total_rels} relationships) "
             f"have confidence < 50%.[/]\n"
             "  Output will be written but should be discarded or re-run."
@@ -512,13 +536,13 @@ def extract_a(
     console.print()
     console.print(f"[bold]Concepts:[/] {total_concepts}")
     console.print(
-        f"  [green]high (≥80%)[/]: {sum(1 for c in merged.concepts if c.overall_confidence() >= 0.8)}   "
+        f"  [green]high (>=80%)[/]: {sum(1 for c in merged.concepts if c.overall_confidence() >= 0.8)}   "
         f"[yellow]mid (50-79%)[/]: {sum(1 for c in merged.concepts if 0.5 <= c.overall_confidence() < 0.8)}   "
         f"[red]low (<50%)[/]: {sum(1 for c in merged.concepts if c.overall_confidence() < 0.5)}"
     )
     console.print(f"[bold]Relationships:[/] {total_rels}")
     console.print(
-        f"  [green]high (≥80%)[/]: {sum(1 for r in merged.relationships if r.overall_confidence() >= 0.8)}   "
+        f"  [green]high (>=80%)[/]: {sum(1 for r in merged.relationships if r.overall_confidence() >= 0.8)}   "
         f"[yellow]mid (50-79%)[/]: {sum(1 for r in merged.relationships if 0.5 <= r.overall_confidence() < 0.8)}   "
         f"[red]low (<50%)[/]: {sum(1 for r in merged.relationships if r.overall_confidence() < 0.5)}"
     )
@@ -1393,14 +1417,14 @@ def refine(
         if renames:
             console.print(f"[yellow]Normalized {len(renames)} names:[/]")
             for old, new in renames.items():
-                console.print(f"  {old} → {new}")
+                console.print(f"  {old} -> {new}")
 
     if deduplicate:
         dupes = mgr.find_duplicates()
         if dupes:
             console.print("[yellow]Potential duplicates found:[/]")
             for a, b, score in dupes:
-                console.print(f"  {a} ↔ {b} (similarity: {score:.0%})")
+                console.print(f"  {a} <-> {b} (similarity: {score:.0%})")
         else:
             console.print("[green]No duplicates found.[/]")
 
