@@ -347,6 +347,8 @@ class Router:
             return self._sniff_excel(file_path)
         if ext in {".md", ".markdown", ".rst"}:
             return self._sniff_markdown(file_path, extension_default)
+        if ext == ".json":
+            return self._sniff_json(file_path)
         return None
 
     def _read_head(self, file_path: Path) -> str:
@@ -517,6 +519,98 @@ class Router:
             confidence=0.6,
             layer="content_sniff",
             reasoning="Excel headers don't match strong governance/schema patterns; defaulting to Source B",
+        )
+
+    def _sniff_json(self, file_path: Path) -> RoutingDecision:
+        """JSON: distinguish governance reference (Source B) from
+        schema/data files (Source C).
+
+        Governance JSON files from ``docs/CANONICAL_GOVERNANCE_FORMAT.md``
+        have ``element_name`` at the top level of each object.
+        JSON Schema / OpenAPI / Avro files use ``$schema``, ``openapi``,
+        or ``type`` / ``properties`` keys. Anything else falls back to
+        the extension default (Source C).
+        """
+        import json
+
+        text = self._read_head(file_path)
+        if not text:
+            return RoutingDecision(
+                file_path=file_path,
+                sources=[Source.C],
+                confidence=0.6,
+                layer="extension",
+                reasoning="JSON file but content unreadable; defaulting to Source C",
+            )
+
+        try:
+            # The sniff_limit head may truncate a large file mid-JSON —
+            # try to parse, accept if we got enough to classify.
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            # Try parsing just the first complete JSON value if possible
+            parsed = None
+
+        if parsed is None:
+            return RoutingDecision(
+                file_path=file_path,
+                sources=[Source.C],
+                confidence=0.6,
+                layer="content_sniff",
+                reasoning="JSON file couldn't be parsed at sniff-limit; defaulting to Source C",
+            )
+
+        # Governance JSON: object or array of objects with element_name
+        first_entry = None
+        if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+            first_entry = parsed[0]
+        elif isinstance(parsed, dict):
+            first_entry = parsed
+
+        if first_entry is not None and "element_name" in first_entry:
+            return RoutingDecision(
+                file_path=file_path,
+                sources=[Source.B],
+                confidence=0.95,
+                layer="content_sniff",
+                reasoning=(
+                    "JSON contains 'element_name' field — governance "
+                    "reference format (Source B)"
+                ),
+            )
+
+        # JSON Schema / OpenAPI / Avro — Source C
+        if isinstance(parsed, dict):
+            schema_keys = {"$schema", "openapi", "swagger"}
+            if schema_keys & set(parsed.keys()):
+                return RoutingDecision(
+                    file_path=file_path,
+                    sources=[Source.C],
+                    confidence=0.95,
+                    layer="content_sniff",
+                    reasoning="JSON Schema / OpenAPI specification (Source C)",
+                )
+            # Avro schema: has 'type' and 'fields' at top level
+            if "type" in parsed and "fields" in parsed:
+                return RoutingDecision(
+                    file_path=file_path,
+                    sources=[Source.C],
+                    confidence=0.9,
+                    layer="content_sniff",
+                    reasoning="Avro-style schema (Source C)",
+                )
+
+        # Fallback: treat as Source C but with lower confidence — the
+        # human should review via --dry-run before --auto dispatch.
+        return RoutingDecision(
+            file_path=file_path,
+            sources=[Source.C],
+            confidence=0.5,
+            layer="content_sniff",
+            reasoning=(
+                "JSON file without governance or schema markers; "
+                "defaulting to Source C (review before --auto)"
+            ),
         )
 
     def _sniff_markdown(

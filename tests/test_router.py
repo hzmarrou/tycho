@@ -386,6 +386,143 @@ class TestMarkdownContentSniff:
         assert not decision.is_multi_source
 
 
+# ─── JSON content sniff ─────────────────────────────────────────────────────
+
+
+class TestJsonContentSniff:
+    """Governance JSON (element_name field) → Source B; JSON Schema → C."""
+
+    def test_governance_json_array_routes_to_source_b(self, tmp_path):
+        import json
+        from ontozense.router import Router, Source
+
+        f = tmp_path / "governance.json"
+        f.write_text(
+            json.dumps([
+                {
+                    "element_name": "Default",
+                    "definition": "Inability to pay.",
+                    "is_critical": True,
+                },
+                {"element_name": "Exposure"},
+            ]),
+            encoding="utf-8",
+        )
+        decision = Router().route(f)
+        assert decision.primary_source == Source.B
+        assert decision.layer == "content_sniff"
+        assert decision.confidence >= 0.9
+
+    def test_governance_json_single_object_routes_to_source_b(self, tmp_path):
+        import json
+        from ontozense.router import Router, Source
+
+        f = tmp_path / "gov.json"
+        f.write_text(
+            json.dumps({
+                "element_name": "Default",
+                "definition": "A status.",
+            }),
+            encoding="utf-8",
+        )
+        decision = Router().route(f)
+        assert decision.primary_source == Source.B
+
+    def test_json_schema_routes_to_source_c(self, tmp_path):
+        import json
+        from ontozense.router import Router, Source
+
+        f = tmp_path / "schema.json"
+        f.write_text(
+            json.dumps({
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                },
+            }),
+            encoding="utf-8",
+        )
+        decision = Router().route(f)
+        assert decision.primary_source == Source.C
+        assert decision.layer == "content_sniff"
+
+    def test_openapi_spec_routes_to_source_c(self, tmp_path):
+        import json
+        from ontozense.router import Router, Source
+
+        f = tmp_path / "api.json"
+        f.write_text(
+            json.dumps({
+                "openapi": "3.0.0",
+                "info": {"title": "Test API"},
+                "paths": {},
+            }),
+            encoding="utf-8",
+        )
+        decision = Router().route(f)
+        assert decision.primary_source == Source.C
+
+    def test_avro_schema_routes_to_source_c(self, tmp_path):
+        import json
+        from ontozense.router import Router, Source
+
+        f = tmp_path / "event.json"
+        f.write_text(
+            json.dumps({
+                "type": "record",
+                "name": "Event",
+                "fields": [
+                    {"name": "id", "type": "string"},
+                ],
+            }),
+            encoding="utf-8",
+        )
+        decision = Router().route(f)
+        assert decision.primary_source == Source.C
+
+    def test_unknown_json_falls_back_to_c(self, tmp_path):
+        """A generic JSON without governance/schema markers: Source C
+        with lower confidence (invite human review)."""
+        import json
+        from ontozense.router import Router, Source
+
+        f = tmp_path / "data.json"
+        f.write_text(
+            json.dumps({"some": "random", "data": [1, 2, 3]}),
+            encoding="utf-8",
+        )
+        decision = Router().route(f)
+        assert decision.primary_source == Source.C
+        # Below the --auto threshold (0.9), so --auto would skip it
+        assert decision.confidence < 0.9
+
+    def test_malformed_json_falls_back_to_c(self, tmp_path):
+        from ontozense.router import Router, Source
+
+        f = tmp_path / "broken.json"
+        f.write_text("this is { not valid json", encoding="utf-8")
+        decision = Router().route(f)
+        assert decision.primary_source == Source.C
+
+    def test_real_governance_example_fixture_routes_to_b(self):
+        """The shipped docs/governance_example.json should route to B."""
+        from pathlib import Path
+        from ontozense.router import Router, Source
+
+        fixture = Path("docs/governance_example.json")
+        if not fixture.exists():
+            import pytest
+            pytest.skip("governance_example.json not found")
+
+        decision = Router().route(fixture)
+        assert decision.primary_source == Source.B, (
+            f"Shipped governance fixture should route to B, got "
+            f"{decision.primary_source.value}. This is the tutorial's "
+            f"canonical example."
+        )
+
+
 # ─── Directory routing ──────────────────────────────────────────────────────
 
 
