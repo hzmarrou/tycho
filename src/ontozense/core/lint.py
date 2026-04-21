@@ -80,15 +80,37 @@ CORE_FIELDS = ["definition", "citation"]
 # ─── Lint engine ─────────────────────────────────────────────────────────────
 
 
-def lint(result: FusionResult) -> LintReport:
-    """Run all lint checks on a fused knowledge base."""
+# Default caps to keep lint output actionable on large ontologies.
+# When the concept graph is heavily fragmented (many small communities),
+# the O(n^2) community-pair check can produce hundreds of structural
+# gap findings. We report only the worst ones (lowest density, largest
+# community size) up to these limits, and emit a summary finding
+# telling the user how many more exist.
+DEFAULT_MAX_GAPS = 10
+DEFAULT_MAX_BRIDGES = 10
+
+
+def lint(
+    result: FusionResult,
+    *,
+    max_gaps: int = DEFAULT_MAX_GAPS,
+    max_bridges: int = DEFAULT_MAX_BRIDGES,
+) -> LintReport:
+    """Run all lint checks on a fused knowledge base.
+
+    Structural gap reporting is capped by ``max_gaps`` (worst holes
+    first, by density) and ``max_bridges`` (highest-centrality bridges
+    first) to keep output actionable on large ontologies.
+    """
     report = LintReport(timestamp=datetime.utcnow().isoformat())
 
     _check_contradictions(result, report)
     _check_orphan_terms(result, report)
     _check_undefined_used(result, report)
     _check_coverage_gaps(result, report)
-    _check_structural_gaps(result, report)
+    _check_structural_gaps(
+        result, report, max_gaps=max_gaps, max_bridges=max_bridges,
+    )
 
     return report
 
@@ -270,12 +292,19 @@ def _check_structural_gaps(
     *,
     min_communities: int = 2,
     hole_threshold: float = 0.05,
+    max_gaps: int = DEFAULT_MAX_GAPS,
+    max_bridges: int = DEFAULT_MAX_BRIDGES,
 ) -> None:
     """Detect structural gaps using graph community detection.
 
     Builds a concept graph from relationships, runs community detection,
     computes betweenness centrality for bridge concepts, and identifies
     structural holes between weakly-connected communities.
+
+    The ``max_gaps`` and ``max_bridges`` caps keep the output actionable
+    on large or fragmented ontologies. Results are sorted by severity
+    (lowest density / highest centrality first); anything beyond the
+    cap is summarised as a single info finding.
     """
     import networkx as nx
     from networkx.algorithms.community import greedy_modularity_communities
@@ -292,9 +321,19 @@ def _check_structural_gaps(
     if len(communities) < min_communities:
         return
 
-    # Structural holes
+    # Structural holes — sort by severity (worst first):
+    #   1. Lowest density (0.0 = fully disconnected)
+    #   2. Largest community size (impacts more concepts)
     holes = _find_structural_holes(G, communities, hole_threshold)
-    for labels_a, labels_b, cross, density in holes:
+    holes_sorted = sorted(
+        holes,
+        key=lambda h: (h[3], -(len(h[0]) + len(h[1]))),  # density asc, size desc
+    )
+
+    total_holes = len(holes_sorted)
+    reported_holes = holes_sorted[:max_gaps]
+
+    for labels_a, labels_b, cross, density in reported_holes:
         a_str = ", ".join(labels_a[:5])
         b_str = ", ".join(labels_b[:5])
         if len(labels_a) > 5:
@@ -322,25 +361,67 @@ def _check_structural_gaps(
             )
         )
 
-    # Bridge concepts (high betweenness centrality)
+    if total_holes > max_gaps:
+        report.findings.append(
+            LintFinding(
+                category="structural_gap",
+                severity="info",
+                element_name="",
+                message=(
+                    f"{total_holes - max_gaps} additional structural "
+                    f"gap(s) not shown (showing worst {max_gaps} of "
+                    f"{total_holes}). Re-run with --max-gaps N to see more."
+                ),
+                details={
+                    "total_holes": total_holes,
+                    "shown": max_gaps,
+                },
+            )
+        )
+
+    # Bridge concepts (high betweenness centrality) — cap similarly
     if len(G.edges) > 0:
         centrality = nx.betweenness_centrality(G, weight="weight")
         threshold = 1.0 / max(len(G.nodes) - 1, 1)
-        for node, score in sorted(centrality.items(), key=lambda x: -x[1]):
-            if score > threshold:
-                label = G.nodes[node].get("label", node)
-                report.findings.append(
-                    LintFinding(
-                        category="structural_gap",
-                        severity="info",
-                        element_name=label,
-                        message=(
-                            f"'{label}' is a bridge concept "
-                            f"(betweenness centrality {score:.2f}). "
-                            f"It connects otherwise separate concept clusters."
-                        ),
-                        details={
-                            "centrality": round(score, 3),
-                        },
-                    )
+        bridges = [
+            (node, score) for node, score in centrality.items()
+            if score > threshold
+        ]
+        bridges.sort(key=lambda x: -x[1])
+
+        total_bridges = len(bridges)
+        for node, score in bridges[:max_bridges]:
+            label = G.nodes[node].get("label", node)
+            report.findings.append(
+                LintFinding(
+                    category="structural_gap",
+                    severity="info",
+                    element_name=label,
+                    message=(
+                        f"'{label}' is a bridge concept "
+                        f"(betweenness centrality {score:.2f}). "
+                        f"It connects otherwise separate concept clusters."
+                    ),
+                    details={
+                        "centrality": round(score, 3),
+                    },
                 )
+            )
+
+        if total_bridges > max_bridges:
+            report.findings.append(
+                LintFinding(
+                    category="structural_gap",
+                    severity="info",
+                    element_name="",
+                    message=(
+                        f"{total_bridges - max_bridges} additional bridge "
+                        f"concept(s) not shown (showing top {max_bridges} "
+                        f"of {total_bridges})."
+                    ),
+                    details={
+                        "total_bridges": total_bridges,
+                        "shown": max_bridges,
+                    },
+                )
+            )

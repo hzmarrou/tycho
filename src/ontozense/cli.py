@@ -371,7 +371,39 @@ def extract_a(
                 )
             raise typer.Exit(code=1)
         console.print(f"[bold blue]Extracting from:[/] {doc}")
-        result = extractor.extract_from_file(doc)
+        try:
+            result = extractor.extract_from_file(doc)
+        except Exception as e:
+            # Surface a clean error to the tester instead of a raw
+            # traceback. Common causes: Azure auth failure, OntoGPT
+            # subprocess error, template not found.
+            err_msg = str(e)
+            console.print(f"[bold red][x] Extraction failed for {doc.name}[/]")
+            console.print(f"  [dim]{type(e).__name__}: {err_msg[:500]}[/]")
+            if "api" in err_msg.lower() or "auth" in err_msg.lower() or "credential" in err_msg.lower():
+                console.print(
+                    "  [yellow]Likely an Azure OpenAI credential issue. "
+                    "Check AZURE_API_KEY, AZURE_API_BASE, AZURE_API_VERSION "
+                    "in your .env file.[/]"
+                )
+            elif "ontogpt" in err_msg.lower() or "subprocess" in err_msg.lower():
+                console.print(
+                    "  [yellow]OntoGPT subprocess failed. Verify 'ontogpt' "
+                    "is installed in the active venv: pip show ontogpt[/]"
+                )
+            elif "template" in err_msg.lower() or "linkml" in err_msg.lower():
+                console.print(
+                    "  [yellow]LinkML template issue. The default template "
+                    "should exist at src/ontozense/templates/[/]"
+                )
+            if domain_dir:
+                append_log(
+                    domain_dir, "extract-a-failed",
+                    source=doc.name,
+                    error=type(e).__name__,
+                    message=err_msg[:200],
+                )
+            raise typer.Exit(code=1)
 
         # Optional: enrich with regex-found definitions and add unmatched
         # regex finds as additional regex-only candidate concepts.
@@ -572,13 +604,23 @@ def suggest_bridges_cmd(
         None, "--domain-dir",
         help="Per-domain knowledge base directory for audit log and auto file-back.",
     ),
+    max_gaps: int = typer.Option(
+        5, "--max-gaps",
+        help="Maximum number of structural gaps to send to the LLM "
+             "(worst first by density). Each gap becomes one LLM call. "
+             "Default 5 keeps cost bounded.",
+    ),
 ) -> None:
     """Suggest bridging concepts for structural gaps using an LLM.
 
     First runs structural gap analysis from the lint layer. For each
-    gap found, constructs a targeted prompt with the two disconnected
-    clusters and their definitions, then asks the LLM to suggest
-    bridging relationships.
+    gap (up to --max-gaps), constructs a targeted prompt with the two
+    disconnected clusters and their definitions, then asks the LLM to
+    suggest bridging relationships.
+
+    Each gap triggers one LLM call, so the default cap of 5 gaps keeps
+    cost bounded. Raise --max-gaps to explore more gaps; lower it to
+    save on LLM calls.
 
     Output is markdown suitable for ``ontozense file-back``.
     """
@@ -598,7 +640,7 @@ def suggest_bridges_cmd(
 
     # Build graph and find structural holes
     if len(fusion_result.relationships) == 0:
-        console.print("[yellow]No relationships in the fused output — "
+        console.print("[yellow]No relationships in the fused output - "
                       "structural gap analysis requires relationships.[/]")
         raise typer.Exit(code=0)
 
@@ -614,14 +656,28 @@ def suggest_bridges_cmd(
     holes = _find_structural_holes(G, communities)
 
     if not holes:
-        console.print("[bold green]No structural gaps found — "
+        console.print("[bold green]No structural gaps found - "
                       "the knowledge graph is well-connected.[/]")
         raise typer.Exit(code=0)
 
-    console.print(
-        f"[bold magenta]Found {len(holes)} structural gap(s). "
-        f"Asking LLM for bridging suggestions...[/]"
+    # Sort by severity (worst first) and cap to max_gaps
+    holes_sorted = sorted(
+        holes,
+        key=lambda h: (h[3], -(len(h[0]) + len(h[1]))),
     )
+    total_holes = len(holes_sorted)
+    holes_to_process = holes_sorted[:max_gaps]
+
+    console.print(
+        f"[bold magenta]Found {total_holes} structural gap(s). "
+        f"Asking LLM about the worst {len(holes_to_process)} "
+        f"({len(holes_to_process)} LLM call(s))...[/]"
+    )
+    if total_holes > max_gaps:
+        console.print(
+            f"[dim]{total_holes - max_gaps} additional gap(s) not sent to "
+            f"the LLM. Raise --max-gaps to include more.[/]"
+        )
 
     # Build definitions dict for the prompt
     element_definitions = {
@@ -629,8 +685,8 @@ def suggest_bridges_cmd(
         for el in fusion_result.elements
     }
 
-    # Convert holes to (community_a, community_b) pairs
-    hole_pairs = [(a, b) for a, b, _, _ in holes]
+    # Convert capped holes to (community_a, community_b) pairs
+    hole_pairs = [(a, b) for a, b, _, _ in holes_to_process]
 
     try:
         suggestions = suggest_bridges(
@@ -878,12 +934,23 @@ def lint(
         None, "--domain-dir",
         help="Per-domain knowledge base directory for audit log.",
     ),
+    max_gaps: int = typer.Option(
+        10, "--max-gaps",
+        help="Maximum number of structural gap warnings to report. "
+             "Extra gaps are summarised (default: 10).",
+    ),
+    max_bridges: int = typer.Option(
+        10, "--max-bridges",
+        help="Maximum number of bridge concept findings to report. "
+             "Extra bridges are summarised (default: 10).",
+    ),
 ) -> None:
     """Run consistency checks on a fused data dictionary.
 
     Checks for contradictions between sources, orphan terms not
     referenced by any relationship, undefined relationship endpoints,
-    and coverage gaps (missing definitions or citations).
+    coverage gaps (missing definitions or citations), and structural
+    gaps (disconnected concept clusters via graph analysis).
     """
     import json
     from .core.lint import lint as run_lint
@@ -897,7 +964,7 @@ def lint(
     fusion_result = _reconstruct_fusion_result(raw)
 
     # Run lint
-    report = run_lint(fusion_result)
+    report = run_lint(fusion_result, max_gaps=max_gaps, max_bridges=max_bridges)
 
     # Display results
     console.print()

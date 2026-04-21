@@ -166,3 +166,89 @@ class TestEdgeCases:
         report = lint(result)
         gaps = report.by_category("structural_gap")
         assert len(gaps) == 0
+
+
+class TestOutputCapping:
+    """The max_gaps / max_bridges kwargs prevent noise on fragmented graphs."""
+
+    def _build_fragmented_result(self, n_clusters=15):
+        """Build a graph with many small disconnected clusters.
+
+        Each cluster is 2 nodes with 1 internal edge; no cross-edges
+        between clusters. Produces n_clusters*(n_clusters-1)/2
+        community pairs, all with density 0.
+        """
+        elements = []
+        relationships = []
+        for i in range(n_clusters):
+            a, b = f"A{i}", f"B{i}"
+            elements.append(_el(a))
+            elements.append(_el(b))
+            relationships.append(_rel(a, b))
+        return _result(elements, relationships)
+
+    def test_default_cap_limits_warnings_to_10(self):
+        """Default max_gaps=10 → at most 10 structural_gap warnings
+        plus 1 info summarising the overflow."""
+        result = self._build_fragmented_result(n_clusters=15)
+        report = lint(result)
+        gaps = report.by_category("structural_gap")
+        warnings = [f for f in gaps if f.severity == "warning"]
+        assert len(warnings) <= 10, (
+            f"Default cap should limit warnings to 10, got {len(warnings)}"
+        )
+
+    def test_overflow_summary_emitted(self):
+        """When gaps > max_gaps, an info finding reports the overflow."""
+        result = self._build_fragmented_result(n_clusters=15)
+        # 15 clusters → C(15,2) = 105 community pairs, all density 0
+        report = lint(result, max_gaps=5)
+        infos = [
+            f for f in report.by_category("structural_gap")
+            if f.severity == "info" and "not shown" in f.message
+        ]
+        assert len(infos) == 1
+        assert "additional structural gap" in infos[0].message
+        assert infos[0].details.get("shown") == 5
+
+    def test_custom_max_gaps_honoured(self):
+        """lint(max_gaps=3) reports at most 3 warnings."""
+        result = self._build_fragmented_result(n_clusters=10)
+        report = lint(result, max_gaps=3)
+        warnings = [
+            f for f in report.by_category("structural_gap")
+            if f.severity == "warning"
+        ]
+        assert len(warnings) <= 3
+
+    def test_worst_gaps_reported_first(self):
+        """Gaps with density 0.0 should be reported before denser ones."""
+        # Three clusters: {A,B} fully disconnected from {C,D}, but
+        # {E,F} has one cross-edge to {A,B} (lower severity).
+        result = _result(
+            elements=[_el(n) for n in ["A", "B", "C", "D", "E", "F", "G", "H"]],
+            relationships=[
+                _rel("A", "B"), _rel("C", "D"),
+                _rel("E", "F"), _rel("G", "H"),
+                _rel("A", "E"),  # weak bridge — lowers severity of that pair
+            ],
+        )
+        report = lint(result, max_gaps=1)
+        warnings = [
+            f for f in report.by_category("structural_gap")
+            if f.severity == "warning"
+        ]
+        # The single reported warning should be the worst (density 0.0)
+        if warnings:
+            assert warnings[0].details["density"] == 0.0
+
+    def test_no_overflow_summary_when_under_cap(self):
+        """If gaps <= max_gaps, no overflow info is emitted."""
+        result = self._build_fragmented_result(n_clusters=3)
+        # 3 clusters → C(3,2) = 3 pairs; under default cap of 10
+        report = lint(result)
+        overflow_infos = [
+            f for f in report.by_category("structural_gap")
+            if f.severity == "info" and "not shown" in f.message
+        ]
+        assert len(overflow_infos) == 0

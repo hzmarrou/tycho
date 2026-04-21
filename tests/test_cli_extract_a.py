@@ -230,3 +230,103 @@ class TestExitCode3AllLowConfidence:
         )
         assert r.exit_code == 0, r.output
         assert out_xlsx.exists()
+
+
+class TestExtractionFailureHandling:
+    """Review 2026-04-15 #6: extract-a must surface clean errors, not
+    raw tracebacks, when OntoGPT/Azure/template failures happen."""
+
+    def test_auth_error_produces_clean_message(
+        self, source_doc, tmp_path, monkeypatch,
+    ):
+        """Azure auth failure should show a friendly message pointing
+        at the .env variables, not a raw traceback."""
+        from ontozense.extractors import domain_doc_extractor as dde
+
+        def _fail(self, path):
+            raise RuntimeError(
+                "Azure OpenAI API authentication failed: invalid api_key"
+            )
+
+        monkeypatch.setattr(
+            dde.DomainDocumentExtractor, "extract_from_file", _fail
+        )
+        monkeypatch.setattr(cli, "_enrich_with_definitions", lambda r, d: (0, 0, 0))
+
+        out_xlsx = tmp_path / "out.xlsx"
+        r = runner.invoke(
+            cli.app,
+            [
+                "extract-a", str(source_doc),
+                "--output", str(out_xlsx),
+                "--skip-definitions-pass",
+            ],
+        )
+        assert r.exit_code == 1, r.output
+        flat = " ".join(r.output.split())
+        # User-facing error, not a stack trace
+        assert "Extraction failed" in flat
+        assert "AZURE_API_KEY" in flat
+        # Must not leak a Python traceback to the user
+        assert "Traceback" not in r.output
+
+    def test_ontogpt_subprocess_error_produces_clean_message(
+        self, source_doc, tmp_path, monkeypatch,
+    ):
+        from ontozense.extractors import domain_doc_extractor as dde
+
+        def _fail(self, path):
+            raise FileNotFoundError(
+                "ontogpt executable not found on PATH"
+            )
+
+        monkeypatch.setattr(
+            dde.DomainDocumentExtractor, "extract_from_file", _fail
+        )
+        monkeypatch.setattr(cli, "_enrich_with_definitions", lambda r, d: (0, 0, 0))
+
+        out_xlsx = tmp_path / "out.xlsx"
+        r = runner.invoke(
+            cli.app,
+            [
+                "extract-a", str(source_doc),
+                "--output", str(out_xlsx),
+                "--skip-definitions-pass",
+            ],
+        )
+        assert r.exit_code == 1, r.output
+        flat = " ".join(r.output.split())
+        assert "Extraction failed" in flat
+        assert "ontogpt" in flat.lower()
+        assert "Traceback" not in r.output
+
+    def test_generic_error_still_surfaces_type_and_message(
+        self, source_doc, tmp_path, monkeypatch,
+    ):
+        """Unknown error type should still produce a user-facing message
+        with the exception type and message, no raw traceback."""
+        from ontozense.extractors import domain_doc_extractor as dde
+
+        def _fail(self, path):
+            raise ValueError("some unexpected error")
+
+        monkeypatch.setattr(
+            dde.DomainDocumentExtractor, "extract_from_file", _fail
+        )
+        monkeypatch.setattr(cli, "_enrich_with_definitions", lambda r, d: (0, 0, 0))
+
+        out_xlsx = tmp_path / "out.xlsx"
+        r = runner.invoke(
+            cli.app,
+            [
+                "extract-a", str(source_doc),
+                "--output", str(out_xlsx),
+                "--skip-definitions-pass",
+            ],
+        )
+        assert r.exit_code == 1, r.output
+        flat = " ".join(r.output.split())
+        assert "Extraction failed" in flat
+        assert "ValueError" in flat
+        assert "some unexpected error" in flat
+        assert "Traceback" not in r.output
