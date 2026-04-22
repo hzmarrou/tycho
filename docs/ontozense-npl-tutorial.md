@@ -143,28 +143,46 @@ Before extracting, you can preview how the router classifies your files:
 ontozense ingest domains/npl/sources/ --dry-run --domain-dir domains/npl
 ```
 
-Expected output (approximate):
+Expected output:
 
 ```
 Routed 7 file(s):
   A - 1 file(s) - Source A - Authoritative domain documents
   B - 1 file(s) - Source B - Governance / data dictionaries
-  D - 5 file(s) - Source D - Production code
+  C - 1 file(s) - Source C - Database schemas
+  D - 4 file(s) - Source D - Production code
 
   ->      A (95%, extension) npl-basel-guidelines.md
           Markdown file with no significant code blocks; Source A
   ->      B (95%, content_sniff) governance.json
           JSON contains 'element_name' field - governance reference
-  ->      D (99%, extension) npe_classifier.py
-  ...
+  ->      D (95%, extension) npe_classifier.py
+          File extension '.py' maps to Source D
+  ->      D (95%, extension) forbearance_validator.py
+  ->      D (95%, extension) upgrade_rules.py
+  ->      C (90%, content_sniff) finrep_npl_query.sql
+          SQL file with 1 DDL statements (CREATE TABLE/VIEW/...)
+  ->      D (60%, content_sniff) loan_constraints.sql
+          SQL file with no clear DDL or procedural pattern
 
 Dry run - no extractors invoked.
 ```
 
-The router classified the markdown file as Source A by extension, the
-JSON as Source B by **content sniffing** (it recognises the
-`element_name` field), and the Python/SQL files as Source D by
-extension. No extractors ran — this was just a preview.
+**What the router did:**
+- `.md` file → Source A by extension rule.
+- `governance.json` → Source B by **content sniff** (recognises the
+  `element_name` field in the JSON).
+- `.py` files → Source D by extension.
+- `finrep_npl_query.sql` contains a `CREATE VIEW`, so the SQL content
+  sniffer classifies it as **Source C** (schema DDL) — not Source D.
+- `loan_constraints.sql` has `ALTER TABLE ... CHECK` without a strong
+  DDL signal, so it falls back to Source D at lower confidence (0.60).
+  Worth reviewing manually before dispatch.
+
+This is correct behaviour: SQL files that declare structure (CREATE
+TABLE/VIEW) go to Source C; SQL files that express rules (WHERE
+filters, CHECK constraints, procedural code) go to Source D. No
+extractors ran in this dry run — it was just a preview.
 
 ---
 
@@ -362,7 +380,9 @@ Summary: 0 errors, ~15-20 warnings, ~10-15 info
   these are the nodes that hold different clusters together. The output
   is **capped at the 10 worst gaps** (by density) plus an overflow
   summary — use `--max-gaps N` to see more, or `--max-gaps 0` to
-  disable the gap check entirely if it's noisy on your domain.
+  disable the gap reporting entirely (no warnings, no overflow
+  summary). Bridge concepts are controlled independently by
+  `--max-bridges N` (default 10; `--max-bridges 0` disables that scan).
 
 ---
 
@@ -637,9 +657,11 @@ domains/npl/
 - **`extract-a` fails with auth error** → check `AZURE_API_KEY`,
   `AZURE_API_BASE`, `AZURE_API_VERSION` in `.env`. The CLI prints
   a hint when it detects an auth-related error message.
-- **Lint reports 377 structural gaps** → this is now capped at 10
-  by default. Raise with `--max-gaps N` or set `--max-gaps 0` to
-  skip the check on very fragmented graphs.
+- **Lint reports too many structural gaps** → this is capped at 10
+  by default. Raise with `--max-gaps N` to see more, or set
+  `--max-gaps 0` to disable gap reporting entirely (no warnings, no
+  overflow summary). Bridges are controlled separately via
+  `--max-bridges N`.
 - **`query "Default"` returns no match** → try a concept that's in the
   governance file: `Borrower`, `Collateral`, `Counterparty`,
   `Forbearance`, `Loan`, etc. Not every regulation term lands in

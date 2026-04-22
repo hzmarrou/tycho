@@ -324,63 +324,67 @@ def _check_structural_gaps(
     # Structural holes — sort by severity (worst first):
     #   1. Lowest density (0.0 = fully disconnected)
     #   2. Largest community size (impacts more concepts)
-    holes = _find_structural_holes(G, communities, hole_threshold)
-    holes_sorted = sorted(
-        holes,
-        key=lambda h: (h[3], -(len(h[0]) + len(h[1]))),  # density asc, size desc
-    )
-
-    total_holes = len(holes_sorted)
-    reported_holes = holes_sorted[:max_gaps]
-
-    for labels_a, labels_b, cross, density in reported_holes:
-        a_str = ", ".join(labels_a[:5])
-        b_str = ", ".join(labels_b[:5])
-        if len(labels_a) > 5:
-            a_str += f" (+{len(labels_a) - 5} more)"
-        if len(labels_b) > 5:
-            b_str += f" (+{len(labels_b) - 5} more)"
-
-        report.findings.append(
-            LintFinding(
-                category="structural_gap",
-                severity="warning",
-                element_name="",
-                message=(
-                    f"Communities {{{a_str}}} and {{{b_str}}} have "
-                    f"{'no' if cross == 0 else f'only {cross}'} "
-                    f"cross-connection(s) (density {density:.2f}). "
-                    f"Consider adding bridging relationships."
-                ),
-                details={
-                    "community_a": labels_a,
-                    "community_b": labels_b,
-                    "cross_edges": cross,
-                    "density": density,
-                },
-            )
+    # max_gaps=0 means "disable the hole check entirely" — no warnings
+    # and no overflow summary.
+    if max_gaps > 0:
+        holes = _find_structural_holes(G, communities, hole_threshold)
+        holes_sorted = sorted(
+            holes,
+            key=lambda h: (h[3], -(len(h[0]) + len(h[1]))),  # density asc, size desc
         )
 
-    if total_holes > max_gaps:
-        report.findings.append(
-            LintFinding(
-                category="structural_gap",
-                severity="info",
-                element_name="",
-                message=(
-                    f"{total_holes - max_gaps} additional structural "
-                    f"gap(s) not shown (showing worst {max_gaps} of "
-                    f"{total_holes}). Re-run with --max-gaps N to see more."
-                ),
-                details={
-                    "total_holes": total_holes,
-                    "shown": max_gaps,
-                },
-            )
-        )
+        total_holes = len(holes_sorted)
+        reported_holes = holes_sorted[:max_gaps]
 
-    # Bridge concepts (high betweenness centrality) — cap similarly
-    if len(G.edges) > 0:
+        for labels_a, labels_b, cross, density in reported_holes:
+            a_str = ", ".join(labels_a[:5])
+            b_str = ", ".join(labels_b[:5])
+            if len(labels_a) > 5:
+                a_str += f" (+{len(labels_a) - 5} more)"
+            if len(labels_b) > 5:
+                b_str += f" (+{len(labels_b) - 5} more)"
+
+            report.findings.append(
+                LintFinding(
+                    category="structural_gap",
+                    severity="warning",
+                    element_name="",
+                    message=(
+                        f"Communities {{{a_str}}} and {{{b_str}}} have "
+                        f"{'no' if cross == 0 else f'only {cross}'} "
+                        f"cross-connection(s) (density {density:.2f}). "
+                        f"Consider adding bridging relationships."
+                    ),
+                    details={
+                        "community_a": labels_a,
+                        "community_b": labels_b,
+                        "cross_edges": cross,
+                        "density": density,
+                    },
+                )
+            )
+
+        if total_holes > max_gaps:
+            report.findings.append(
+                LintFinding(
+                    category="structural_gap",
+                    severity="info",
+                    element_name="",
+                    message=(
+                        f"{total_holes - max_gaps} additional structural "
+                        f"gap(s) not shown (showing worst {max_gaps} of "
+                        f"{total_holes}). Re-run with --max-gaps N to see more."
+                    ),
+                    details={
+                        "total_holes": total_holes,
+                        "shown": max_gaps,
+                    },
+                )
+            )
+
+    # Bridge concepts (high betweenness centrality) — cap similarly.
+    # max_bridges=0 disables the bridge-concept scan entirely.
+    if len(G.edges) > 0 and max_bridges > 0:
         centrality = nx.betweenness_centrality(G, weight="weight")
         threshold = 1.0 / max(len(G.nodes) - 1, 1)
         bridges = [

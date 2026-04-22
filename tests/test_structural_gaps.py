@@ -252,3 +252,49 @@ class TestOutputCapping:
             if f.severity == "info" and "not shown" in f.message
         ]
         assert len(overflow_infos) == 0
+
+    def test_max_gaps_zero_disables_gap_check_entirely(self):
+        """The tutorial promises that --max-gaps 0 disables the gap
+        check. No structural_gap warnings AND no overflow summary
+        should be produced — the reviewer flagged that we were still
+        emitting a 'showing worst 0 of N' info.
+        """
+        result = self._build_fragmented_result(n_clusters=10)
+        report = lint(result, max_gaps=0, max_bridges=10)
+        # No warnings from holes
+        warnings = [
+            f for f in report.by_category("structural_gap")
+            if f.severity == "warning"
+        ]
+        assert len(warnings) == 0
+        # No overflow-summary info either
+        hole_infos = [
+            f for f in report.by_category("structural_gap")
+            if f.severity == "info" and "additional structural gap" in f.message
+        ]
+        assert len(hole_infos) == 0, (
+            "max_gaps=0 should suppress the overflow summary too, got: "
+            f"{[f.message for f in hole_infos]}"
+        )
+
+    def test_max_bridges_zero_disables_bridge_scan(self):
+        """max_bridges=0 should skip the bridge-concept scan entirely."""
+        # Build a graph with a clear bridge node
+        result = _result(
+            elements=[_el(n) for n in ["A", "B", "Bridge", "X", "Y"]],
+            relationships=[
+                _rel("A", "B"),
+                _rel("A", "Bridge"),
+                _rel("Bridge", "X"),
+                _rel("X", "Y"),
+            ],
+        )
+        report = lint(result, max_gaps=10, max_bridges=0)
+        bridge_infos = [
+            f for f in report.by_category("structural_gap")
+            if f.severity == "info" and "bridge concept" in f.message
+        ]
+        assert len(bridge_infos) == 0, (
+            "max_bridges=0 should suppress bridge findings, got: "
+            f"{[f.element_name for f in bridge_infos]}"
+        )
