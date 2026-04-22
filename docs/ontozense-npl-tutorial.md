@@ -298,12 +298,33 @@ Fused dictionary saved: domains/npl/derived/fused/v1.json
 **Inspect the fused output:**
 
 The JSON at `domains/npl/derived/fused/v1.json` contains:
-- `elements[]` — one entry per data element, with all fields populated
-  from whichever source could defensibly provide them
+- `elements[]` — one entry per data element, with fields populated
+  from whichever sources could defensibly provide them
 - `relationships[]` — from Source A and Source C (if schema was provided)
 - `summary` — counts of elements, governance-validated, conflicts, etc.
 
-Each element has:
+### What's in an element?
+
+The rich data dictionary is **structured but flexible**. Per
+[PLAYBOOK §2](PLAYBOOK.md) there are **17 canonical fields** with
+defined semantics (element_name, definition, is_critical, citation,
+data_type, enum_values, business_rules, the six DQ dimensions, etc.).
+Each has a primary source and a fallback; fusion knows how to merge
+and conflict-resolve them. On top of that, any extra fields the
+sources contributed (e.g., a custom `data_steward` column in your
+governance JSON) are carried through in `extra_fields` without
+interpretation.
+
+Two dimensions can vary:
+- **Total element count**: ~42 here with these inputs. A larger
+  regulation or more governance terms could easily push this to
+  200–500.
+- **Fields per element**: depends on which sources contributed for
+  that specific element. A governance-validated concept with a schema
+  match and a code rule could have 10+ fields populated. A name-only
+  concept from a regulation might have just 3.
+
+Example element (5 fields populated + provenance):
 ```json
 {
   "element_name": "Borrower",
@@ -315,9 +336,15 @@ Each element has:
   "confidence": 0.85,
   "sources": ["A", "B"],
   "needs_review": false,
-  "conflicts": []
+  "conflicts": [],
+  "extra_fields": {}
 }
 ```
+
+An element with schema + code contributions would also have
+`data_type`, `enum_values`, `business_rules` populated. A minimal
+orphan concept might only have `element_name`, `definition`,
+`confidence`.
 
 ---
 

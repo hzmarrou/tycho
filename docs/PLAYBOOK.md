@@ -17,7 +17,14 @@ A complete domain ontology is assembled from four complementary sources. Each so
 | **C — Database schemas** (PostgreSQL, Django, SQLAlchemy, DDL files) | Entities, properties, types, foreign keys, enum values, NOT NULL constraints | Direct introspection. Already implemented. |
 | **D — Production code** (Python, SQL) | Computational rules, thresholds, state transitions, classification logic, business constraints | AST parsing identifies candidates deterministically; LLM labels them with structured-output constraint; validator checks against parsed symbol table. Methodology: AI-RBX paper (`docs/AI-RBX.pdf`). |
 
-The **rich data dictionary** (with all 13 fields populated) is the OUTPUT of the fusion layer, not the extraction target of any single pass. Each source contributes its fields; fusion combines them with provenance.
+The **rich data dictionary** is the OUTPUT of the fusion layer, not the extraction target of any single pass. Each source contributes its fields; fusion combines them with provenance.
+
+**Shape of the fused dictionary.** The output is a JSON file containing a list of **elements** (one per data element). Two dimensions can vary:
+
+- **Number of elements (rows)** — highly variable. A tiny domain might have 5 elements; a large regulatory specification might have 500. This depends entirely on how much the ingested sources produced.
+- **Number of fields per element (columns)** — *semi-governed*. Up to **17 canonical fields** are defined in §2 below (the governance layer: Ontozense knows how to populate and merge these). In addition, any extra fields the sources contribute (e.g., a custom `data_steward` column in a governance JSON) are carried through in `extra_fields` and **preserved faithfully** without interpretation. A given element may have anywhere from 3 to 25+ actual fields populated, depending on which sources ran and what they carried.
+
+So the dictionary is a **structured governed JSON**: the 17 canonical fields have defined semantics, conflict resolution, and provenance. Extras are pass-through — Ontozense doesn't reason about them, but it doesn't drop them either.
 
 **On Source A naming:** Source A is *not* limited to formal regulations. It handles any document the domain experts treat as canonical — a regulator's guideline, a bank's internal credit-risk policy, an academic survey paper, an industry consortium's specification, a vendor's reference architecture. The defining property is that the document is **prose-shaped** (not structured rows, not code, not a schema) and **considered authoritative within the chosen knowledge base**. Curation of "what counts as authoritative" is the user's responsibility — Ontozense doesn't validate authoritativeness, only extracts from what the user has chosen to include.
 
@@ -25,7 +32,9 @@ The **rich data dictionary** (with all 13 fields populated) is the OUTPUT of the
 
 ## 2. Source-to-field mapping
 
-This table tells the fusion layer where each field in the rich data dictionary comes from. If a field is requested but no source provided it, it stays empty and the gap report flags it.
+This table defines the **17 canonical fields** of the rich data dictionary — which source is primary for each, which is the fallback, and what happens when neither can provide it. Any additional fields sources carry beyond this list are preserved in `extra_fields` (pass-through, no interpretation).
+
+If a field is requested but no source provided it, it stays empty and the gap report flags it.
 
 | Rich data dictionary field | Primary source | Fallback source | If neither |
 |---|---|---|---|

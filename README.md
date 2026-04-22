@@ -27,6 +27,29 @@ analysis on the concept graph. Query + file-back lets experts review
 the draft and commit their corrections back into the knowledge base,
 so the ontology improves with every cycle.
 
+## What's in a rich data dictionary?
+
+The fused output is a JSON file containing a list of **elements** (one
+per data element) — a structured governed dictionary with two
+dimensions that can vary:
+
+- **Number of elements**: highly variable. A tiny domain might have 5
+  elements, a large regulatory specification 500. Depends on what the
+  sources contributed.
+- **Number of fields per element**: up to **17 canonical fields**
+  defined in [PLAYBOOK §2](docs/PLAYBOOK.md) — `element_name`,
+  `definition`, `is_critical`, `citation`, `data_type`, `enum_values`,
+  `business_rules`, the six DQ dimensions, and so on. Each has a
+  primary source and fallbacks; fusion knows how to merge and
+  conflict-resolve them. **Plus** an `extra_fields` dict that carries
+  anything a source contributed beyond the canonical 17 (e.g., a
+  custom `data_steward` column in your governance JSON).
+
+A typical element might have 5–10 fields populated. A fully-enriched
+one could have 20+. Fields stay empty when no source provides them —
+the lint layer surfaces those gaps so the expert knows where to fill
+in.
+
 ## Quick start
 
 ```bash
