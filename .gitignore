@@ -1,5 +1,10 @@
 .env
 output/
+# Per-domain knowledge bases. The tutorial creates domains/npl/ inside
+# the cloned repo; ignore so tester-generated artifacts (extraction
+# JSONs, fused dictionaries, log.md, filed-back analyses) don't show
+# up as untracked files in `git status`.
+domains/
 __pycache__/
 *.pyc
 *.pyo
