@@ -1,0 +1,39 @@
+{
+  "profile_name": "minimal",
+  "profile_version": "1.0.0",
+  "description": "Tiny profile used by unit tests. Two entity types, one predicate, no fancy features.",
+
+  "entity_types": {
+    "Concept": {
+      "required": ["definition"],
+      "optional": ["citation"]
+    },
+    "Rule": {
+      "required": ["expression"],
+      "optional": ["docstring", "citation"]
+    }
+  },
+
+  "predicates": {
+    "AppliesTo": {
+      "subject_types": ["Rule"],
+      "object_types": ["Concept"],
+      "cardinality": "N:N"
+    }
+  },
+
+  "id_format": {
+    "strategy": "type_label_hash",
+    "hash_length": 6
+  },
+
+  "alias_map": {
+    "concept-1": "Concept One",
+    "co1": "Concept One"
+  },
+
+  "canonical_verbs": {
+    "applies to": "AppliesTo",
+    "governs": "AppliesTo"
+  }
+}

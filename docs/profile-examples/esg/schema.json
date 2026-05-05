@@ -1,0 +1,93 @@
+{
+  "profile_name": "esg",
+  "profile_version": "1.0.0",
+  "description": "ESG metric extraction from regulatory frameworks (SASB, TCFD, IFRS S2). Adapted from the OntoMetric ontology (https://github.com/Inspiring-Ming/OntoMetric). Copy this folder to your domain workspace and edit to taste.",
+
+  "entity_types": {
+    "Industry": {
+      "required": [],
+      "optional": ["sector", "country", "standard_reference"]
+    },
+    "ReportingFramework": {
+      "required": [],
+      "optional": ["version", "year", "publisher"]
+    },
+    "Category": {
+      "required": ["section_title"],
+      "optional": ["section_id", "page_range"]
+    },
+    "Metric": {
+      "required": ["measurement_type", "metric_type", "unit", "code", "description"],
+      "optional": ["disaggregations"],
+      "subtypes": ["DirectMetric", "CalculatedMetric", "InputMetric"]
+    },
+    "Model": {
+      "required": ["description", "equation", "input_variables"],
+      "optional": []
+    }
+  },
+
+  "predicates": {
+    "ReportUsing": {
+      "subject_types": ["Industry"],
+      "object_types": ["ReportingFramework"],
+      "cardinality": "1:1"
+    },
+    "Include": {
+      "subject_types": ["ReportingFramework"],
+      "object_types": ["Category"],
+      "cardinality": "1:N"
+    },
+    "ConsistOf": {
+      "subject_types": ["Category"],
+      "object_types": ["Metric"],
+      "cardinality": "1:N"
+    },
+    "IsCalculatedBy": {
+      "subject_types": ["CalculatedMetric"],
+      "object_types": ["Model"],
+      "cardinality": "1:1"
+    },
+    "RequiresInputFrom": {
+      "subject_types": ["Model"],
+      "object_types": ["InputMetric"],
+      "cardinality": "1:N"
+    }
+  },
+
+  "id_format": {
+    "strategy": "type_label_hash",
+    "hash_length": 6
+  },
+
+  "alias_map": {
+    "carbon emissions": "GHG Emissions",
+    "carbon footprint": "GHG Emissions",
+    "greenhouse gas emissions": "GHG Emissions",
+    "scope 1": "Scope 1 Emissions",
+    "scope 2": "Scope 2 Emissions",
+    "scope 3": "Scope 3 Emissions",
+    "energy consumption": "Energy Use",
+    "water usage": "Water Use",
+    "water consumption": "Water Use"
+  },
+
+  "canonical_verbs": {
+    "report using": "ReportUsing",
+    "uses framework": "ReportUsing",
+    "discloses with": "ReportUsing",
+    "include": "Include",
+    "includes": "Include",
+    "contains": "Include",
+    "consist of": "ConsistOf",
+    "consists of": "ConsistOf",
+    "comprises": "ConsistOf",
+    "is calculated by": "IsCalculatedBy",
+    "calculated by": "IsCalculatedBy",
+    "calculated using": "IsCalculatedBy",
+    "uses formula": "IsCalculatedBy",
+    "requires input from": "RequiresInputFrom",
+    "depends on": "RequiresInputFrom",
+    "uses": "RequiresInputFrom"
+  }
+}

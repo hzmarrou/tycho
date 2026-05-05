@@ -1,0 +1,22 @@
+{
+  "_comment": "Sidecar alias map. Overlays the alias_map declared in schema.json. Use this for deployment-specific synonyms (your organisation's preferred labels) without editing the shared schema. Keys are case-insensitive.",
+
+  "co2 emissions": "GHG Emissions",
+  "co2e emissions": "GHG Emissions",
+  "co2 equivalent emissions": "GHG Emissions",
+  "carbon dioxide emissions": "GHG Emissions",
+  "ghg": "GHG Emissions",
+
+  "scope1": "Scope 1 Emissions",
+  "scope2": "Scope 2 Emissions",
+  "scope3": "Scope 3 Emissions",
+
+  "water withdrawal": "Water Use",
+  "freshwater consumption": "Water Use",
+
+  "energy use intensity": "Energy Intensity",
+  "energy efficiency": "Energy Intensity",
+
+  "diversity ratio": "Workforce Diversity",
+  "gender ratio": "Workforce Diversity"
+}

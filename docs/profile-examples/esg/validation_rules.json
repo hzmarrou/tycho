@@ -1,0 +1,42 @@
+{
+  "_comment": "Custom validation rules beyond the schema (Phase 4). This file is loaded but not yet consumed — Phase 4 will read these rules. Documented here so authors can start drafting them.",
+
+  "rules": [
+    {
+      "id": "ESG-001",
+      "description": "Every CalculatedMetric must have exactly one IsCalculatedBy relationship.",
+      "applies_to": "CalculatedMetric",
+      "check": "has_predicate",
+      "predicate": "IsCalculatedBy",
+      "expected_count": 1,
+      "severity": "error"
+    },
+    {
+      "id": "ESG-002",
+      "description": "Every Model's input_variables list must be non-empty.",
+      "applies_to": "Model",
+      "check": "field_non_empty_list",
+      "field": "input_variables",
+      "severity": "error"
+    },
+    {
+      "id": "ESG-003",
+      "description": "Quantitative metrics must have a unit other than 'N/A'.",
+      "applies_to": "Metric",
+      "check": "field_value",
+      "filter": {"measurement_type": "Quantitative"},
+      "field": "unit",
+      "must_not_be": ["N/A", "TBD", ""],
+      "severity": "warning"
+    },
+    {
+      "id": "ESG-004",
+      "description": "DirectMetric and CalculatedMetric must have a code that matches the framework's pattern (e.g. FN-CB-230a.1).",
+      "applies_to": ["DirectMetric", "CalculatedMetric"],
+      "check": "field_regex",
+      "field": "code",
+      "pattern": "^[A-Z]{2}-[A-Z]{2,3}-\\d{3}[a-z]\\.\\d+$",
+      "severity": "warning"
+    }
+  ]
+}
