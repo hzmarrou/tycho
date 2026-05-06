@@ -426,14 +426,21 @@ class FusionEngine:
                         el.citation = f"{el.citation}; {rec.citation}"
                     elif not el.citation:
                         el.citation = rec.citation
-                    # Record provenance without conflict detection
+                    # Record provenance without conflict detection.
+                    # Phase 6: preserve any anchor already attached to
+                    # the existing citation provenance — Source B
+                    # doesn't carry its own anchor yet, but Source A's
+                    # anchor still points at the original citation
+                    # extraction location, which stays valid after
+                    # appending B's text.
+                    existing = el.field_provenance.get(
+                        "citation", FieldProvenance("", 0, ""),
+                    )
                     el.field_provenance["citation"] = FieldProvenance(
                         source="A+B",
-                        confidence=max(
-                            el.field_provenance.get("citation", FieldProvenance("", 0, "")).confidence,
-                            rec.confidence,
-                        ),
+                        confidence=max(existing.confidence, rec.confidence),
                         original_value=el.citation,
+                        anchor=existing.anchor,
                     )
 
                 if rec.domain_name:
@@ -787,11 +794,16 @@ class FusionEngine:
         # ``source_document`` alone isn't an anchor (it's the doc name
         # tracked separately via corroboration); we want section /
         # snippet / page / line / offset.
-        if not (prov.source_section or prov.source_text_snippet):
+        # Strip whitespace so values like "   " are treated as empty —
+        # otherwise ``is_empty()`` would consider them populated and
+        # the JSON serialiser would emit a useless anchor key.
+        section = (prov.source_section or "").strip()
+        snippet = (prov.source_text_snippet or "").strip()
+        if not (section or snippet):
             return None
         return FieldAnchor(
-            segment_id=prov.source_section or "",
-            snippet=prov.source_text_snippet or "",
+            segment_id=section,
+            snippet=snippet,
         )
 
     @staticmethod

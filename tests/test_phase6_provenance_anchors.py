@@ -94,8 +94,9 @@ class TestFieldAnchorShape:
 
     def test_frozen(self):
         """FieldAnchor is frozen — anchors are immutable values."""
+        from dataclasses import FrozenInstanceError
         a = FieldAnchor(page=1)
-        with pytest.raises(Exception):  # FrozenInstanceError, dataclasses raises
+        with pytest.raises(FrozenInstanceError):
             a.page = 2  # type: ignore[misc]
 
     def test_equality_by_value(self):
@@ -189,6 +190,41 @@ class TestSourceAAnchorThreading:
         el = r.elements[0]
         assert el.field_provenance["definition"].anchor is None
 
+    def test_whitespace_only_section_is_treated_as_empty(self):
+        """Regression for review minor: 'source_section'='   ' must
+        not create a synthetic anchor with segment_id='   ' that the
+        JSON serialiser would then emit. Whitespace = empty."""
+        sa = _doc(
+            "t",
+            [_concept_with_anchor(
+                "X",
+                definition="d",
+                section="   ",
+                snippet="\n\t  ",
+            )],
+        )
+        r = FusionEngine().fuse(source_a=sa)
+        el = r.elements[0]
+        assert el.field_provenance["definition"].anchor is None
+
+    def test_section_is_stripped_when_real_content_present(self):
+        """Leading/trailing whitespace around real content is stripped
+        from segment_id and snippet."""
+        sa = _doc(
+            "t",
+            [_concept_with_anchor(
+                "X",
+                definition="d",
+                section="  3.2 Definitions  ",
+                snippet="  Customer means...  ",
+            )],
+        )
+        r = FusionEngine().fuse(source_a=sa)
+        anchor = r.elements[0].field_provenance["definition"].anchor
+        assert anchor is not None
+        assert anchor.segment_id == "3.2 Definitions"
+        assert anchor.snippet == "Customer means..."
+
 
 # ─── 4. Conflict resolution preserves the winner's anchor ───────────────────
 
@@ -228,6 +264,45 @@ class TestConflictWinnerAnchor:
         )
         assert conflict.winner.anchor is not None
         assert conflict.winner.anchor.segment_id == "3.2 Definitions"
+
+    def test_source_b_citation_merge_preserves_source_a_anchor(self):
+        """Regression for review major: when Source B contributes an
+        additive citation to a Source A element, the resulting
+        ``A+B``-tagged FieldProvenance must still carry A's original
+        citation anchor. Pre-fix the merge constructed a new
+        FieldProvenance without the anchor, silently losing
+        provenance data."""
+        sa = _doc(
+            "t",
+            [_concept_with_anchor(
+                "Customer",
+                definition="A buyer.",
+                citation="Reg X §3.2",
+                section="3.2 Definitions",
+                snippet="Customer means a natural or legal person...",
+            )],
+        )
+        sb = GovernanceExtractionResult(
+            records=[GovernanceRecord(
+                element_name="Customer",
+                domain_name="t",
+                citation="GOV-CAT-2026-01",
+                is_critical=True,
+                confidence=0.95,
+            )],
+        )
+        r = FusionEngine().fuse(source_a=sa, source_b=sb)
+        el = r.elements[0]
+        # Combined citation has both texts
+        assert "Reg X §3.2" in el.citation
+        assert "GOV-CAT-2026-01" in el.citation
+        # The combined provenance is tagged A+B
+        cit_prov = el.field_provenance["citation"]
+        assert cit_prov.source == "A+B"
+        # Crucially: A's anchor is preserved (no anchor data loss)
+        assert cit_prov.anchor is not None
+        assert cit_prov.anchor.segment_id == "3.2 Definitions"
+        assert "Customer means" in cit_prov.anchor.snippet
 
 
 # ─── 5. AC1 byte-identity in serialised output ──────────────────────────────
