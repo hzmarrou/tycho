@@ -46,7 +46,12 @@ DJANGO_TYPE_MAP = {
 
 @dataclass
 class SchemaField:
-    """A parsed Django model field."""
+    """A parsed Django model field.
+
+    The ``id`` and ``entity_type`` fields are populated only when a
+    profile is loaded by the parser (constrained mode). Empty in
+    unconstrained mode.
+    """
     name: str
     field_type: str  # Django field type (e.g. "TextField", "IntegerField")
     playground_type: str  # Mapped Playground type
@@ -56,6 +61,9 @@ class SchemaField:
     choices_var: str = ""  # Name of the choices variable (e.g. "ASSET_CLASS_CHOICES")
     choices_values: list[str] = field(default_factory=list)  # Resolved choice labels
     max_length: int | None = None
+    # Profile-mode fields (empty in unconstrained mode):
+    id: str = ""
+    entity_type: str = ""
 
 
 @dataclass
@@ -71,12 +79,20 @@ class SchemaRelationship:
 
 @dataclass
 class SchemaModel:
-    """A parsed Django model (= database table)."""
+    """A parsed Django model (= database table).
+
+    The ``id`` and ``entity_type`` fields are populated only when a
+    profile is loaded by the parser (constrained mode). Empty in
+    unconstrained mode.
+    """
     name: str
     doc: str = ""
     fields: list[SchemaField] = field(default_factory=list)
     relationships: list[SchemaRelationship] = field(default_factory=list)
     source_file: str = ""
+    # Profile-mode fields (empty in unconstrained mode):
+    id: str = ""
+    entity_type: str = ""
 
 
 @dataclass
@@ -93,11 +109,34 @@ class SchemaResult:
 
 
 class DjangoSchemaParser:
-    """Parses Django model files using AST to extract schema information."""
+    """Parses Django model files using AST to extract schema information.
 
-    def __init__(self, models_dir: str | Path):
-        """Initialize with path to Django app directory containing model files."""
+    When a ``profile`` is provided (Phase 3 constrained mode), each
+    parsed model and field gets:
+
+      * a deterministic ``id`` via :func:`ontozense.core.identity.compute_id`
+      * an ``entity_type`` resolved against the profile's declared types
+
+    The model name is the primary signal for the entity_type. If the
+    model name (after alias resolution) matches a profile entity type,
+    that's used. Otherwise the entity_type stays empty for Phase 4
+    validation to flag.
+
+    When ``profile`` is None (default), behaviour is byte-identical to
+    pre-Phase-3 commits.
+    """
+
+    def __init__(self, models_dir: str | Path, profile=None):
+        """Initialize with path to Django app directory containing model files.
+
+        Args:
+            models_dir: Path to the Django app directory.
+            profile: Optional Profile from ontozense.core.profile. When
+                provided, parsed models and fields get deterministic IDs
+                and entity_type resolution.
+        """
         self.models_dir = Path(models_dir)
+        self.profile = profile
         self._choices_cache: dict[str, list[str]] = {}
 
     def parse(self) -> SchemaResult:
@@ -122,7 +161,64 @@ class DjangoSchemaParser:
                     result.models.append(m)
                     seen_names.add(m.name)
 
+        # Profile-aware post-processing: applied only when a profile
+        # is set. In unconstrained mode this branch is skipped and
+        # the result is byte-identical to pre-Phase-3 output.
+        if self.profile is not None:
+            self._apply_profile(result)
+
         return result
+
+    def _apply_profile(self, result: SchemaResult) -> None:
+        """Resolve aliases, compute deterministic IDs for models + fields.
+
+        Heuristic for entity_type resolution:
+          * Take the model name, resolve through profile.alias_map
+          * If the canonical name matches a profile entity_type, use it
+          * Otherwise leave entity_type="" for Phase 4 validation
+
+        Fields inherit their parent model's entity_type — they're
+        properties of that entity, not entities in their own right.
+        """
+        from ..core.identity import compute_id
+
+        for model in result.models:
+            canonical_name = self.profile.resolve_alias(model.name)
+            model.name = canonical_name
+
+            # Map model name to entity_type via the profile
+            if self.profile.is_known_type(canonical_name):
+                model.entity_type = canonical_name
+
+            # Compute model ID — even with unknown entity_type, we use
+            # the model name itself as the ID type prefix, so cross-
+            # source consolidation can still link it.
+            id_type = model.entity_type or canonical_name
+            try:
+                model.id = compute_id(
+                    id_type,
+                    canonical_name,
+                    hash_length=self.profile.id_format.hash_length,
+                )
+            except ValueError:
+                model.id = ""
+
+            # Fields inherit the parent's entity_type (they're properties
+            # of that entity). Each field gets its own deterministic ID
+            # using "<model_id>.<field_name>" semantics — keeps fields
+            # uniquely identified across the whole schema.
+            for f in model.fields:
+                f.entity_type = model.entity_type
+                # Field ID combines model + field via colon to avoid
+                # collisions with same-named fields on different models
+                try:
+                    f.id = compute_id(
+                        id_type,
+                        f"{canonical_name}:{f.name}",
+                        hash_length=self.profile.id_format.hash_length,
+                    )
+                except ValueError:
+                    f.id = ""
 
     def _parse_choices_file(self, filepath: Path) -> None:
         """Parse a *_choices.py file to extract choice tuples."""

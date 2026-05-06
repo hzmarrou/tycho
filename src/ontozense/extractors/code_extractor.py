@@ -65,6 +65,14 @@ class CodeRule:
     ``natural_language``, ``business_purpose``, and an ``applies_to``
     field referencing entities/properties from the schema or data
     dictionary.
+
+    The ``attached_to_entity_id`` and ``attached_to_entity_type`` fields
+    are populated only when a profile is loaded by the extractor
+    (constrained mode). They identify the domain entity this rule
+    applies to — e.g. a constant ``NPE_DPD_THRESHOLD`` attached to
+    entity_type "Metric" with deterministic ID "metric_npe_dpd_..." —
+    so Phase 5 fusion can consolidate code rules under their target
+    entity. Empty in unconstrained mode.
     """
     rule_type: str
     # One of:
@@ -84,6 +92,9 @@ class CodeRule:
     docstring: str = ""
     confidence: float = 0.95           # deterministic parsing — high
     provenance: Optional[CodeProvenance] = None
+    # Profile-mode fields (empty in unconstrained mode):
+    attached_to_entity_id: str = ""
+    attached_to_entity_type: str = ""
 
 
 @dataclass
@@ -527,9 +538,27 @@ class SqlCodeExtractor:
 
 
 class CodeExtractor:
-    """Walks a directory and runs language-specific extractors per file."""
+    """Walks a directory and runs language-specific extractors per file.
 
-    def __init__(self) -> None:
+    When a ``profile`` is provided (Phase 3 constrained mode), each
+    extracted ``CodeRule`` gets:
+
+      * ``attached_to_entity_type`` resolved from the rule's
+        ``referenced_symbols`` via heuristics (alias map first, then
+        capitalised-prefix matching like ``CUSTOMER_THRESHOLD`` →
+        entity_type "Customer" if declared)
+      * ``attached_to_entity_id`` computed deterministically when the
+        type is resolvable
+
+    Rules whose anchor doesn't resolve are kept (not dropped) — their
+    profile fields stay empty and Phase 4 validation flags them.
+
+    When ``profile`` is None (default), behaviour is byte-identical to
+    pre-Phase-3 commits.
+    """
+
+    def __init__(self, profile=None) -> None:
+        self.profile = profile
         self.python_extractor = PythonCodeExtractor()
         self.sql_extractor = SqlCodeExtractor()
 
@@ -566,4 +595,95 @@ class CodeExtractor:
                 result.files_scanned.append(str(path))
             except Exception as e:
                 result.files_failed.append((str(path), f"{type(e).__name__}: {e}"))
+
+        # Profile-aware post-processing: applied only when a profile
+        # is set. In unconstrained mode this branch is skipped and
+        # the result is byte-identical to pre-Phase-3 output.
+        if self.profile is not None:
+            self._apply_profile(result)
+
         return result
+
+    def _apply_profile(self, result: CodeExtractionResult) -> None:
+        """Resolve attached entity_type + ID for each CodeRule.
+
+        Heuristic, in order:
+          1. Walk ``rule.referenced_symbols`` looking for anything that
+             resolves (via alias map or direct match) to a profile
+             entity type. Use the first match.
+          2. If the rule's own ``name`` (e.g. constant name like
+             ``BORROWER_DPD_THRESHOLD``) starts with a known entity type
+             name (case-insensitive), attach to that type.
+          3. Otherwise leave attached_to_entity_type="" and let Phase 4
+             validation flag it.
+        """
+        from ..core.identity import compute_id
+
+        # Build a case-insensitive lookup of known type names + their
+        # canonical (case-correct) forms, including subtypes.
+        known_types: dict[str, str] = {}
+        for et in self.profile.entity_types.values():
+            known_types[et.name.lower()] = et.name
+            for sub in et.subtypes:
+                known_types[sub.lower()] = sub
+
+        for rule in result.rules:
+            entity_type = self._infer_entity_type(rule, known_types)
+            if not entity_type:
+                continue
+
+            # Use the rule's name as the label for ID generation. For
+            # SQL rules, ``rule.name`` is the table/view/check name —
+            # which is exactly the entity-level identifier we want.
+            try:
+                rule.attached_to_entity_type = entity_type
+                rule.attached_to_entity_id = compute_id(
+                    entity_type,
+                    rule.name,
+                    hash_length=self.profile.id_format.hash_length,
+                )
+            except ValueError:
+                # Label normalises to empty; profile fields stay empty.
+                rule.attached_to_entity_type = entity_type
+                rule.attached_to_entity_id = ""
+
+    def _infer_entity_type(
+        self,
+        rule: CodeRule,
+        known_types: dict[str, str],
+    ) -> str:
+        """Heuristic for finding the entity_type a code rule attaches to.
+
+        Returns the canonical (case-correct) entity_type name, or "" if
+        no match. Pure function modulo the profile alias map.
+        """
+        # 1. Look at referenced_symbols — these are dotted attribute
+        #    accesses like "loan.days_past_due" or attribute names like
+        #    "amount". The leading token (before the dot) is the most
+        #    likely entity reference.
+        for sym in rule.referenced_symbols:
+            head = sym.split(".", 1)[0]
+            # Try alias resolution first
+            canonical = self.profile.resolve_alias(head)
+            if canonical.lower() in known_types:
+                return known_types[canonical.lower()]
+            # Then direct match
+            if head.lower() in known_types:
+                return known_types[head.lower()]
+
+        # 2. Match the rule's name's leading capitalised token against
+        #    known types (handles BORROWER_DPD_THRESHOLD style names).
+        #    Split on underscore, hyphen, dot — try each prefix length
+        #    from longest to shortest.
+        import re as _re
+        tokens = _re.split(r"[_\-.]", rule.name)
+        for n in range(len(tokens), 0, -1):
+            candidate = "_".join(tokens[:n]).lower()
+            if candidate in known_types:
+                return known_types[candidate]
+            # Also try alias resolution on the candidate
+            canonical = self.profile.resolve_alias(candidate)
+            if canonical.lower() in known_types:
+                return known_types[canonical.lower()]
+
+        return ""
