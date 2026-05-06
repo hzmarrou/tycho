@@ -325,6 +325,18 @@ def extract_a(
         False, "--skip-definitions-pass",
         help="Skip the regex-based second pass that enriches concepts with definitions",
     ),
+    profile: Path = typer.Option(
+        None, "--profile",
+        help=(
+            "Path to a profile directory containing schema.json (and "
+            "optional sidecars). Enables ontology-constrained extraction: "
+            "the LLM is constrained to the profile's allowed entity types "
+            "and predicates, concepts get deterministic IDs, and verbs are "
+            "canonicalised. Without this flag, extraction runs unconstrained "
+            "(byte-identical to pre-Phase-2 behaviour). See "
+            "docs/PROFILE_SPEC.md and docs/profile-examples/esg/."
+        ),
+    ),
 ) -> None:
     """Extract concepts and relationships from authoritative domain documents (Source A).
 
@@ -339,8 +351,12 @@ def extract_a(
     explicit definitional patterns the LLM may have missed and enriches the
     concept list.
 
+    With --profile, runs in constrained mode: the LLM is told the allowed
+    entity types/predicates, concepts get deterministic IDs, names are
+    canonicalised via the profile's alias_map, and verbs via canonical_verbs.
+
     The output is a per-source Excel with Concepts and Relationships sheets.
-    The rich 13-field data dictionary is the OUTPUT of the fusion layer
+    The rich 17-field data dictionary is the OUTPUT of the fusion layer
     (Step 6), assembled from all four sources.
     """
     _load_env()
@@ -354,9 +370,35 @@ def extract_a(
     from .exporters import DomainDocumentExcelExporter
     from .log import append_log
 
+    # Load profile if requested. Failures are user-facing (clean error,
+    # no traceback), per the tester-readiness UX contract.
+    loaded_profile = None
+    if profile is not None:
+        from .core.profile import load_profile, ProfileError
+        try:
+            loaded_profile = load_profile(profile)
+        except ProfileError as e:
+            console.print(f"[bold red][x] Profile load failed:[/] {e}")
+            console.print(
+                "  See docs/PROFILE_SPEC.md for the required schema.json "
+                "format, or copy docs/profile-examples/esg/ as a starting "
+                "point."
+            )
+            raise typer.Exit(code=1)
+
+    if loaded_profile is None:
+        console.print("[dim]Mode: unconstrained[/]")
+    else:
+        console.print(
+            f"[bold green]Mode: constrained[/] "
+            f"(profile={loaded_profile.profile_name}, "
+            f"version={loaded_profile.profile_version})"
+        )
+
     extractor = DomainDocumentExtractor(
         model=model,
         template_path=str(template) if template else None,
+        profile=loaded_profile,
     )
 
     # Extract from each document

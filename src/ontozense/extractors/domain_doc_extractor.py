@@ -73,12 +73,20 @@ class Concept:
 
     Per the A2 format choice: ``definition`` is an optional inline field of
     the concept itself, not a separate top-level list.
+
+    The ``id`` and ``entity_type`` fields are populated only when a profile
+    is loaded (constrained mode). In unconstrained mode they remain empty
+    strings — preserving byte-identical output for callers that don't use
+    profiles.
     """
     name: str
     definition: str = ""
     citation: str = ""
     confidence: list[FieldConfidence] = field(default_factory=list)
     provenance: Optional[Provenance] = None
+    # Profile-mode fields (empty in unconstrained mode):
+    id: str = ""
+    entity_type: str = ""
 
     def overall_confidence(self) -> float:
         if not self.confidence:
@@ -106,13 +114,23 @@ class Relationship:
 
 @dataclass
 class DomainDocumentExtractionResult:
-    """Result of extracting concepts and relationships from one or more documents."""
+    """Result of extracting concepts and relationships from one or more documents.
+
+    The ``extraction_mode``, ``profile_name``, and ``profile_version`` fields
+    are populated only when a profile is loaded. In unconstrained mode they
+    remain empty strings — preserving byte-identical output for callers that
+    don't use profiles.
+    """
     domain_name: str = ""
     concepts: list[Concept] = field(default_factory=list)
     relationships: list[Relationship] = field(default_factory=list)
     source_documents: list[str] = field(default_factory=list)
     raw_outputs: list[str] = field(default_factory=list)
     extraction_timestamp: str = ""
+    # Profile-mode metadata (empty in unconstrained mode):
+    extraction_mode: str = ""
+    profile_name: str = ""
+    profile_version: str = ""
 
     def get_concept(self, name: str) -> Optional[Concept]:
         target = name.lower().strip()
@@ -121,17 +139,42 @@ class DomainDocumentExtractionResult:
                 return c
         return None
 
+    def get_concept_by_id(self, entity_id: str) -> Optional[Concept]:
+        """Look up a concept by deterministic ID (profile mode only)."""
+        for c in self.concepts:
+            if c.id == entity_id:
+                return c
+        return None
+
 
 # ─── Extractor ────────────────────────────────────────────────────────────────
 
 
 class DomainDocumentExtractor:
-    """Extracts concepts and relationships from authoritative domain documents."""
+    """Extracts concepts and relationships from authoritative domain documents.
+
+    When ``profile`` is provided (Phase 2 constrained mode), the extractor:
+      * generates a profile-aware LinkML template at runtime that injects
+        the profile's prompt fragment, allowed entity types, and allowed
+        predicates into the LLM prompt
+      * parses extracted concepts as ``name :: type :: definition``
+        triplets (3-part instead of unconstrained 2-part)
+      * applies the profile's alias_map to canonicalise names
+      * computes deterministic IDs via :func:`ontozense.core.identity.compute_id`
+      * canonicalises relationship predicates via the profile's
+        canonical_verbs map
+
+    When ``profile`` is None (default, backward-compatible mode), behaviour
+    is byte-identical to commit 46e2e8d. The ``id`` and ``entity_type``
+    fields remain empty on every Concept; ``extraction_mode`` etc. remain
+    empty on the result.
+    """
 
     def __init__(
         self,
         model: str = "azure/gpt-5.4",
         template_path: Optional[str | Path] = None,
+        profile=None,
     ):
         # Default is gpt-5.4 — see PLAYBOOK §12 for the gpt-5.2 vs gpt-5.4
         # comparison. gpt-5.4 produces ~2.4× more LLM-validated concepts
@@ -139,13 +182,146 @@ class DomainDocumentExtractor:
         # was already gpt-5.4; this constructor default used to lag behind
         # and silently downgraded non-CLI callers.
         self.model = model
-        self.template_path = Path(template_path) if template_path else TEMPLATE_PATH
+        self.profile = profile  # Optional Profile from ontozense.core.profile
+
+        # If user passed a custom template path, that always wins. Otherwise
+        # in profile mode we generate a profile-aware template; in
+        # unconstrained mode we use the bundled default.
+        if template_path is not None:
+            self.template_path = Path(template_path)
+        elif profile is not None:
+            self.template_path = self._generate_profile_template(profile)
+        else:
+            self.template_path = TEMPLATE_PATH
+
         if not self.template_path.exists():
             raise FileNotFoundError(f"Template not found: {self.template_path}")
         self._ontogpt = OntoGPTExtractor(
             model=model,
             template_path=str(self.template_path),
         )
+
+    @staticmethod
+    def _generate_profile_template(profile) -> Path:
+        """Write a profile-aware LinkML template to a temp file.
+
+        The template embeds the profile's prompt fragment plus explicit
+        lists of allowed entity types and predicates in the SPIRES
+        descriptions, asking the LLM to format concepts as a 3-part
+        ``name :: type :: definition`` triplet.
+
+        Returns the path to the generated template.
+        """
+        import tempfile
+
+        # Build allowed-types list (entities + their subtypes, all in one set)
+        type_names: list[str] = []
+        for et in profile.entity_types.values():
+            type_names.append(et.name)
+            type_names.extend(et.subtypes)
+
+        types_block = "\n".join(f"  - {t}" for t in type_names)
+        predicates_block = "\n".join(
+            f"  - {p}" for p in profile.predicates.keys()
+        ) or "  (no predicates declared)"
+
+        # Profile prompt fragment is rendered as-is in the top-level
+        # description so SPIRES surfaces it verbatim to the LLM.
+        prompt_section = profile.prompt_fragment.strip() or (
+            f"Domain profile: {profile.profile_name} "
+            f"(version {profile.profile_version})"
+        )
+
+        # Required-field rules per type — surfaced so the LLM emits them
+        required_rules = []
+        for et in profile.entity_types.values():
+            if et.required_fields:
+                required_rules.append(
+                    f"  - {et.name}: requires {', '.join(et.required_fields)}"
+                )
+        required_block = "\n".join(required_rules) or "  (no required fields)"
+
+        template_yaml = f"""\
+id: http://w3id.org/ontozense/profile_constrained_extraction
+name: profile_constrained_extraction
+title: Profile-constrained Domain Document Extraction ({profile.profile_name})
+description: |-
+  {prompt_section}
+
+  Allowed entity types (use exactly these names — do not invent types):
+{types_block}
+
+  Allowed relationship predicates (use exactly these names):
+{predicates_block}
+
+  Required fields per entity type:
+{required_block}
+
+prefixes:
+  rdf: http://www.w3.org/1999/02/22-rdf-syntax-ns#
+  ddoc: http://w3id.org/ontozense/domain_doc_extraction/
+  linkml: https://w3id.org/linkml/
+
+default_prefix: ddoc
+default_range: string
+
+imports:
+  - linkml:types
+
+classes:
+  DomainDocumentExtraction:
+    tree_root: true
+    description: >-
+      Knowledge extracted from one authoritative domain document under
+      the {profile.profile_name} profile. Use only the entity types and
+      predicates declared above. Do not invent new ones.
+    attributes:
+      domain_name:
+        description: >-
+          The high-level business domain or sub-domain this document
+          describes.
+
+      concepts:
+        description: |-
+          A list of distinct concepts found in the source document. Each
+          item must be a single line in the THREE-part format:
+
+             concept name :: ENTITY_TYPE :: definition text
+
+          ENTITY_TYPE must be exactly one of the allowed types listed in
+          the top-level description. The definition text is required when
+          the document explicitly defines the concept; otherwise put a
+          short noun phrase summarising what the concept refers to in
+          this domain.
+
+          Include a concept ONLY if the source document EXPLICITLY
+          references it as a relevant entity of one of the allowed types.
+          Output the list as a YAML list (each item on its own line
+          prefixed by "- ") OR as a JSON array.
+        multivalued: true
+
+      relationships:
+        description: |-
+          A list of subject-predicate-object triples. Each item must be
+          a single line:
+
+             subject -> predicate -> object
+
+          The subject and object should match concept names above. The
+          predicate MUST be one of the allowed predicate names listed in
+          the top-level description. If a relationship cannot be expressed
+          using one of those predicates, omit it entirely. Output as a
+          YAML list or JSON array.
+        multivalued: true
+"""
+
+        temp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False, encoding="utf-8",
+            prefix=f"ontozense_profile_{profile.profile_name}_",
+        )
+        temp.write(template_yaml)
+        temp.close()
+        return Path(temp.name)
 
     def extract_from_file(self, file_path: str | Path) -> DomainDocumentExtractionResult:
         """Extract concepts and relationships from a single document.
@@ -166,7 +342,56 @@ class DomainDocumentExtractor:
             source_text = file_path.read_text(encoding="utf-8", errors="ignore")
 
         raw_output = self._ontogpt._run_ontogpt(file_path, self.template_path)
-        return self._parse_ontogpt_output(raw_output, file_path, source_text)
+        result = self._parse_ontogpt_output(raw_output, file_path, source_text)
+
+        # Profile-aware post-processing: applied only when a profile is set.
+        # In unconstrained mode this branch is skipped and the result is
+        # byte-identical to commit 46e2e8d.
+        if self.profile is not None:
+            self._apply_profile(result)
+
+        return result
+
+    # ─── Profile-aware post-processing ───────────────────────────────────
+
+    def _apply_profile(self, result: DomainDocumentExtractionResult) -> None:
+        """Apply alias resolution, ID generation, and verb canonicalisation.
+
+        Mutates ``result`` in place. Records profile metadata on the
+        result. Quarantines (does not drop) entities whose declared type
+        isn't in the profile schema — Phase 4's validation stage decides
+        what to do with them.
+        """
+        from ..core.identity import compute_id
+
+        result.extraction_mode = "constrained"
+        result.profile_name = self.profile.profile_name
+        result.profile_version = self.profile.profile_version
+
+        # Concepts: resolve aliases, compute deterministic IDs
+        for c in result.concepts:
+            # Resolve alias before computing ID so synonyms collapse to
+            # the canonical name in IDs.
+            canonical_name = self.profile.resolve_alias(c.name)
+            c.name = canonical_name
+
+            # Only compute an ID if the LLM gave us a type. If the type
+            # is missing or empty, leave id="" — Phase 4 will flag it.
+            if c.entity_type and canonical_name.strip():
+                try:
+                    c.id = compute_id(c.entity_type, canonical_name)
+                except ValueError:
+                    # Label normalises to empty (e.g. all-punctuation):
+                    # leave id="" so validation catches it.
+                    c.id = ""
+
+        # Relationships: canonicalise predicate verbs
+        for rel in result.relationships:
+            rel.predicate = self.profile.canonicalise_verb(rel.predicate)
+            # Resolve aliases on subject + object too, so cross-source
+            # matching works downstream (Phase 5).
+            rel.subject = self.profile.resolve_alias(rel.subject)
+            rel.object = self.profile.resolve_alias(rel.object)
 
     # ─── Output parsing ───────────────────────────────────────────────────
 
@@ -325,16 +550,38 @@ class DomainDocumentExtractor:
     ) -> Concept:
         """Build a ``Concept`` from a raw text item.
 
-        Splits on ``::`` if present (the format we asked for); otherwise
-        treats trailing parenthetical content as an inline definition;
-        otherwise treats the whole string as the name.
+        Profile-aware parser:
+          * In **constrained mode** (``self.profile is not None``), accepts
+            the 3-part format ``name :: TYPE :: definition``. The middle
+            field is captured as ``entity_type``. If the LLM emits only
+            two parts in constrained mode, we still accept it and leave
+            ``entity_type=""`` — Phase 4 validation will flag it.
+          * In **unconstrained mode** (default), accepts the 2-part
+            ``name :: definition`` format unchanged from earlier
+            commits — splits parenthetical inline definitions, etc.
+
+        The unconstrained path is byte-identical to commit 46e2e8d.
         """
         raw = raw.strip().strip('"').strip("'")
+        entity_type = ""
 
         if "::" in raw:
-            name, _, definition = raw.partition("::")
-            name = name.strip()
-            definition = definition.strip()
+            parts = [p.strip() for p in raw.split("::")]
+            # Profile mode prefers 3 parts; unconstrained always treats
+            # everything after the first :: as the definition.
+            if self.profile is not None and len(parts) >= 3:
+                # name :: TYPE :: definition (rejoin extras into definition
+                # in case it itself contains "::")
+                name = parts[0]
+                entity_type = parts[1]
+                definition = "::".join(parts[2:]).strip()
+            else:
+                # Unconstrained, or profile-mode but the LLM only gave us
+                # 2 parts — fall through to the legacy 2-part split which
+                # the test suite locks down byte-identical.
+                name, _, definition = raw.partition("::")
+                name = name.strip()
+                definition = definition.strip()
         elif raw.endswith(")") and "(" in raw:
             paren_start = raw.rfind("(")
             name = raw[:paren_start].strip()
@@ -348,7 +595,7 @@ class DomainDocumentExtractor:
             name = raw
             definition = ""
 
-        concept = Concept(name=name, definition=definition)
+        concept = Concept(name=name, definition=definition, entity_type=entity_type)
 
         concept.confidence.append(self._score_text_field(name, source_text, "name"))
         if definition:
