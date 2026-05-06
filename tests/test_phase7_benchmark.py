@@ -254,6 +254,36 @@ class TestCorroborationStats:
         assert r.corroboration.distribution["2_docs"] == 2
         assert r.corroboration.distribution["3+_docs"] == 2
 
+    def test_non_positive_counts_are_skipped(self):
+        """Regression for Phase 7 review minor: a hand-edited fused
+        JSON with ``corroborating_doc_count`` of 0 or negative values
+        was previously mis-bucketed as ``3+_docs`` via the else
+        branch. Now those anomalous values are skipped entirely:
+        not tracked, not bucketed."""
+        r = compute_benchmark(_result([
+            _el("zero", extra_fields={"corroborating_doc_count": 0}),
+            _el("neg", extra_fields={"corroborating_doc_count": -1}),
+            _el("ok", extra_fields={"corroborating_doc_count": 2}),
+            _el("untracked"),  # no key at all
+        ]))
+        # Only "ok" is tracked
+        assert r.corroboration.elements_tracked == 1
+        assert r.corroboration.distribution == {
+            "1_doc": 0, "2_docs": 1, "3+_docs": 0,
+        }
+
+    def test_non_int_counts_are_skipped(self):
+        """Defensive: a non-integer value (string, float, list)
+        in corroborating_doc_count is treated as anomalous and
+        skipped, not crashed-on or bucketed."""
+        r = compute_benchmark(_result([
+            _el("str", extra_fields={"corroborating_doc_count": "two"}),
+            _el("float", extra_fields={"corroborating_doc_count": 2.5}),
+            _el("ok", extra_fields={"corroborating_doc_count": 1}),
+        ]))
+        assert r.corroboration.elements_tracked == 1
+        assert r.corroboration.distribution["1_doc"] == 1
+
 
 # ─── 6. Profile coverage (when profile supplied) ───────────────────────────
 

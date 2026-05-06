@@ -242,7 +242,13 @@ def _compute_corroboration_stats(
     })
     for el in elements:
         count = el.extra_fields.get("corroborating_doc_count")
-        if count is None:
+        # Skip absent (None) and anomalous (<= 0) values. Phase 5
+        # fusion never sets a non-positive count — corroboration
+        # tracking only fires after at least one doc is appended —
+        # but a hand-edited fused JSON could carry one. Silently
+        # ignore those rather than mis-bucketing them as ``3+_docs``
+        # via the else branch.
+        if count is None or not isinstance(count, int) or count <= 0:
             continue
         stats.elements_tracked += 1
         if count == 1:
