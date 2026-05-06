@@ -1,8 +1,10 @@
 # Independent Review Assignment — Phase 5: Fusion Consolidation
 
-**Review on:** branch `feat/phase-5-fusion-consolidation` at HEAD `0827815`
+**Review on:** branch `feat/phase-5-fusion-consolidation` at HEAD `11c2559`
 **Repository:** `C:\Users\hzmarrou\OneDrive\python\projects\ontozense`
-**Master is at:** `9fc7124` (Phase 4 merged after your prior review).
+**Master is at:** `986ad76` (Phase 4 merge `9fc7124` + a one-line
+chore fix to make a developer-only test path env-driven so the
+baseline test count is now stable across OSes — see §2).
 **Not yet merged to master.** Your verdict gates the merge.
 
 ---
@@ -55,21 +57,39 @@ We **do** want a review of:
 **PRD AC1: no-profile behaviour must be byte-identical.** Non-negotiable.
 
 ```bash
-# Baseline (post-Phase-4)
-git checkout master                            # at 9fc7124
-pytest -q                                       # → 522 passed, 10 skipped
+# Baseline (post-Phase-4 + chore fix)
+git checkout master                            # at 986ad76
+pytest -q                                       # → 518 passed, 14 skipped
 
 # Branch under review
-git checkout feat/phase-5-fusion-consolidation  # at 0827815
-pytest -q                                       # → 542 passed, 10 skipped
-                                                #   (522 baseline + 20 new)
+git checkout feat/phase-5-fusion-consolidation  # at 11c2559
+pytest -q                                       # → 538 passed, 14 skipped
+                                                #   (518 baseline + 20 new)
 ```
 
-The 522 baseline tests must still pass byte-identical — no test was
-modified, replaced, or reordered. If you find a single pre-existing
-test whose behaviour or assertion changed, that's a **blocker**.
+The 518 baseline tests must still pass byte-identical — no
+pre-existing test was modified, replaced, or reordered. The Phase 5
+delta is exactly **+20 passed, +0 skipped**. If your env produces a
+different absolute count but the same +20 / +0 delta between master
+and the branch, the gate is met. If you see ANY pre-existing test
+flip from passing to failing, or any pre-existing skipped test
+unexpectedly pass / vice-versa, that's a **blocker**.
 
-Phase 5 changes two pre-Phase-5 modules:
+### Note on the master `986ad76` chore fix
+
+Your prior Phase 5 baseline run reported `538 passed, 14 skipped`
+where the original assignment expected `542 passed, 10 skipped`.
+That delta was caused by `tests/test_npl_pipeline.py:150` hardcoding
+a developer-specific Windows path (`C:\Users\hzmarrou\OneDrive\...`)
+that resolved on the original developer's machine but skipped
+silently in WSL / Linux / non-Windows. The chore commit `986ad76`
+on master replaces it with an `ONTOZENSE_COMBINED_EXTRACTION_JSON`
+env var: when unset (which is the case in CI / clean-checkout review
+envs), the four `TestConvertExistingExtraction` tests skip
+deterministically. Counts are now stable across OSes — your earlier
+delta finding was correct and is now resolved upstream of Phase 5.
+
+### Phase 5 changes two pre-Phase-5 modules:
 - ``core/fusion.py``: ``_get_or_create`` rewritten, ``_lookup`` and
   ``_track_corroboration`` added, all four ``_merge_source_X`` methods
   modified to thread ``id_lookup`` and use the new helpers.
