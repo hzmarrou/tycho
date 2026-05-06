@@ -217,7 +217,13 @@ def _check_vr001_uniqueness(
             seen[eid] = el
 
     if mode == "filter" and duplicates:
-        kept = [el for el in elements if el not in duplicates]
+        # Use object identity (id()) not value-equality. FusedElement is
+        # a default @dataclass with field-based __eq__, so two duplicates
+        # with identical field values would compare equal — a value-based
+        # `not in duplicates` filter would then drop the kept first
+        # occurrence too. Identity-based filtering preserves "first wins".
+        dup_object_ids = {id(d) for d in duplicates}
+        kept = [el for el in elements if id(el) not in dup_object_ids]
         result.cascade_filtered_entities += len(duplicates)
         return kept
     return elements
@@ -288,7 +294,9 @@ def _check_vr002_type_membership(
             invalid.append(el)
 
     if mode == "filter" and invalid:
-        kept = [el for el in elements if el not in invalid]
+        # Identity-based filter — same reasoning as VR001.
+        invalid_object_ids = {id(x) for x in invalid}
+        kept = [el for el in elements if id(el) not in invalid_object_ids]
         result.cascade_filtered_entities += len(invalid)
         return kept
     return elements
@@ -379,7 +387,10 @@ def _check_vr004_predicate_vocabulary(
             invalid.append(rel)
 
     if mode == "filter" and invalid:
-        return [r for r in relationships if r not in invalid]
+        # Identity-based filter — FusedRelationship is also a default
+        # @dataclass and would otherwise drop value-equal kept entries.
+        invalid_object_ids = {id(r) for r in invalid}
+        return [r for r in relationships if id(r) not in invalid_object_ids]
     return relationships
 
 

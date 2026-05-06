@@ -164,6 +164,40 @@ class TestVr001Uniqueness:
         assert len(r.elements) == 2
         assert r.cascade_filtered_entities == 0
 
+    def test_filter_mode_keeps_first_when_duplicates_field_identical(self):
+        """Regression for review finding: when duplicates have identical
+        field values, dataclass __eq__ would have caused the kept first
+        occurrence to also be filtered out, producing zero survivors.
+        Identity-based filtering must keep exactly one."""
+        profile = load_profile(MINIMAL_PROFILE_DIR)
+        r = validate(
+            _result([
+                _el("Same", eid="concept_same_111111", entity_type="Concept", definition="d"),
+                _el("Same", eid="concept_same_111111", entity_type="Concept", definition="d"),
+            ]),
+            profile,
+            mode="filter",
+        )
+        assert len(r.elements) == 1
+        assert r.elements[0].element_name == "Same"
+        assert r.cascade_filtered_entities >= 1
+
+    def test_filter_mode_handles_three_identical_duplicates(self):
+        """Three field-identical duplicates → keep one, drop two."""
+        profile = load_profile(MINIMAL_PROFILE_DIR)
+        r = validate(
+            _result([
+                _el("Triplet", eid="concept_t_111111", entity_type="Concept", definition="d"),
+                _el("Triplet", eid="concept_t_111111", entity_type="Concept", definition="d"),
+                _el("Triplet", eid="concept_t_111111", entity_type="Concept", definition="d"),
+            ]),
+            profile,
+            mode="filter",
+        )
+        assert len(r.elements) == 1
+        # Two VR001 findings (one per duplicate beyond the first)
+        assert len(r.by_rule("VR001")) == 2
+
 
 # ─── VR002: Type membership ─────────────────────────────────────────────────
 
@@ -219,6 +253,24 @@ class TestVr002TypeMembership:
         assert len(r.elements) == 1
         assert r.elements[0].element_name == "X"
         assert r.cascade_filtered_entities >= 1
+
+    def test_filter_mode_handles_two_field_identical_unknown_types(self):
+        """Defensive regression: two field-identical entities with
+        unknown types must both be dropped; the surviving valid entity
+        must not be removed by dataclass __eq__ collateral damage."""
+        profile = load_profile(MINIMAL_PROFILE_DIR)
+        r = validate(
+            _result([
+                _el("Same", eid="bogus_s_111111", entity_type="Bogus", definition="d"),
+                _el("Same", eid="bogus_s_111111", entity_type="Bogus", definition="d"),
+                _el("Valid", eid="concept_v_222222", entity_type="Concept", definition="d"),
+            ]),
+            profile,
+            mode="filter",
+        )
+        # Both Bogus entries must drop, Valid stays
+        kept_names = [e.element_name for e in r.elements]
+        assert kept_names == ["Valid"]
 
     def test_subtype_matches_parent(self, tmp_path):
         """If profile declares Metric with subtypes [DirectMetric, ...],
@@ -395,6 +447,30 @@ class TestVr004PredicateVocabulary:
         assert len(r.relationships) == 1
         assert r.relationships[0].predicate == "AppliesTo"
 
+    def test_filter_mode_handles_field_identical_invalid_relationships(self):
+        """Defensive regression: two field-identical relationships with
+        an unknown predicate should both be dropped; the valid one
+        sharing all other field values must survive."""
+        profile = load_profile(MINIMAL_PROFILE_DIR)
+        r = validate(
+            _result(
+                [
+                    _el("A", eid="rule_a_111111", entity_type="Rule", extras={"expression": "x"}),
+                    _el("B", eid="concept_b_222222", entity_type="Concept", definition="d"),
+                ],
+                [
+                    _rel("A", "Bogus", "B"),
+                    _rel("A", "Bogus", "B"),
+                    _rel("A", "AppliesTo", "B"),
+                ],
+            ),
+            profile,
+            mode="filter",
+        )
+        # Both Bogus dropped, AppliesTo survives
+        assert len(r.relationships) == 1
+        assert r.relationships[0].predicate == "AppliesTo"
+
 
 # ─── VR005: Predicate domains ───────────────────────────────────────────────
 
@@ -541,6 +617,28 @@ class TestCascadeFiltering:
         assert len(r.elements) == 2
         assert len(r.relationships) == 1
         assert r.cascade_filtered_relationships == 0
+
+    def test_cascade_from_vr001_drop(self):
+        """In filter mode, a VR001-dropped duplicate must cause its
+        relationships to cascade-drop too — same contract as VR002."""
+        profile = load_profile(MINIMAL_PROFILE_DIR)
+        r = validate(
+            _result(
+                [
+                    _el("Rule1", eid="rule_r1_111111", entity_type="Rule", extras={"expression": "x"}),
+                    _el("Concept1", eid="concept_c1_222222", entity_type="Concept", definition="d"),
+                    # Field-identical duplicate of Concept1 — VR001 will
+                    # drop the second occurrence in filter mode
+                    _el("Concept1", eid="concept_c1_222222", entity_type="Concept", definition="d"),
+                ],
+                [_rel("Rule1", "AppliesTo", "Concept1")],
+            ),
+            profile,
+            mode="filter",
+        )
+        # The first Concept1 is kept, so the relationship should survive
+        assert len(r.elements) == 2
+        assert len(r.relationships) == 1
 
 
 # ─── ValidationResult API ───────────────────────────────────────────────────
@@ -731,3 +829,53 @@ class TestCli:
         flat = " ".join(r.output.split())
         assert "Invalid --mode" in flat
         assert "Traceback" not in r.output
+
+    def test_validate_filter_mode_smoke(self, tmp_path):
+        """End-to-end smoke: --mode filter drops bad entities and writes
+        a validated.json containing only the survivors plus the
+        validation_summary block with cascade counts."""
+        from typer.testing import CliRunner
+        from ontozense import cli
+
+        runner = CliRunner()
+        good = {
+            "element_name": "Good",
+            "definition": "A test concept.",
+            "is_critical": False,
+            "citation": "",
+            "data_type": "",
+            "enum_values": [],
+            "business_rules": [],
+            "governance_validated": False,
+            "confidence": 0.9,
+            "sources": ["A"],
+            "needs_review": False,
+            "conflicts": [],
+            "extra_fields": {"id": "concept_good_111111", "entity_type": "Concept"},
+        }
+        bad = dict(good)
+        bad["element_name"] = "Bad"
+        bad["extra_fields"] = {"id": "bogus_bad_222222", "entity_type": "Bogus"}
+        f = self._write_fused_json(tmp_path, [good, bad])
+
+        out = tmp_path / "validated.json"
+        r = runner.invoke(
+            cli.app,
+            [
+                "validate", str(f),
+                "--profile", str(MINIMAL_PROFILE_DIR),
+                "--mode", "filter",
+                "--output", str(out),
+            ],
+        )
+        # Errors still trigger exit 3 (filter doesn't suppress findings,
+        # only the data shape changes)
+        assert r.exit_code == 3
+        assert out.exists()
+        data = json.loads(out.read_text(encoding="utf-8"))
+        # Only "Good" survived
+        names = [e["element_name"] for e in data["elements"]]
+        assert names == ["Good"]
+        summary = data["validation_summary"]
+        assert summary["mode"] == "filter"
+        assert summary["cascade_filtered_entities"] >= 1
