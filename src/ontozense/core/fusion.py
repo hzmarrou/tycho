@@ -254,6 +254,14 @@ class FusionEngine:
                     el, "domain_name", source_a.domain_name, "A", conf,
                 )
 
+            # Carry profile-mode metadata into extra_fields so downstream
+            # stages (validate, lint) can use them. These are empty in
+            # unconstrained mode — backward-compat unaffected.
+            if concept.id:
+                el.extra_fields.setdefault("id", concept.id)
+            if concept.entity_type:
+                el.extra_fields.setdefault("entity_type", concept.entity_type)
+
             if "A" not in el.sources:
                 el.sources.append("A")
 
@@ -327,6 +335,13 @@ class FusionEngine:
                 for k, v in rec.extra_fields.items():
                     el.extra_fields[f"gov_{k}"] = v
 
+                # Profile-mode metadata: only set if Source A didn't
+                # already populate them (Source A wins for id/type).
+                if rec.id:
+                    el.extra_fields.setdefault("id", rec.id)
+                if rec.entity_type:
+                    el.extra_fields.setdefault("entity_type", rec.entity_type)
+
                 if "B" not in el.sources:
                     el.sources.append("B")
             else:
@@ -345,6 +360,10 @@ class FusionEngine:
                     el.is_critical = True
                 if rec.citation:
                     el.citation = rec.citation
+                if rec.id:
+                    el.extra_fields.setdefault("id", rec.id)
+                if rec.entity_type:
+                    el.extra_fields.setdefault("entity_type", rec.entity_type)
                 el.governance_validated = True
                 el.sources.append("B")
                 # Also track as unmatched for the gap report

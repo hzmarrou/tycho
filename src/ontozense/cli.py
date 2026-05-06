@@ -977,6 +977,250 @@ def _reconstruct_fusion_result(raw: dict) -> "FusionResult":
     )
 
 
+# ─── validate (Phase 4: profile-driven validation, runs before lint) ─────────
+
+
+@app.command()
+def validate(
+    fused_json: Path = typer.Argument(
+        ...,
+        help="Path to a fused dictionary JSON (output of the fuse command).",
+    ),
+    profile: Path = typer.Option(
+        ..., "--profile",
+        help=(
+            "Path to a profile directory containing schema.json. "
+            "Validation rules are profile-defined; this flag is required."
+        ),
+    ),
+    output: Path = typer.Option(
+        None, "--output", "-o",
+        help=(
+            "Optional output path for the validated JSON. If omitted, "
+            "the report is printed but no file is written."
+        ),
+    ),
+    mode: str = typer.Option(
+        "flag", "--mode",
+        help=(
+            "'flag' (default): annotate findings, keep all data. "
+            "'filter': drop entities that fail VR001/VR002 errors and "
+            "cascade-drop their relationships; drop relationships that "
+            "fail VR004."
+        ),
+    ),
+    domain_dir: Path = typer.Option(
+        None, "--domain-dir",
+        help="Per-domain knowledge base directory for audit log.",
+    ),
+) -> None:
+    """Validate a fused dictionary against a profile schema.
+
+    Runs 6 structural rules (entity uniqueness, type membership,
+    required fields, predicate vocabulary, predicate domains,
+    cardinality) borrowed from OntoMetric. Findings are reported with
+    rule IDs (VR001-VR006) and severities (error / warning).
+
+    With --mode filter, errors cascade-drop the offending entity and
+    any relationships referencing it; the validated output is the
+    cleaned subset. With --mode flag (default), nothing is dropped —
+    findings are annotated for downstream review.
+
+    Exit code 0 if no errors. Exit code 3 if errors found (mirrors
+    lint's --max-low semantics so scripts can pipeline check).
+    """
+    import json
+    from .core.profile import load_profile, ProfileError
+    from .core.validation import validate as run_validate, VALID_MODES
+    from .log import append_log
+
+    if mode not in VALID_MODES:
+        console.print(
+            f"[bold red][x] Invalid --mode value:[/] {mode!r}. "
+            f"Must be one of {sorted(VALID_MODES)}."
+        )
+        raise typer.Exit(code=1)
+
+    if not fused_json.exists():
+        console.print(f"[red]File not found:[/] {fused_json}")
+        raise typer.Exit(code=1)
+
+    # Load profile
+    try:
+        loaded_profile = load_profile(profile)
+    except ProfileError as e:
+        console.print(f"[bold red][x] Profile load failed:[/] {e}")
+        raise typer.Exit(code=1)
+    except OSError as e:
+        console.print(
+            f"[bold red][x] Profile load failed (filesystem error):[/] "
+            f"{type(e).__name__}: {e}"
+        )
+        raise typer.Exit(code=1)
+
+    raw = json.loads(fused_json.read_text(encoding="utf-8"))
+    fusion_result = _reconstruct_fusion_result(raw)
+
+    console.print()
+    console.print(
+        f"[bold magenta]Validating[/] {fused_json.name} against profile "
+        f"[cyan]{loaded_profile.profile_name}[/] "
+        f"(version {loaded_profile.profile_version}), mode={mode}"
+    )
+
+    result = run_validate(fusion_result, loaded_profile, mode=mode)
+
+    # Display findings grouped by rule
+    console.print()
+    console.print(
+        f"[bold]Validation report:[/] "
+        f"{len(fusion_result.elements)} elements -> "
+        f"{len(result.elements)} after validation; "
+        f"{len(fusion_result.relationships)} relationships -> "
+        f"{len(result.relationships)} after validation"
+    )
+
+    if not result.findings:
+        console.print("[bold green]No findings — output is profile-valid.[/]")
+    else:
+        rule_labels = {
+            "VR001": ("Entity uniqueness", "red"),
+            "VR002": ("Type membership", "red"),
+            "VR003": ("Required fields", "yellow"),
+            "VR004": ("Predicate vocabulary", "red"),
+            "VR005": ("Predicate domains", "yellow"),
+            "VR006": ("Cardinality", "yellow"),
+        }
+        for rule_id in ["VR001", "VR002", "VR003", "VR004", "VR005", "VR006"]:
+            findings = result.by_rule(rule_id)
+            if not findings:
+                continue
+            label, color = rule_labels[rule_id]
+            console.print(
+                f"\n[bold {color}]{rule_id} {label} ({len(findings)}):[/]"
+            )
+            for f in findings[:10]:  # cap displayed per-rule for readability
+                icon = {"error": "x", "warning": "!", "info": "-"}[f.severity]
+                console.print(f"  [{f.severity}] {icon} {f.message}")
+            if len(findings) > 10:
+                console.print(
+                    f"  [dim]... {len(findings) - 10} more — see "
+                    f"output JSON for full list[/]"
+                )
+
+    console.print()
+    console.print(
+        f"[bold]Summary:[/] "
+        f"{result.error_count} errors, {result.warning_count} warnings"
+    )
+    if mode == "filter":
+        console.print(
+            f"  Cascade filtered: "
+            f"{result.cascade_filtered_entities} entities, "
+            f"{result.cascade_filtered_relationships} relationships"
+        )
+
+    # Write validated output if requested
+    if output:
+        # Reuse the fused JSON's structure, replacing elements +
+        # relationships with the validated set, and adding a
+        # validation_summary block.
+        out_data = dict(raw)  # shallow copy of top-level keys
+        out_data["elements"] = [_serialize_element(el) for el in result.elements]
+        out_data["relationships"] = [
+            _serialize_relationship(rel) for rel in result.relationships
+        ]
+        out_data["validation_summary"] = {
+            "profile_name": result.profile_name,
+            "profile_version": result.profile_version,
+            "mode": result.mode,
+            "timestamp": result.timestamp,
+            "error_count": result.error_count,
+            "warning_count": result.warning_count,
+            "by_rule": result.summary,
+            "cascade_filtered_entities": result.cascade_filtered_entities,
+            "cascade_filtered_relationships": result.cascade_filtered_relationships,
+            "findings": [
+                {
+                    "rule_id": f.rule_id,
+                    "severity": f.severity,
+                    "target_kind": f.target_kind,
+                    "target_id": f.target_id,
+                    "message": f.message,
+                    "details": f.details,
+                }
+                for f in result.findings
+            ],
+        }
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(out_data, indent=2, default=str, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        console.print(f"[bold green]Validated dictionary saved:[/] {output}")
+
+    if domain_dir:
+        append_log(
+            domain_dir, "validate",
+            source=fused_json.name,
+            profile=loaded_profile.profile_name,
+            mode=mode,
+            errors=result.error_count,
+            warnings=result.warning_count,
+            cascade_entities=result.cascade_filtered_entities,
+            cascade_relationships=result.cascade_filtered_relationships,
+        )
+
+    if result.error_count > 0:
+        raise typer.Exit(code=3)
+
+
+def _serialize_element(el) -> dict:
+    """Serialize a FusedElement to a JSON-friendly dict.
+
+    Mirrors the shape produced by the fuse command so validate's output
+    is compatible with downstream lint / consumers.
+    """
+    return {
+        "element_name": el.element_name,
+        "domain_name": el.domain_name,
+        "definition": el.definition,
+        "is_critical": el.is_critical,
+        "citation": el.citation,
+        "data_type": el.data_type,
+        "enum_values": el.enum_values,
+        "business_rules": el.business_rules,
+        "governance_validated": el.governance_validated,
+        "confidence": round(el.confidence, 3),
+        "sources": el.sources,
+        "needs_review": el.needs_review(),
+        "conflicts": [
+            {
+                "field": c.field_name,
+                "winner": {"source": c.winner.source, "value": c.winner.original_value},
+                "rejected": [
+                    {"source": r.source, "value": r.original_value}
+                    for r in c.rejected
+                ],
+                "resolution": c.resolution,
+            }
+            for c in el.conflicts
+        ],
+        "extra_fields": el.extra_fields,
+    }
+
+
+def _serialize_relationship(rel) -> dict:
+    """Serialize a FusedRelationship to a JSON-friendly dict."""
+    return {
+        "subject": rel.subject,
+        "predicate": rel.predicate,
+        "object": rel.object,
+        "source": rel.source,
+        "confidence": round(rel.confidence, 3),
+    }
+
+
 # ─── lint (Step 7: consistency check on fused output) ────────────────────────
 
 
