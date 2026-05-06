@@ -1463,7 +1463,30 @@ def fuse(
 
     if source_a_json:
         for src_path in source_a_json:
-            sa.append(_load_source_a_json(src_path))
+            try:
+                sa.append(_load_source_a_json(src_path))
+            except OSError as e:
+                console.print(
+                    f"[bold red][x] Source A file error:[/] {src_path}"
+                )
+                console.print(f"  [dim]{type(e).__name__}: {e}[/]")
+                console.print(
+                    "  Check that the path exists and is readable."
+                )
+                raise typer.Exit(code=1)
+            except json.JSONDecodeError as e:
+                console.print(
+                    f"[bold red][x] Source A JSON parse error:[/] "
+                    f"{src_path}"
+                )
+                console.print(
+                    f"  [dim]Line {e.lineno}, col {e.colno}: {e.msg}[/]"
+                )
+                console.print(
+                    "  The file should be the output of "
+                    "[cyan]extract-a --json[/]."
+                )
+                raise typer.Exit(code=1)
             # Per-doc summary line — concepts/relationships logged in helper.
 
     if source_b_json:

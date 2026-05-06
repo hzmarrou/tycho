@@ -180,9 +180,12 @@ class TestMultiDocUnconstrained:
         assert el.extra_fields["corroborating_doc_count"] == 3
         assert el.extra_fields["source_documents"] == ["a.md", "b.md", "c.md"]
 
-    def test_corroboration_dedups_repeats_within_same_doc(self):
-        """Same doc path appearing twice (e.g. two concepts from doc1)
-        should not inflate the count for one consolidated element."""
+    def test_corroboration_dedups_repeats_across_docs(self):
+        """Multi-doc fusion: when one doc mentions a concept twice and
+        another doc mentions it once, the corroboration count is 2 (one
+        per unique doc), not 3 — the within-doc duplicate is deduped.
+        Single-doc fusion does NOT track corroboration (AC1), so dedup
+        is meaningful only across docs."""
         r = FusionEngine().fuse(
             source_a=[
                 _doc_result(
@@ -192,10 +195,17 @@ class TestMultiDocUnconstrained:
                         _concept("X", source_doc="doc1.md"),
                     ],
                 ),
+                _doc_result(
+                    "t",
+                    [_concept("X", source_doc="doc2.md")],
+                ),
             ],
         )
         assert len(r.elements) == 1
-        assert r.elements[0].extra_fields["corroborating_doc_count"] == 1
+        assert r.elements[0].extra_fields["corroborating_doc_count"] == 2
+        assert r.elements[0].extra_fields["source_documents"] == [
+            "doc1.md", "doc2.md",
+        ]
 
     def test_concept_without_provenance_does_not_break(self):
         """If a concept has no provenance, no source_documents entry is
@@ -622,3 +632,274 @@ class TestCliMultiSourceA:
         assert el["extra_fields"]["corroborating_doc_count"] == 2
         assert "doc1.md" in el["extra_fields"]["source_documents"]
         assert "doc2.md" in el["extra_fields"]["source_documents"]
+
+
+# ─── 9. AC1 byte-identity regressions (Phase 5 review findings) ─────────────
+
+
+class TestAc1ByteIdentityRegressions:
+    """Pin AC1: single-doc fusion (any mode) MUST NOT add new
+    extra_fields keys that pre-Phase-5 callers wouldn't see.
+
+    The reviewer's blocker finding: corroboration tracking was firing
+    unconditionally in _merge_source_a, so a single-doc unconstrained
+    fusion with provenance produced ``extra_fields={"source_documents":
+    [doc1.md], "corroborating_doc_count": 1}`` instead of ``{}``.
+    Now corroboration is gated on ``len(a_results) > 1``.
+    """
+
+    def test_single_doc_unconstrained_with_provenance_has_no_corroboration(self):
+        """Bare single-doc call: extra_fields stays empty even with
+        full provenance on the concept."""
+        r = FusionEngine().fuse(
+            source_a=_doc_result(
+                "t",
+                [_concept("X", definition="d", source_doc="doc1.md")],
+            ),
+        )
+        assert len(r.elements) == 1
+        assert "source_documents" not in r.elements[0].extra_fields
+        assert "corroborating_doc_count" not in r.elements[0].extra_fields
+
+    def test_list_of_one_with_provenance_has_no_corroboration(self):
+        """List-of-one is functionally a single-doc call — same AC1
+        guarantee applies."""
+        r = FusionEngine().fuse(
+            source_a=[
+                _doc_result(
+                    "t",
+                    [_concept("X", definition="d", source_doc="doc1.md")],
+                ),
+            ],
+        )
+        assert len(r.elements) == 1
+        assert "source_documents" not in r.elements[0].extra_fields
+        assert "corroborating_doc_count" not in r.elements[0].extra_fields
+
+    def test_single_doc_profile_mode_no_corroboration(self):
+        """Profile-mode single-doc fusion: id and entity_type populate
+        extra_fields (as per Phase 2/3) but corroboration keys do not."""
+        r = FusionEngine().fuse(
+            source_a=_doc_result(
+                "t",
+                [
+                    _concept(
+                        "Customer",
+                        eid="concept_customer_111111",
+                        entity_type="Concept",
+                        definition="A buyer.",
+                        source_doc="doc1.md",
+                    ),
+                ],
+            ),
+        )
+        assert len(r.elements) == 1
+        ef = r.elements[0].extra_fields
+        assert ef.get("id") == "concept_customer_111111"
+        assert ef.get("entity_type") == "Concept"
+        assert "source_documents" not in ef
+        assert "corroborating_doc_count" not in ef
+
+    def test_multi_doc_does_track_corroboration(self):
+        """The flip side: 2+ docs DO get corroboration. Pin the gate."""
+        r = FusionEngine().fuse(
+            source_a=[
+                _doc_result("t", [_concept("X", source_doc="a.md")]),
+                _doc_result("t", [_concept("X", source_doc="b.md")]),
+            ],
+        )
+        assert len(r.elements) == 1
+        assert r.elements[0].extra_fields["corroborating_doc_count"] == 2
+
+
+# ─── 10. Distinct profile IDs must stay separate across B/C/D ───────────────
+
+
+class TestCrossSourceIdCollisionRegressions:
+    """Pin the reviewer's second blocker: when Source B/C/D records
+    have a profile-mode id that DIFFERS from a Source A element with
+    the same normalised name, ``_lookup`` must NOT silently merge them.
+
+    Pre-fix: ``_lookup`` fell back to name when eid missed in
+    ``id_lookup``, so B/C/D records inherited A's element by name and
+    overwrote / annotated the wrong entity.
+    Post-fix: ``_lookup`` returns None on collision, the caller routes
+    through ``_get_or_create``, which uses the composite-key path to
+    keep the entities separate.
+    """
+
+    def test_source_b_distinct_id_does_not_merge_with_a(self):
+        """A profile-mode 'Customer' (id=A) + B profile-mode 'Customer'
+        (id=B) → 2 elements, not 1."""
+        sa = _doc_result(
+            "t",
+            [
+                _concept(
+                    "Customer",
+                    eid="concept_a_111111",
+                    entity_type="Concept",
+                    definition="A buyer (per regulation X).",
+                ),
+            ],
+        )
+        sb = GovernanceExtractionResult(
+            records=[
+                GovernanceRecord(
+                    element_name="Customer",
+                    domain_name="t",
+                    is_critical=True,
+                    confidence=0.9,
+                    id="concept_b_222222",
+                    entity_type="Concept",
+                ),
+            ],
+        )
+        r = FusionEngine().fuse(source_a=sa, source_b=sb)
+        assert len(r.elements) == 2
+        ids = {el.extra_fields.get("id") for el in r.elements}
+        assert ids == {"concept_a_111111", "concept_b_222222"}
+
+    def test_source_c_distinct_id_does_not_merge_with_a(self):
+        """A 'Status' (id=A) + Source C field 'Status' (id=B) → 2 elements."""
+        sa = _doc_result(
+            "t",
+            [
+                _concept(
+                    "Status",
+                    eid="concept_a_111111",
+                    entity_type="Concept",
+                    definition="Lifecycle state.",
+                ),
+            ],
+        )
+        sc = SchemaResult(
+            models=[
+                SchemaModel(
+                    name="Loan",
+                    fields=[
+                        SchemaField(
+                            name="Status",
+                            field_type="CharField",
+                            playground_type="string",
+                            id="concept_b_222222",
+                            entity_type="Concept",
+                        ),
+                    ],
+                ),
+            ],
+        )
+        r = FusionEngine().fuse(source_a=sa, source_c=sc)
+        assert len(r.elements) == 2
+        ids = {el.extra_fields.get("id") for el in r.elements}
+        assert ids == {"concept_a_111111", "concept_b_222222"}
+
+    def test_unconstrained_a_then_b_then_c_distinct_ids_stay_separate(self):
+        """A unconstrained 'Customer' + B profile-id1 'Customer' +
+        C profile-id2 'Customer' → 2 elements (A merges with B by
+        name promotion; C stays separate via collision)."""
+        sa = _doc_result("t", [_concept("Customer", definition="A buyer.")])
+        sb = GovernanceExtractionResult(
+            records=[
+                GovernanceRecord(
+                    element_name="Customer",
+                    domain_name="t",
+                    is_critical=False,
+                    confidence=0.9,
+                    id="concept_b_222222",
+                    entity_type="Concept",
+                ),
+            ],
+        )
+        sc = SchemaResult(
+            models=[
+                SchemaModel(
+                    name="Loan",
+                    fields=[
+                        SchemaField(
+                            name="Customer",
+                            field_type="CharField",
+                            playground_type="string",
+                            id="concept_c_333333",
+                            entity_type="Concept",
+                        ),
+                    ],
+                ),
+            ],
+        )
+        r = FusionEngine().fuse(source_a=sa, source_b=sb, source_c=sc)
+        # A+B merge by name promotion (A had no id; B's id propagates).
+        # C has a *different* id → must stay separate.
+        assert len(r.elements) == 2
+        ids = {el.extra_fields.get("id") for el in r.elements}
+        assert ids == {"concept_b_222222", "concept_c_333333"}
+
+    def test_id_promotion_updates_id_lookup_for_subsequent_lookup(self):
+        """When unconstrained A meets profile B and B's id is promoted
+        onto A's element, a *third* source D referencing the same id
+        must find that element via id_lookup (not by accident of name)."""
+        sa = _doc_result("t", [_concept("Loan", definition="Money lent.")])
+        sb = GovernanceExtractionResult(
+            records=[
+                GovernanceRecord(
+                    element_name="Loan",
+                    domain_name="t",
+                    is_critical=True,
+                    confidence=0.9,
+                    id="concept_loan_111111",
+                    entity_type="Concept",
+                ),
+            ],
+        )
+        # Source D rule attached to the same id, but with a name that
+        # would NOT match by name fallback (intentional)
+        rule = CodeRule(
+            rule_type="constant",
+            name="MAX_TERM_DAYS",
+            expression="MAX_TERM_DAYS = 365",
+            value="365",
+            attached_to_entity_id="concept_loan_111111",
+        )
+        sd = CodeExtractionResult(rules=[rule])
+        r = FusionEngine().fuse(source_a=sa, source_b=sb, source_d=sd)
+        assert len(r.elements) == 1
+        el = r.elements[0]
+        assert el.extra_fields["id"] == "concept_loan_111111"
+        assert "D" in el.sources
+        assert any("MAX_TERM_DAYS" in br for br in el.business_rules)
+
+
+# ─── 11. CLI error handling for --source-a (review finding 3) ───────────────
+
+
+class TestCliSourceAErrorHandling:
+    def test_missing_file_clean_error(self, tmp_path):
+        from typer.testing import CliRunner
+        from ontozense import cli
+
+        runner = CliRunner()
+        missing = tmp_path / "does_not_exist.json"
+        r = runner.invoke(
+            cli.app,
+            ["fuse", "--source-a", str(missing), "--output", str(tmp_path / "f.json")],
+        )
+        assert r.exit_code == 1
+        flat = " ".join(r.output.split())
+        assert "Source A file error" in flat
+        assert "Traceback" not in r.output
+
+    def test_malformed_json_clean_error(self, tmp_path):
+        from typer.testing import CliRunner
+        from ontozense import cli
+
+        runner = CliRunner()
+        bad = tmp_path / "bad.json"
+        bad.write_text("{not valid json", encoding="utf-8")
+        r = runner.invoke(
+            cli.app,
+            ["fuse", "--source-a", str(bad), "--output", str(tmp_path / "f.json")],
+        )
+        assert r.exit_code == 1
+        flat = " ".join(r.output.split())
+        assert "JSON parse error" in flat
+        assert "extract-a --json" in flat
+        assert "Traceback" not in r.output

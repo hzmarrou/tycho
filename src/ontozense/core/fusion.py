@@ -235,8 +235,17 @@ class FusionEngine:
         id_lookup: dict[str, str] = {}
 
         # ── Pass 1: Seed from Source A (multi-doc consolidation) ──
+        # Track corroboration only when there are 2+ Source A inputs.
+        # Single-doc fusion preserves AC1 byte-identity by NOT adding
+        # ``source_documents`` / ``corroborating_doc_count`` keys to
+        # ``extra_fields`` — pre-Phase-5 behaviour for any single-doc
+        # call.
+        track_corroboration = len(a_results) > 1
         for sa in a_results:
-            self._merge_source_a(sa, index, id_lookup, result)
+            self._merge_source_a(
+                sa, index, id_lookup, result,
+                track_corroboration=track_corroboration,
+            )
 
         # ── Pass 2: Validate/enrich from Source B ──
         if source_b:
@@ -265,6 +274,8 @@ class FusionEngine:
         index: dict[str, FusedElement],
         id_lookup: dict[str, str],
         result: FusionResult,
+        *,
+        track_corroboration: bool = False,
     ) -> None:
         for concept in source_a.concepts:
             if not concept.name.strip():
@@ -296,9 +307,12 @@ class FusionEngine:
                 el.extra_fields.setdefault("entity_type", concept.entity_type)
 
             # Multi-doc corroboration: track every document this concept
-            # appeared in. Source A only — B/C/D each have a single
-            # provenance per record handled elsewhere.
-            self._track_corroboration(el, concept)
+            # appeared in. Skipped for single-doc fusion to preserve
+            # AC1 byte-identity (no new extra_fields keys when nothing
+            # multi-doc is happening). Source A only — B/C/D each have
+            # a single provenance per record handled elsewhere.
+            if track_corroboration:
+                self._track_corroboration(el, concept)
 
             if "A" not in el.sources:
                 el.sources.append("A")
@@ -628,14 +642,41 @@ class FusionEngine:
         """Look up an existing element without creating one.
 
         Tries id first when supplied (profile mode), falls back to name.
-        Returns ``None`` if no match.
+
+        **Id-collision safety:** if ``eid`` is supplied but missing from
+        ``id_lookup``, the name fallback only succeeds when the matched
+        element either has no id yet OR has the *same* id. If the
+        matched element already carries a *different* id, this returns
+        ``None`` — the caller must route through ``_get_or_create``,
+        whose composite-key path keeps distinct profile-mode entities
+        separate even when their normalised names collide.
+
+        **Atomic id promotion:** when the name fallback succeeds AND
+        ``eid`` is supplied AND the matched element had no id yet, the
+        eid is registered into ``id_lookup`` and written to
+        ``extra_fields["id"]`` as part of this call. This keeps the
+        two stores consistent for any subsequent id-keyed lookup of
+        the same element from another source.
         """
         if eid and eid in id_lookup:
             return index[id_lookup[eid]]
         if name:
             key = normalise_name(name)
             if key in index:
-                return index[key]
+                existing = index[key]
+                if eid:
+                    existing_id = existing.extra_fields.get("id", "")
+                    if existing_id and existing_id != eid:
+                        # Collision: refuse to merge by name when ids
+                        # differ. Caller falls through to creation.
+                        return None
+                    if not existing_id:
+                        # Promote: bind this eid to the existing
+                        # element so future id-keyed lookups resolve
+                        # to it, and persist the id on the element.
+                        id_lookup[eid] = key
+                        existing.extra_fields["id"] = eid
+                return existing
         return None
 
     @staticmethod
