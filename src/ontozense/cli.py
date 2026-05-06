@@ -991,12 +991,32 @@ def _reconstruct_fusion_result(raw: dict) -> "FusionResult":
     avoid duplicating the reconstruction logic.
     """
     from .core.fusion import (
+        FieldAnchor,
         FusedElement,
         FusedRelationship,
         FieldConflict,
         FieldProvenance,
         FusionResult,
     )
+
+    def _anchor_from_dict(a: dict | None) -> FieldAnchor | None:
+        """Phase 6: read a serialised FieldAnchor back, accepting all
+        keys missing (treat as default 0 / empty). Pre-Phase-6 JSON
+        files that have no ``anchor`` key on conflict provenances pass
+        ``None`` here and the FieldProvenance.anchor stays None —
+        round-trip byte-identical."""
+        if not a:
+            return None
+        return FieldAnchor(
+            page=a.get("page", 0),
+            char_offset=a.get("char_offset", 0),
+            char_length=a.get("char_length", 0),
+            line=a.get("line", 0),
+            end_line=a.get("end_line", 0),
+            column=a.get("column", 0),
+            segment_id=a.get("segment_id", ""),
+            snippet=a.get("snippet", ""),
+        )
 
     elements = []
     for re_ in raw.get("elements", []):
@@ -1022,12 +1042,14 @@ def _reconstruct_fusion_result(raw: dict) -> "FusionResult":
                     source=w.get("source", ""),
                     confidence=0.0,
                     original_value=w.get("value", ""),
+                    anchor=_anchor_from_dict(w.get("anchor")),
                 ),
                 rejected=[
                     FieldProvenance(
                         source=rj.get("source", ""),
                         confidence=0.0,
                         original_value=rj.get("value", ""),
+                        anchor=_anchor_from_dict(rj.get("anchor")),
                     )
                     for rj in rc.get("rejected", [])
                 ],
@@ -1251,6 +1273,31 @@ def validate(
         raise typer.Exit(code=3)
 
 
+def _serialize_field_provenance(fp) -> dict:
+    """Serialize a FieldProvenance entry as it appears under conflict
+    winner / rejected nodes.
+
+    Phase 6: emits the ``anchor`` key ONLY when the provenance has a
+    non-None, non-empty FieldAnchor. Pre-Phase-6 callers never set
+    anchors, so their JSON output is byte-identical to the pre-Phase-6
+    shape — that's the AC1 contract.
+    """
+    out = {"source": fp.source, "value": fp.original_value}
+    anchor = getattr(fp, "anchor", None)
+    if anchor is not None and not anchor.is_empty():
+        out["anchor"] = {
+            "page": anchor.page,
+            "char_offset": anchor.char_offset,
+            "char_length": anchor.char_length,
+            "line": anchor.line,
+            "end_line": anchor.end_line,
+            "column": anchor.column,
+            "segment_id": anchor.segment_id,
+            "snippet": anchor.snippet,
+        }
+    return out
+
+
 def _serialize_element(el) -> dict:
     """Serialize a FusedElement to a JSON-friendly dict.
 
@@ -1273,10 +1320,9 @@ def _serialize_element(el) -> dict:
         "conflicts": [
             {
                 "field": c.field_name,
-                "winner": {"source": c.winner.source, "value": c.winner.original_value},
+                "winner": _serialize_field_provenance(c.winner),
                 "rejected": [
-                    {"source": r.source, "value": r.original_value}
-                    for r in c.rejected
+                    _serialize_field_provenance(r) for r in c.rejected
                 ],
                 "resolution": c.resolution,
             }
@@ -1578,8 +1624,10 @@ def fuse(
                 "conflicts": [
                     {
                         "field": c.field_name,
-                        "winner": {"source": c.winner.source, "value": c.winner.original_value},
-                        "rejected": [{"source": r.source, "value": r.original_value} for r in c.rejected],
+                        "winner": _serialize_field_provenance(c.winner),
+                        "rejected": [
+                            _serialize_field_provenance(r) for r in c.rejected
+                        ],
                         "resolution": c.resolution,
                     }
                     for c in el.conflicts

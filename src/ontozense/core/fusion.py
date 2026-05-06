@@ -69,12 +69,64 @@ def normalise_name(name: str) -> str:
 # ─── Dataclasses ─────────────────────────────────────────────────────────────
 
 
+@dataclass(frozen=True)
+class FieldAnchor:
+    """Where a field's value came from inside the source artifact.
+
+    Phase 6: per-field provenance anchors. Pre-Phase-6 fused outputs
+    only knew the source document name (Source A) or file path
+    (Source D). Phase 6 adds the location *within* the document so a
+    reviewer can click through to the exact span the LLM extracted.
+
+    All fields are optional. Different upstream extractors populate
+    different subsets — Source A's prose extractor may have
+    ``segment_id`` + ``snippet`` from a markdown heading; Source D's
+    AST has ``line`` + ``column``; PDF-converted Source A has ``page``
+    + ``char_offset``. Defaults are 0 / empty so a partially-anchored
+    field round-trips cleanly.
+
+    AC1 contract: the JSON serialiser emits the ``anchor`` key on
+    a ``FieldProvenance`` ONLY when ``FieldAnchor`` is non-default
+    (i.e. at least one field carries a real value). Pre-Phase-6
+    fused JSON round-trips byte-identical because no upstream
+    extractor populates anchors yet by default.
+    """
+    page: int = 0           # 1-indexed page (PDF-derived)
+    char_offset: int = 0    # 0-indexed offset into the source text
+    char_length: int = 0    # length in characters of the matched span
+    line: int = 0           # 1-indexed line number (text/code)
+    end_line: int = 0       # 1-indexed end line for multi-line spans
+    column: int = 0         # 1-indexed column (code)
+    segment_id: str = ""    # named section / heading / anchor identifier
+    snippet: str = ""       # short verbatim quote for human verification
+
+    def is_empty(self) -> bool:
+        """True when no anchor field carries data — used to suppress
+        the anchor key on serialisation so AC1 byte-identity holds for
+        unanchored values (pre-Phase-6 callers see no shape change)."""
+        return (
+            self.page == 0
+            and self.char_offset == 0
+            and self.char_length == 0
+            and self.line == 0
+            and self.end_line == 0
+            and self.column == 0
+            and not self.segment_id
+            and not self.snippet
+        )
+
+
 @dataclass
 class FieldProvenance:
     """Where a single field value came from."""
     source: str          # "A", "B", "C", "D"
     confidence: float
     original_value: str  # the raw value from the source
+    # Phase 6: optional fine-grained location within the source doc.
+    # ``None`` = unanchored (pre-Phase-6 behaviour). The CLI serialiser
+    # omits this key entirely when it's None or an empty FieldAnchor,
+    # preserving AC1 byte-identity for unanchored output.
+    anchor: Optional["FieldAnchor"] = None
 
 
 @dataclass
@@ -285,17 +337,23 @@ class FusionEngine:
             )
             conf = concept.overall_confidence()
 
-            self._set_field(el, "element_name", concept.name, "A", conf)
+            # Phase 6: derive an anchor from the concept's Provenance,
+            # if one was supplied by the upstream extractor. Same anchor
+            # applies to every Source-A field on this concept (the
+            # fields share an extraction context).
+            anchor = self._anchor_from_concept_provenance(concept)
+
+            self._set_field(el, "element_name", concept.name, "A", conf, anchor)
 
             if concept.definition:
-                self._set_field(el, "definition", concept.definition, "A", conf)
+                self._set_field(el, "definition", concept.definition, "A", conf, anchor)
 
             if concept.citation:
-                self._set_field(el, "citation", concept.citation, "A", conf)
+                self._set_field(el, "citation", concept.citation, "A", conf, anchor)
 
             if source_a.domain_name:
                 self._set_field(
-                    el, "domain_name", source_a.domain_name, "A", conf,
+                    el, "domain_name", source_a.domain_name, "A", conf, anchor,
                 )
 
             # Carry profile-mode metadata into extra_fields so downstream
@@ -368,14 +426,21 @@ class FusionEngine:
                         el.citation = f"{el.citation}; {rec.citation}"
                     elif not el.citation:
                         el.citation = rec.citation
-                    # Record provenance without conflict detection
+                    # Record provenance without conflict detection.
+                    # Phase 6: preserve any anchor already attached to
+                    # the existing citation provenance — Source B
+                    # doesn't carry its own anchor yet, but Source A's
+                    # anchor still points at the original citation
+                    # extraction location, which stays valid after
+                    # appending B's text.
+                    existing = el.field_provenance.get(
+                        "citation", FieldProvenance("", 0, ""),
+                    )
                     el.field_provenance["citation"] = FieldProvenance(
                         source="A+B",
-                        confidence=max(
-                            el.field_provenance.get("citation", FieldProvenance("", 0, "")).confidence,
-                            rec.confidence,
-                        ),
+                        confidence=max(existing.confidence, rec.confidence),
                         original_value=el.citation,
+                        anchor=existing.anchor,
                     )
 
                 if rec.domain_name:
@@ -706,6 +771,64 @@ class FusionEngine:
             docs.append(src_doc)
         el.extra_fields["corroborating_doc_count"] = len(docs)
 
+    @staticmethod
+    def _anchor_from_concept_provenance(
+        concept: "Concept",
+    ) -> Optional[FieldAnchor]:
+        """Map a Source A ``Concept.provenance`` to a ``FieldAnchor``.
+
+        Returns ``None`` when no anchor data is available — that
+        case round-trips byte-identical to pre-Phase-6 output. This is
+        critical for AC1: the LLM extractor doesn't currently emit
+        page numbers or char offsets, so most concepts will yield
+        ``None`` here today, and FieldProvenance.anchor stays ``None``.
+
+        When the upstream extractor *does* populate richer location
+        data (PDF page number, line number, etc.), this helper picks
+        it up and converts it to the typed anchor.
+        """
+        prov = concept.provenance
+        if prov is None:
+            return None
+        # Only build an anchor if we actually have anchor-shaped data.
+        # ``source_document`` alone isn't an anchor (it's the doc name
+        # tracked separately via corroboration); we want section /
+        # snippet / page / line / offset.
+        # Strip whitespace so values like "   " are treated as empty —
+        # otherwise ``is_empty()`` would consider them populated and
+        # the JSON serialiser would emit a useless anchor key.
+        section = (prov.source_section or "").strip()
+        snippet = (prov.source_text_snippet or "").strip()
+        if not (section or snippet):
+            return None
+        return FieldAnchor(
+            segment_id=section,
+            snippet=snippet,
+        )
+
+    @staticmethod
+    def _anchor_from_code_provenance(
+        rule: CodeRule,
+    ) -> Optional[FieldAnchor]:
+        """Map a Source D ``CodeRule.provenance`` to a ``FieldAnchor``.
+
+        Reserved for the eventual structured business-rule pipeline
+        (see Phase 6 scope notes). Today's ``business_rules`` field is
+        a list[str] with no per-element anchor slot, so this helper
+        isn't called yet — kept here so the contract for Source D is
+        documented and ready for follow-up.
+        """
+        prov = rule.provenance
+        if prov is None:
+            return None
+        return FieldAnchor(
+            line=prov.line,
+            end_line=prov.end_line,
+            column=prov.column,
+            snippet=prov.snippet or "",
+            segment_id=prov.file_path or "",
+        )
+
     def _set_field(
         self,
         el: FusedElement,
@@ -713,16 +836,23 @@ class FusionEngine:
         value: str,
         source: str,
         confidence: float,
+        anchor: Optional[FieldAnchor] = None,
     ) -> None:
         """Set a field on a FusedElement, handling conflict detection.
 
         Per PLAYBOOK §4: if the field already has a value from a different
         source, detect the conflict and resolve by priority order.
+
+        Phase 6: callers may pass ``anchor`` to record the location
+        within the source artifact where the field's value came from.
+        Conflict resolution preserves the *winner's* anchor (so a
+        loser's location data is dropped).
         """
         new_prov = FieldProvenance(
             source=source,
             confidence=confidence,
             original_value=value,
+            anchor=anchor,
         )
 
         if field_name not in el.field_provenance:
