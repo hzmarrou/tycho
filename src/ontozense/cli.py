@@ -1448,6 +1448,122 @@ def lint(
         raise typer.Exit(code=1)
 
 
+# ─── report (Phase 7: benchmark metrics on a fused output) ──────────────────
+
+
+@app.command()
+def report(
+    fused_json: Path = typer.Argument(
+        ...,
+        help="Path to a fused dictionary JSON (output of the fuse command).",
+    ),
+    profile: Path = typer.Option(
+        None, "--profile",
+        help=(
+            "Optional profile directory. When supplied, the report "
+            "includes a profile-coverage section showing which "
+            "declared entity_types and predicates were populated."
+        ),
+    ),
+    output: Path = typer.Option(
+        None, "--output", "-o",
+        help=(
+            "Path to write the JSON benchmark snapshot. Machine-"
+            "diffable for run-vs-run comparison."
+        ),
+    ),
+    markdown: Path = typer.Option(
+        None, "--markdown", "-m",
+        help=(
+            "Path to write the markdown rendering. If omitted, the "
+            "markdown is printed to stdout."
+        ),
+    ),
+    domain_dir: Path = typer.Option(
+        None, "--domain-dir",
+        help=(
+            "Per-domain knowledge base directory for audit log and "
+            "auto file-back of the markdown report."
+        ),
+    ),
+) -> None:
+    """Compute a benchmark snapshot from a fused output (Phase 7).
+
+    Reports element counts (by source combination, governance-validated,
+    multi-source), confidence distribution, conflict statistics, anchor
+    coverage (Phase 6), multi-doc corroboration (Phase 5), and — when a
+    profile is supplied — declared-vs-used coverage of entity_types
+    and predicates.
+
+    Always writes a JSON snapshot when --output is given (machine-
+    diffable). Always renders markdown — to --markdown if supplied,
+    otherwise to stdout.
+    """
+    import json
+    from .core.benchmark import compute_benchmark, render_markdown
+    from .log import append_log
+
+    if not fused_json.exists():
+        console.print(f"[red]File not found:[/] {fused_json}")
+        raise typer.Exit(code=1)
+
+    raw = json.loads(fused_json.read_text(encoding="utf-8"))
+    fusion_result = _reconstruct_fusion_result(raw)
+
+    loaded_profile = None
+    if profile is not None:
+        from .core.profile import load_profile, ProfileError
+        try:
+            loaded_profile = load_profile(profile)
+        except ProfileError as e:
+            console.print(f"[bold red][x] Profile load failed:[/] {e}")
+            raise typer.Exit(code=1)
+        except OSError as e:
+            console.print(
+                f"[bold red][x] Profile load failed (filesystem error):[/] "
+                f"{type(e).__name__}: {e}"
+            )
+            raise typer.Exit(code=1)
+
+    report_obj = compute_benchmark(fusion_result, profile=loaded_profile)
+    md = render_markdown(report_obj)
+
+    # Always emit markdown — to file if requested, else to stdout
+    if markdown:
+        markdown.parent.mkdir(parents=True, exist_ok=True)
+        markdown.write_text(md, encoding="utf-8")
+        console.print(f"[bold green]Markdown report saved:[/] {markdown}")
+    else:
+        console.print(md)
+
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(report_obj.to_dict(), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        console.print(f"[bold green]JSON snapshot saved:[/] {output}")
+
+    if domain_dir:
+        # Auto file-back the markdown report when both --markdown and
+        # --domain-dir are given (matches existing query / lint UX).
+        if markdown:
+            from .core.fileback import file_back
+            dest = file_back(markdown, domain_dir, category="reports")
+            console.print(
+                f"[bold green]Filed back:[/] "
+                f"{dest.relative_to(domain_dir)}"
+            )
+        append_log(
+            domain_dir, "report",
+            source=fused_json.name,
+            elements=report_obj.elements.total,
+            governance_validated=report_obj.elements.governance_validated,
+            conflicts=report_obj.conflicts.total_conflicts,
+            anchored_provenance_entries=report_obj.anchors.with_anchor,
+        )
+
+
 # ─── fuse (Step 6: combine sources into rich data dictionary) ────────────────
 
 
