@@ -905,6 +905,82 @@ def file_back_cmd(
     console.print(f"[dim]Log entry appended to {domain_dir / 'log.md'}[/]")
 
 
+# ─── Helper: reconstruct DomainDocumentExtractionResult from JSON ───────────
+
+
+def _load_source_a_json(path: Path):
+    """Reconstruct a single Source A extraction result from JSON.
+
+    The shape matches what ``extract-a --json`` emits. Profile-mode
+    concepts carry ``id`` and ``entity_type`` — preserved here so the
+    fusion engine can use them for cross-source consolidation.
+    Multi-doc fusion calls this once per ``--source-a`` flag.
+    """
+    import json
+    from .extractors.domain_doc_extractor import (
+        Concept,
+        DomainDocumentExtractionResult,
+        FieldConfidence,
+        Provenance,
+        Relationship,
+    )
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+
+    concepts = []
+    for rc in raw.get("concepts", []):
+        c = Concept(
+            name=rc.get("name", ""),
+            definition=rc.get("definition", ""),
+            citation=rc.get("citation", ""),
+            id=rc.get("id", ""),
+            entity_type=rc.get("entity_type", ""),
+        )
+        for fc in rc.get("confidence", []):
+            c.confidence.append(FieldConfidence(
+                fc.get("field_name", ""),
+                fc.get("score", 0.0),
+                fc.get("reason", ""),
+            ))
+        prov = rc.get("provenance")
+        if prov:
+            c.provenance = Provenance(
+                source_document=prov.get("source_document", ""),
+                source_section=prov.get("source_section", ""),
+                source_text_snippet=prov.get("source_text_snippet", ""),
+                extraction_timestamp=prov.get("extraction_timestamp", ""),
+            )
+        concepts.append(c)
+
+    relationships = []
+    for rr in raw.get("relationships", []):
+        r = Relationship(
+            subject=rr.get("subject", ""),
+            predicate=rr.get("predicate", ""),
+            object=rr.get("object", ""),
+        )
+        for fc in rr.get("confidence", []):
+            r.confidence.append(FieldConfidence(
+                fc.get("field_name", ""),
+                fc.get("score", 0.0),
+                fc.get("reason", ""),
+            ))
+        relationships.append(r)
+
+    res = DomainDocumentExtractionResult(
+        domain_name=raw.get("domain_name", ""),
+        concepts=concepts,
+        relationships=relationships,
+        source_documents=raw.get("source_documents", []),
+        extraction_timestamp=raw.get("extraction_timestamp", ""),
+    )
+    console.print(
+        f"[bold blue]Source A:[/] {len(concepts)} concepts, "
+        f"{len(relationships)} relationships from {path.name}"
+    )
+    return res
+
+
 # ─── Helper: reconstruct FusionResult from JSON ─────────────────────────────
 
 
@@ -1331,9 +1407,15 @@ def lint(
 
 @app.command()
 def fuse(
-    source_a_json: Path = typer.Option(
+    source_a_json: list[Path] = typer.Option(
         None, "--source-a", "-a",
-        help="Source A extraction result (JSON from extract-a --json).",
+        help=(
+            "Source A extraction result (JSON from extract-a --json). "
+            "Repeat the flag to fuse multiple authoritative documents — "
+            "concepts that share an id (profile mode) or normalised name "
+            "(unconstrained) are consolidated; each contributing document "
+            "is recorded in extra_fields.source_documents."
+        ),
     ),
     source_b_json: Path = typer.Option(
         None, "--source-b", "-b",
@@ -1376,67 +1458,13 @@ def fuse(
     from .log import append_log
 
     # ── Load sources ──
-    sa = sb = sc = sd = None
+    sa: list = []
+    sb = sc = sd = None
 
     if source_a_json:
-        from .extractors.domain_doc_extractor import (
-            Concept,
-            DomainDocumentExtractionResult,
-            FieldConfidence,
-            Provenance,
-            Relationship,
-        )
-        raw = json.loads(source_a_json.read_text(encoding="utf-8"))
-        # Reconstruct from JSON (extract-a --json output)
-        concepts = []
-        for rc in raw.get("concepts", []):
-            c = Concept(
-                name=rc.get("name", ""),
-                definition=rc.get("definition", ""),
-                citation=rc.get("citation", ""),
-            )
-            for fc in rc.get("confidence", []):
-                c.confidence.append(FieldConfidence(
-                    fc.get("field_name", ""),
-                    fc.get("score", 0.0),
-                    fc.get("reason", ""),
-                ))
-            prov = rc.get("provenance")
-            if prov:
-                c.provenance = Provenance(
-                    source_document=prov.get("source_document", ""),
-                    source_section=prov.get("source_section", ""),
-                    source_text_snippet=prov.get("source_text_snippet", ""),
-                    extraction_timestamp=prov.get("extraction_timestamp", ""),
-                )
-            concepts.append(c)
-
-        relationships = []
-        for rr in raw.get("relationships", []):
-            r = Relationship(
-                subject=rr.get("subject", ""),
-                predicate=rr.get("predicate", ""),
-                object=rr.get("object", ""),
-            )
-            for fc in rr.get("confidence", []):
-                r.confidence.append(FieldConfidence(
-                    fc.get("field_name", ""),
-                    fc.get("score", 0.0),
-                    fc.get("reason", ""),
-                ))
-            relationships.append(r)
-
-        sa = DomainDocumentExtractionResult(
-            domain_name=raw.get("domain_name", ""),
-            concepts=concepts,
-            relationships=relationships,
-            source_documents=raw.get("source_documents", []),
-            extraction_timestamp=raw.get("extraction_timestamp", ""),
-        )
-        console.print(
-            f"[bold blue]Source A:[/] {len(concepts)} concepts, "
-            f"{len(relationships)} relationships from {source_a_json.name}"
-        )
+        for src_path in source_a_json:
+            sa.append(_load_source_a_json(src_path))
+            # Per-doc summary line — concepts/relationships logged in helper.
 
     if source_b_json:
         from .extractors.governance_extractor import GovernanceExtractor

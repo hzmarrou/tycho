@@ -181,17 +181,44 @@ class FusionEngine:
 
     def fuse(
         self,
-        source_a: DomainDocumentExtractionResult | None = None,
+        source_a: (
+            DomainDocumentExtractionResult
+            | list[DomainDocumentExtractionResult]
+            | None
+        ) = None,
         source_b: GovernanceExtractionResult | None = None,
         source_c: SchemaResult | None = None,
         source_d: CodeExtractionResult | None = None,
     ) -> FusionResult:
+        """Fuse Sources A, B, C, D into a rich data dictionary.
+
+        ``source_a`` may be a single ``DomainDocumentExtractionResult``
+        (single document) or a list of them (multi-document). When a
+        list is given, concepts that share an id (in profile mode) or a
+        normalised name (unconstrained) are consolidated into one
+        element, with each contributing document tracked in
+        ``el.extra_fields["source_documents"]`` and a
+        ``corroborating_doc_count`` count. AC1 (no-profile byte-
+        identity) is preserved: a single-element list behaves the same
+        as a single result, and unconstrained mode falls back to the
+        normalised-name keying that pre-Phase-5 code used.
+        """
         result = FusionResult(
             fusion_timestamp=datetime.utcnow().isoformat(),
         )
 
+        # Normalise source_a to a list. Order matters for "first wins"
+        # semantics on ties — earlier docs in the list seed first.
+        a_results: list[DomainDocumentExtractionResult]
+        if source_a is None:
+            a_results = []
+        elif isinstance(source_a, list):
+            a_results = source_a
+        else:
+            a_results = [source_a]
+
         # Track which sources were provided
-        if source_a:
+        if a_results:
             result.sources_used.append("A")
         if source_b:
             result.sources_used.append("B")
@@ -200,24 +227,28 @@ class FusionEngine:
         if source_d:
             result.sources_used.append("D")
 
-        # Build an index of fused elements keyed by normalised name
+        # The index is keyed by normalised name (always populated).
+        # ``id_lookup`` maps deterministic IDs (Phase 1) to the index
+        # key — so cross-source enrichment can find an element by its
+        # profile-mode id even when names diverge between sources.
         index: dict[str, FusedElement] = {}
+        id_lookup: dict[str, str] = {}
 
-        # ── Pass 1: Seed from Source A ──
-        if source_a:
-            self._merge_source_a(source_a, index, result)
+        # ── Pass 1: Seed from Source A (multi-doc consolidation) ──
+        for sa in a_results:
+            self._merge_source_a(sa, index, id_lookup, result)
 
         # ── Pass 2: Validate/enrich from Source B ──
         if source_b:
-            self._merge_source_b(source_b, index, result)
+            self._merge_source_b(source_b, index, id_lookup, result)
 
         # ── Pass 3: Enrich from Source C ──
         if source_c:
-            self._merge_source_c(source_c, index, result)
+            self._merge_source_c(source_c, index, id_lookup, result)
 
         # ── Pass 4: Attach business rules from Source D ──
         if source_d:
-            self._merge_source_d(source_d, index, result)
+            self._merge_source_d(source_d, index, id_lookup, result)
 
         # Finalize
         result.elements = list(index.values())
@@ -232,13 +263,15 @@ class FusionEngine:
         self,
         source_a: DomainDocumentExtractionResult,
         index: dict[str, FusedElement],
+        id_lookup: dict[str, str],
         result: FusionResult,
     ) -> None:
         for concept in source_a.concepts:
             if not concept.name.strip():
                 continue
-            key = normalise_name(concept.name)
-            el = self._get_or_create(index, concept.name)
+            el = self._get_or_create(
+                index, id_lookup, name=concept.name, eid=concept.id,
+            )
             conf = concept.overall_confidence()
 
             self._set_field(el, "element_name", concept.name, "A", conf)
@@ -262,6 +295,11 @@ class FusionEngine:
             if concept.entity_type:
                 el.extra_fields.setdefault("entity_type", concept.entity_type)
 
+            # Multi-doc corroboration: track every document this concept
+            # appeared in. Source A only — B/C/D each have a single
+            # provenance per record handled elsewhere.
+            self._track_corroboration(el, concept)
+
             if "A" not in el.sources:
                 el.sources.append("A")
 
@@ -284,14 +322,14 @@ class FusionEngine:
         self,
         source_b: GovernanceExtractionResult,
         index: dict[str, FusedElement],
+        id_lookup: dict[str, str],
         result: FusionResult,
     ) -> None:
         for rec in source_b.records:
-            key = normalise_name(rec.element_name)
-            if key in index:
+            el = self._lookup(index, id_lookup, eid=rec.id, name=rec.element_name)
+            if el is not None:
                 # Governance-validated: this Source A concept exists in
                 # the governance system.
-                el = index[key]
                 el.governance_validated = True
 
                 # Source B definition may be richer than Source A's
@@ -347,7 +385,9 @@ class FusionEngine:
             else:
                 # Governance-only term: exists in governance but Source A
                 # didn't extract it. Add as a new element.
-                el = self._get_or_create(index, rec.element_name)
+                el = self._get_or_create(
+                    index, id_lookup, name=rec.element_name, eid=rec.id,
+                )
                 if rec.definition:
                     self._set_field(
                         el, "definition", rec.definition, "B", rec.confidence,
@@ -375,13 +415,15 @@ class FusionEngine:
         self,
         source_c: SchemaResult,
         index: dict[str, FusedElement],
+        id_lookup: dict[str, str],
         result: FusionResult,
     ) -> None:
         for model in source_c.models:
             for sf in model.fields:
-                key = normalise_name(sf.name)
-                if key in index:
-                    el = index[key]
+                el = self._lookup(
+                    index, id_lookup, eid=sf.id, name=sf.name,
+                )
+                if el is not None:
                     # data_type from schema (PLAYBOOK §2: primary source)
                     if sf.playground_type:
                         self._set_field(
@@ -399,12 +441,19 @@ class FusionEngine:
                         self._set_field(
                             el, "mandatory_optional", "M", "C", 0.95,
                         )
+                    # Carry profile-mode metadata if Source A/B didn't.
+                    if sf.id:
+                        el.extra_fields.setdefault("id", sf.id)
+                    if sf.entity_type:
+                        el.extra_fields.setdefault("entity_type", sf.entity_type)
                     if "C" not in el.sources:
                         el.sources.append("C")
                 else:
                     # Schema-only field: not mentioned in Source A or B.
                     # Add as a new element with schema provenance.
-                    el = self._get_or_create(index, sf.name)
+                    el = self._get_or_create(
+                        index, id_lookup, name=sf.name, eid=sf.id,
+                    )
                     if sf.playground_type:
                         el.data_type = sf.playground_type
                         self._set_field(
@@ -415,6 +464,10 @@ class FusionEngine:
                     if model.doc:
                         el.extra_fields["schema_entity"] = model.name
                         el.extra_fields["schema_doc"] = model.doc
+                    if sf.id:
+                        el.extra_fields.setdefault("id", sf.id)
+                    if sf.entity_type:
+                        el.extra_fields.setdefault("entity_type", sf.entity_type)
                     el.sources.append("C")
                     result.unmatched_schema_fields.append((model.name, sf))
 
@@ -436,27 +489,35 @@ class FusionEngine:
         self,
         source_d: CodeExtractionResult,
         index: dict[str, FusedElement],
+        id_lookup: dict[str, str],
         result: FusionResult,
     ) -> None:
         for rule in source_d.rules:
             matched = False
             rule_desc = self._rule_to_description(rule)
-            key = normalise_name(rule.name)
 
-            # Try direct name match first
-            if key in index:
-                index[key].business_rules.append(rule_desc)
-                if "D" not in index[key].sources:
-                    index[key].sources.append("D")
+            # Profile-mode: Phase 3 may have already attached this rule
+            # to an entity ID via _apply_profile. Try id-first.
+            attached_id = getattr(rule, "attached_to_entity_id", "")
+
+            el = self._lookup(
+                index, id_lookup, eid=attached_id, name=rule.name,
+            )
+            if el is not None:
+                el.business_rules.append(rule_desc)
+                if "D" not in el.sources:
+                    el.sources.append("D")
                 matched = True
             else:
                 # Try matching by referenced symbols
                 for sym in rule.referenced_symbols:
-                    sym_key = normalise_name(sym.split(".")[-1])
-                    if sym_key in index:
-                        index[sym_key].business_rules.append(rule_desc)
-                        if "D" not in index[sym_key].sources:
-                            index[sym_key].sources.append("D")
+                    sym_el = self._lookup(
+                        index, id_lookup, name=sym.split(".")[-1],
+                    )
+                    if sym_el is not None:
+                        sym_el.business_rules.append(rule_desc)
+                        if "D" not in sym_el.sources:
+                            sym_el.sources.append("D")
                         matched = True
                         break
 
@@ -499,12 +560,110 @@ class FusionEngine:
     # ── Helpers ──────────────────────────────────────────────────────────
 
     def _get_or_create(
-        self, index: dict[str, FusedElement], name: str
+        self,
+        index: dict[str, FusedElement],
+        id_lookup: dict[str, str],
+        *,
+        name: str,
+        eid: str = "",
     ) -> FusedElement:
-        key = normalise_name(name)
-        if key not in index:
-            index[key] = FusedElement(element_name=name.strip())
-        return index[key]
+        """Get an existing element by id or name, or create a new one.
+
+        Id-first when supplied. Falls back to name lookup so mixed-mode
+        pipelines (e.g. unconstrained Source A + profile-mode Source B)
+        still consolidate correctly.
+
+        Two profile-mode entities that share a normalised name but
+        carry distinct ids stay SEPARATE — id is the source of truth in
+        profile mode, and name collisions resolved by appending the id
+        to the index key.
+        """
+        # 1. Direct id hit (same eid seen before).
+        if eid and eid in id_lookup:
+            return index[id_lookup[eid]]
+
+        # 2. Try name fallback. Two sub-cases when eid is supplied:
+        #    a. existing element has no id — promote it (mixed-mode).
+        #    b. existing element has a different id — collision: keep
+        #       both via id-suffixed key so distinct entities don't
+        #       silently merge on a surface-name coincidence.
+        name_key = normalise_name(name)
+        if name_key in index:
+            existing = index[name_key]
+            existing_id = existing.extra_fields.get("id", "")
+            if eid and existing_id and existing_id != eid:
+                # Collision — distinct entities sharing a name. Stash
+                # this one under a name+id composite key so name-only
+                # callers can still find the original by name, while
+                # id-based callers route to the right one via id_lookup.
+                collision_key = f"{name_key}#id:{eid}"
+                if collision_key not in index:
+                    index[collision_key] = FusedElement(
+                        element_name=name.strip(),
+                    )
+                id_lookup[eid] = collision_key
+                return index[collision_key]
+            # Same id, or one side unclaimed — merge into existing.
+            if eid and not existing_id:
+                # Promote: bind this eid to the existing element so
+                # later id-keyed callers find it.
+                id_lookup[eid] = name_key
+            return existing
+
+        # 3. New element — create keyed by normalised name (always),
+        # and register the id_lookup mapping if profile mode.
+        index[name_key] = FusedElement(element_name=name.strip())
+        if eid:
+            id_lookup[eid] = name_key
+        return index[name_key]
+
+    def _lookup(
+        self,
+        index: dict[str, FusedElement],
+        id_lookup: dict[str, str],
+        *,
+        eid: str = "",
+        name: str = "",
+    ) -> FusedElement | None:
+        """Look up an existing element without creating one.
+
+        Tries id first when supplied (profile mode), falls back to name.
+        Returns ``None`` if no match.
+        """
+        if eid and eid in id_lookup:
+            return index[id_lookup[eid]]
+        if name:
+            key = normalise_name(name)
+            if key in index:
+                return index[key]
+        return None
+
+    @staticmethod
+    def _track_corroboration(
+        el: FusedElement,
+        concept: "Concept",
+    ) -> None:
+        """Record that this concept appeared in another source document.
+
+        Multi-doc consolidation contract: when the same concept appears
+        in multiple authoritative documents, the fused element gathers
+        each document's path under ``extra_fields["source_documents"]``
+        and exposes the count as ``extra_fields["corroborating_doc_count"]``.
+        Higher counts mean more documents agree the term exists — useful
+        for downstream review weighting.
+
+        Concepts without provenance or with empty source_document
+        (e.g. unit-test stubs) are skipped silently.
+        """
+        if concept.provenance is None:
+            return
+        src_doc = concept.provenance.source_document
+        if not src_doc:
+            return
+        docs = el.extra_fields.setdefault("source_documents", [])
+        if src_doc not in docs:
+            docs.append(src_doc)
+        el.extra_fields["corroborating_doc_count"] = len(docs)
 
     def _set_field(
         self,
