@@ -9,6 +9,7 @@ Uses:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -16,9 +17,6 @@ import pytest
 FIXTURES = Path(__file__).parent / "fixtures"
 NPL_DOC = FIXTURES / "npl-basel-guidelines.md"
 NPLO_REF = FIXTURES / "nplo-reference.owl"
-
-# The user's existing combined extraction (copied for offline testing)
-COMBINED_EXTRACTION = Path(__file__).parent.parent / "tests" / "fixtures"
 
 
 # ─── Test: OntologyManager can load the reference NPLO ontology ──────────────
@@ -146,10 +144,24 @@ class TestConvertExistingExtraction:
 
     @pytest.fixture
     def combined_json_path(self) -> Path:
-        """Path to the combined extraction — skip if not available."""
-        path = Path(r"C:\Users\hzmarrou\OneDrive\python\learning\ontogpt\scenario\npl\d403-combined-extraction.json")
+        """Path to the combined extraction — skip if not available.
+
+        The fixture lives outside the repository (it's a developer
+        artefact, not a tracked test asset). Set the environment
+        variable ``ONTOZENSE_COMBINED_EXTRACTION_JSON`` to its absolute
+        path to enable these tests; otherwise they skip cleanly.
+        Skipping deterministically across OSes (Windows / macOS / WSL /
+        Linux) keeps the baseline test count stable for reviewers.
+        """
+        env_path = os.environ.get("ONTOZENSE_COMBINED_EXTRACTION_JSON")
+        if not env_path:
+            pytest.skip(
+                "ONTOZENSE_COMBINED_EXTRACTION_JSON not set — "
+                "see test docstring for setup."
+            )
+        path = Path(env_path)
         if not path.exists():
-            pytest.skip("Combined extraction JSON not found")
+            pytest.skip(f"Combined extraction JSON not found at {path}")
         return path
 
     def test_load_existing_extraction(self, combined_json_path: Path):
