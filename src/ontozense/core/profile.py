@@ -295,6 +295,36 @@ def _parse_entity_types(raw: Any) -> dict[str, EntityType]:
             optional_fields=_string_list(spec.get("optional", []), f"entity_types[{name}].optional"),
             subtypes=_string_list(spec.get("subtypes", []), f"entity_types[{name}].subtypes"),
         )
+
+    # Reject subtype/top-level name collisions. If "DirectMetric" is
+    # both declared as a top-level entity_type and as a subtype of
+    # another type (e.g. "Metric"), get_entity_type("DirectMetric")
+    # would return whichever the dict-iteration-order surfaces first
+    # — non-deterministic and a real correctness bug. Fail loudly at
+    # load time so the author notices the conflict.
+    top_level = set(out.keys())
+    for et in out.values():
+        for sub in et.subtypes:
+            if sub in top_level and sub != et.name:
+                raise ProfileError(
+                    f"Subtype name collision: {sub!r} is declared as "
+                    f"a subtype of {et.name!r} but is also a top-level "
+                    f"entity type. Each name must appear in exactly "
+                    f"one role — either top-level or subtype, not both."
+                )
+            # Also reject duplicate subtypes across different parents,
+            # which would create the same ambiguity.
+            for other_et in out.values():
+                if other_et.name == et.name:
+                    continue
+                if sub in other_et.subtypes:
+                    raise ProfileError(
+                        f"Subtype name collision: {sub!r} is declared as "
+                        f"a subtype of both {et.name!r} and "
+                        f"{other_et.name!r}. Each subtype must belong "
+                        f"to exactly one parent."
+                    )
+
     return out
 
 

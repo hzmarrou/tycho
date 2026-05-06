@@ -240,6 +240,35 @@ class TestValidationFailures:
         with pytest.raises(ProfileError, match="non-empty string"):
             load_profile(tmp_path)
 
+    def test_subtype_collision_with_top_level_type_rejected(self, tmp_path):
+        """If 'DirectMetric' is both a top-level type AND a subtype of
+        'Metric', get_entity_type('DirectMetric') would be ambiguous —
+        reject at load time. (Review finding 2026-05-06 #3.)"""
+        _write_profile(
+            tmp_path,
+            entity_types={
+                "Metric": {"subtypes": ["DirectMetric"]},
+                "DirectMetric": {"required": ["unit"]},
+            },
+            predicates={},
+        )
+        with pytest.raises(ProfileError, match="Subtype name collision"):
+            load_profile(tmp_path)
+
+    def test_subtype_shared_across_parents_rejected(self, tmp_path):
+        """Same subtype name on two different parent types creates the
+        same ambiguity — reject."""
+        _write_profile(
+            tmp_path,
+            entity_types={
+                "MetricA": {"subtypes": ["DirectMetric"]},
+                "MetricB": {"subtypes": ["DirectMetric"]},
+            },
+            predicates={},
+        )
+        with pytest.raises(ProfileError, match="Subtype name collision"):
+            load_profile(tmp_path)
+
 
 # ─── Sidecar files ───────────────────────────────────────────────────────────
 

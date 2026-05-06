@@ -348,6 +348,106 @@ class TestEsgProfile:
         )
 
 
+# ─── Review-fix coverage (2026-05-06) ──────────────────────────────────────
+
+
+class TestHashLengthThreading:
+    """Review finding #1 (blocker): the profile's id_format.hash_length
+    was parsed but ignored — _apply_profile always called compute_id
+    with the default 6. This test pins the fix."""
+
+    def test_custom_hash_length_in_profile_is_honoured(self, source_doc, tmp_path):
+        """A profile that declares hash_length=10 must produce 10-char
+        hash suffixes on every concept ID."""
+        import json
+
+        # Author a custom profile with hash_length=10
+        profile_dir = tmp_path / "custom_profile"
+        profile_dir.mkdir()
+        (profile_dir / "schema.json").write_text(
+            json.dumps({
+                "profile_name": "custom",
+                "profile_version": "1.0.0",
+                "entity_types": {"Concept": {"required": ["definition"]}},
+                "predicates": {},
+                "id_format": {
+                    "strategy": "type_label_hash",
+                    "hash_length": 10,
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        profile = load_profile(profile_dir)
+        assert profile.id_format.hash_length == 10  # parsed correctly
+
+        ext = DomainDocumentExtractor(profile=profile)
+        # Use a simple constrained-format ontogpt output
+        mock_output = (
+            '{\n'
+            '  "extracted_object": {"domain_name": "X", "concepts": [], "relationships": []},\n'
+            '  "raw_completion_output": "domain_name: X\\n'
+            'concepts:\\n  - Foo Bar :: Concept :: A test concept.\\n"\n'
+            '}'
+        )
+        with patch.object(
+            ext._ontogpt, "_run_ontogpt", return_value=mock_output,
+        ):
+            result = ext.extract_from_file(source_doc)
+
+        assert len(result.concepts) >= 1
+        for c in result.concepts:
+            # Hash suffix is the trailing token after the last underscore
+            hash_suffix = c.id.rsplit("_", 1)[-1]
+            assert len(hash_suffix) == 10, (
+                f"Expected 10-char hash (profile hash_length=10), got "
+                f"{len(hash_suffix)} on ID {c.id!r}"
+            )
+
+
+class TestProfileNamePathSafety:
+    """Review finding #2 (major): profile_name was used in temp template
+    filename without sanitisation. On Windows, characters like
+    <>:\"/\\|?* would crash the temp file creation. The fix sanitises
+    via regex; this test pins the behaviour."""
+
+    def test_profile_name_with_problematic_characters(self, tmp_path):
+        """A profile whose profile_name contains spaces and punctuation
+        still produces a usable temp template."""
+        import json
+
+        profile_dir = tmp_path / "tricky_profile"
+        profile_dir.mkdir()
+        (profile_dir / "schema.json").write_text(
+            json.dumps({
+                # Spaces + slashes + colons: would crash on Windows
+                # without sanitisation
+                "profile_name": "Test/Profile: v1.0 (alpha)",
+                "profile_version": "1.0.0",
+                "entity_types": {"Concept": {}},
+                "predicates": {},
+            }),
+            encoding="utf-8",
+        )
+
+        profile = load_profile(profile_dir)
+        # profile_name is preserved verbatim in the loaded object
+        assert profile.profile_name == "Test/Profile: v1.0 (alpha)"
+
+        # But constructing the extractor (which generates a temp
+        # template using profile_name in the filename) must not crash
+        ext = DomainDocumentExtractor(profile=profile)
+        assert ext.template_path.exists()
+
+        # Filename itself contains only safe chars (Windows-portable)
+        import re
+        bad_chars = re.search(r'[<>:"/\\|?*]', ext.template_path.name)
+        assert bad_chars is None, (
+            f"Temp template filename contains unsafe chars: "
+            f"{ext.template_path.name!r}"
+        )
+
+
 # ─── CLI integration ────────────────────────────────────────────────────────
 
 
@@ -375,6 +475,59 @@ class TestCliConstrainedFlow:
         assert r.exit_code == 1
         flat = " ".join(r.output.split())
         assert "Profile load failed" in flat
+        assert "Traceback" not in r.output
+
+    def test_io_error_during_profile_load_clean_error(self, tmp_path, monkeypatch):
+        """Review finding #4 (major): CLI catches ProfileError but not
+        OSError. A profile path with permission issues or filesystem
+        errors should still produce a clean message, not a raw
+        traceback."""
+        from typer.testing import CliRunner
+        from ontozense import cli
+
+        runner = CliRunner()
+        src = tmp_path / "doc.md"
+        src.write_text("# Doc\n", encoding="utf-8")
+
+        # Create a real profile directory so we get past the
+        # "directory not found" check, then monkeypatch load_profile
+        # itself to raise OSError (simulating a permission denied or
+        # filesystem error mid-load).
+        import json
+        prof = tmp_path / "perm_blocked_profile"
+        prof.mkdir()
+        (prof / "schema.json").write_text(
+            json.dumps({
+                "profile_name": "x",
+                "profile_version": "1.0",
+                "entity_types": {"A": {}},
+                "predicates": {},
+            }),
+            encoding="utf-8",
+        )
+
+        from ontozense.core import profile as profile_module
+
+        def _raise_oserror(path):
+            raise PermissionError(f"[Errno 13] Permission denied: '{path}'")
+
+        monkeypatch.setattr(profile_module, "load_profile", _raise_oserror)
+        # Re-import name in cli module's local scope (it's imported
+        # inside the function, so the monkeypatch on the module is
+        # enough — the local import resolves through the module).
+
+        r = runner.invoke(
+            cli.app,
+            [
+                "extract-a", str(src),
+                "--profile", str(prof),
+                "--skip-definitions-pass",
+            ],
+        )
+        assert r.exit_code == 1
+        flat = " ".join(r.output.split())
+        assert "Profile load failed" in flat
+        assert "PermissionError" in flat or "filesystem error" in flat
         assert "Traceback" not in r.output
 
     def test_no_profile_prints_unconstrained_mode(self, tmp_path, monkeypatch):

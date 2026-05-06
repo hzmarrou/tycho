@@ -371,7 +371,10 @@ def extract_a(
     from .log import append_log
 
     # Load profile if requested. Failures are user-facing (clean error,
-    # no traceback), per the tester-readiness UX contract.
+    # no traceback), per the tester-readiness UX contract. Catch both
+    # ProfileError (validation) and OSError (filesystem-level: permission
+    # denied, broken symlink, IO error) so neither path leaks a raw
+    # traceback to the user.
     loaded_profile = None
     if profile is not None:
         from .core.profile import load_profile, ProfileError
@@ -383,6 +386,17 @@ def extract_a(
                 "  See docs/PROFILE_SPEC.md for the required schema.json "
                 "format, or copy docs/profile-examples/esg/ as a starting "
                 "point."
+            )
+            raise typer.Exit(code=1)
+        except OSError as e:
+            console.print(
+                f"[bold red][x] Profile load failed (filesystem error):[/] "
+                f"{type(e).__name__}: {e}"
+            )
+            console.print(
+                f"  Check that the path {profile!s} is readable and that "
+                f"all required files (schema.json plus optional sidecars) "
+                f"have read permission."
             )
             raise typer.Exit(code=1)
 

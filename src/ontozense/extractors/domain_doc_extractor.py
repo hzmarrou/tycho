@@ -315,9 +315,16 @@ classes:
         multivalued: true
 """
 
+        # Sanitize profile_name for use as a filename prefix. The spec
+        # doesn't restrict profile_name (users may want spaces or
+        # punctuation for display), but Windows rejects <>:"/\|?* in
+        # filenames. Replace any non-[a-zA-Z0-9_-] character with "_"
+        # to keep the prefix safe on every OS without restricting the
+        # spec itself.
+        safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", profile.profile_name)
         temp = tempfile.NamedTemporaryFile(
             mode="w", suffix=".yaml", delete=False, encoding="utf-8",
-            prefix=f"ontozense_profile_{profile.profile_name}_",
+            prefix=f"ontozense_profile_{safe_name}_",
         )
         temp.write(template_yaml)
         temp.close()
@@ -379,7 +386,11 @@ classes:
             # is missing or empty, leave id="" — Phase 4 will flag it.
             if c.entity_type and canonical_name.strip():
                 try:
-                    c.id = compute_id(c.entity_type, canonical_name)
+                    c.id = compute_id(
+                        c.entity_type,
+                        canonical_name,
+                        hash_length=self.profile.id_format.hash_length,
+                    )
                 except ValueError:
                     # Label normalises to empty (e.g. all-punctuation):
                     # leave id="" so validation catches it.
