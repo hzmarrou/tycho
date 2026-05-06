@@ -611,21 +611,30 @@ class CodeExtractor:
           1. Walk ``rule.referenced_symbols`` looking for anything that
              resolves (via alias map or direct match) to a profile
              entity type. Use the first match.
-          2. If the rule's own ``name`` (e.g. constant name like
-             ``BORROWER_DPD_THRESHOLD``) starts with a known entity type
-             name (case-insensitive), attach to that type.
+          2. If the rule's own ``name`` (e.g. ``CONCEPT_THRESHOLD`` or
+             ``CUSTOMER_IDENTIFIER_THRESHOLD``) starts with a known
+             entity type name in any case style, attach to that type.
           3. Otherwise leave attached_to_entity_type="" and let Phase 4
              validation flag it.
+
+        Type matching is **separator-insensitive**: a profile type
+        ``CustomerIdentifier`` matches both ``CustomerIdentifier`` (camel),
+        ``customer_identifier`` (snake), and ``CUSTOMER-IDENTIFIER``
+        (kebab) because we compact-normalise (lowercase + strip all
+        separators) on both sides before lookup.
         """
         from ..core.identity import compute_id
 
-        # Build a case-insensitive lookup of known type names + their
+        # Build a compact-form lookup of known type names + their
         # canonical (case-correct) forms, including subtypes.
+        # Compact form: lowercase + all separators stripped, so
+        # "CustomerIdentifier" → "customeridentifier" and
+        # "CUSTOMER_IDENTIFIER" → "customeridentifier" both match.
         known_types: dict[str, str] = {}
         for et in self.profile.entity_types.values():
-            known_types[et.name.lower()] = et.name
+            known_types[_compact(et.name)] = et.name
             for sub in et.subtypes:
-                known_types[sub.lower()] = sub
+                known_types[_compact(sub)] = sub
 
         for rule in result.rules:
             entity_type = self._infer_entity_type(rule, known_types)
@@ -655,7 +664,8 @@ class CodeExtractor:
         """Heuristic for finding the entity_type a code rule attaches to.
 
         Returns the canonical (case-correct) entity_type name, or "" if
-        no match. Pure function modulo the profile alias map.
+        no match. Lookup is via compact form (separator-insensitive)
+        on both keys and queries.
         """
         # 1. Look at referenced_symbols — these are dotted attribute
         #    accesses like "loan.days_past_due" or attribute names like
@@ -665,25 +675,46 @@ class CodeExtractor:
             head = sym.split(".", 1)[0]
             # Try alias resolution first
             canonical = self.profile.resolve_alias(head)
-            if canonical.lower() in known_types:
-                return known_types[canonical.lower()]
-            # Then direct match
-            if head.lower() in known_types:
-                return known_types[head.lower()]
+            key = _compact(canonical)
+            if key in known_types:
+                return known_types[key]
+            # Then direct match (the alias resolver returns input on
+            # miss, so this catches plain matches too — but checking
+            # explicitly is clearer)
+            key = _compact(head)
+            if key in known_types:
+                return known_types[key]
 
-        # 2. Match the rule's name's leading capitalised token against
-        #    known types (handles BORROWER_DPD_THRESHOLD style names).
-        #    Split on underscore, hyphen, dot — try each prefix length
-        #    from longest to shortest.
+        # 2. Match the rule's name's leading token sequence against
+        #    known types (handles CONSTANT_PREFIX_STYLE names). Split
+        #    on underscore/hyphen/dot, then try each prefix length
+        #    from longest to shortest. Compact-form lookup means
+        #    "CUSTOMER_IDENTIFIER" matches profile type
+        #    "CustomerIdentifier" too.
         import re as _re
         tokens = _re.split(r"[_\-.]", rule.name)
         for n in range(len(tokens), 0, -1):
-            candidate = "_".join(tokens[:n]).lower()
-            if candidate in known_types:
-                return known_types[candidate]
-            # Also try alias resolution on the candidate
-            canonical = self.profile.resolve_alias(candidate)
-            if canonical.lower() in known_types:
-                return known_types[canonical.lower()]
+            candidate_compact = _compact("".join(tokens[:n]))
+            if candidate_compact in known_types:
+                return known_types[candidate_compact]
+            # Also try alias resolution on the underscore-joined form
+            canonical = self.profile.resolve_alias(
+                "_".join(tokens[:n]).lower()
+            )
+            key = _compact(canonical)
+            if key in known_types:
+                return known_types[key]
 
         return ""
+
+
+def _compact(s: str) -> str:
+    """Compact-form normalisation for separator-insensitive matching.
+
+    Lowercase and strip every separator character (whitespace, _, -,
+    /, .). Used for cross-style type matching: "CustomerIdentifier",
+    "CUSTOMER_IDENTIFIER", "customer-identifier" all collapse to
+    "customeridentifier".
+    """
+    import re as _re
+    return _re.sub(r"[\s_\-/.]+", "", s.lower())

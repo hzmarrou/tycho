@@ -331,6 +331,221 @@ class TestSourceDProfileAware:
         assert const_rules[0].attached_to_entity_id == ""
 
 
+class TestSourceDProfileMultiWordTypes:
+    """Review finding #1 (blocker): the type-inference heuristic must
+    match multi-word PascalCase types (e.g. ``CustomerIdentifier``)
+    against snake_case constant prefixes (``CUSTOMER_IDENTIFIER_THRESHOLD``).
+    The fix: compact-form normalisation that strips separators on both
+    sides before comparison."""
+
+    def _write_python(self, tmp_path: Path, content: str) -> Path:
+        f = tmp_path / "rules.py"
+        f.write_text(content, encoding="utf-8")
+        return tmp_path
+
+    def _profile_with_multiword_type(self, tmp_path: Path):
+        """Build a profile with a multi-word type like CustomerIdentifier."""
+        profile_dir = tmp_path / "multiword_profile"
+        profile_dir.mkdir()
+        (profile_dir / "schema.json").write_text(
+            json.dumps({
+                "profile_name": "multiword",
+                "profile_version": "1.0.0",
+                "entity_types": {
+                    "CustomerIdentifier": {"required": []},
+                    "ReportingFramework": {"required": []},
+                    "Concept": {"required": []},
+                },
+                "predicates": {},
+            }),
+            encoding="utf-8",
+        )
+        return load_profile(profile_dir)
+
+    def test_constant_screaming_snake_matches_pascal_type(self, tmp_path):
+        """A constant CUSTOMER_IDENTIFIER_THRESHOLD must attach to
+        the profile's CustomerIdentifier type via the name-prefix
+        heuristic."""
+        # Write code FIRST in a sub-dir so it doesn't interfere with
+        # profile dir tooling
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        self._write_python(
+            code_dir,
+            "CUSTOMER_IDENTIFIER_THRESHOLD = 100\n",
+        )
+        profile = self._profile_with_multiword_type(tmp_path)
+        result = CodeExtractor(profile=profile).extract_from_directory(code_dir)
+
+        const_rules = [r for r in result.rules if r.rule_type == "constant"]
+        assert len(const_rules) >= 1
+        c = const_rules[0]
+        assert c.attached_to_entity_type == "CustomerIdentifier", (
+            f"CUSTOMER_IDENTIFIER_THRESHOLD must attach to "
+            f"CustomerIdentifier (compact-form match), got "
+            f"entity_type={c.attached_to_entity_type!r}"
+        )
+
+    def test_constant_kebab_matches_pascal_type(self, tmp_path):
+        """Equivalent test with another multi-word type spelling style.
+        A function name reporting_framework_check should reference
+        ReportingFramework via the name-prefix heuristic."""
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        self._write_python(
+            code_dir,
+            "REPORTING_FRAMEWORK_VERSION = '1.0'\n",
+        )
+        profile = self._profile_with_multiword_type(tmp_path)
+        result = CodeExtractor(profile=profile).extract_from_directory(code_dir)
+
+        const_rules = [r for r in result.rules if r.rule_type == "constant"]
+        assert len(const_rules) >= 1
+        c = const_rules[0]
+        assert c.attached_to_entity_type == "ReportingFramework"
+
+    def test_single_word_type_still_works(self, tmp_path):
+        """Regression: the compact-form fix must not break single-word
+        type matching."""
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        self._write_python(code_dir, "CONCEPT_THRESHOLD = 100\n")
+        profile = self._profile_with_multiword_type(tmp_path)
+        result = CodeExtractor(profile=profile).extract_from_directory(code_dir)
+
+        const_rules = [r for r in result.rules if r.rule_type == "constant"]
+        assert any(
+            r.attached_to_entity_type == "Concept" for r in const_rules
+        )
+
+
+class TestSourceDProfileSqlPath:
+    """Review finding #3 (minor): SQL extraction in profile mode wasn't
+    tested. These tests cover CREATE VIEW / CREATE TABLE / CHECK
+    constraints with profile awareness."""
+
+    def _write_sql(self, tmp_path: Path, content: str) -> Path:
+        f = tmp_path / "schema.sql"
+        f.write_text(content, encoding="utf-8")
+        return tmp_path
+
+    def test_create_table_attaches_to_known_type_by_table_name(self, tmp_path):
+        """A CREATE TABLE concept (...) should produce a sql_table
+        rule whose name is 'concept' and which attaches to entity_type
+        Concept via the compact-form name match."""
+        d = self._write_sql(
+            tmp_path,
+            "CREATE TABLE concept (id INTEGER PRIMARY KEY, name TEXT);\n",
+        )
+        profile = load_profile(MINIMAL_PROFILE_DIR)
+        result = CodeExtractor(profile=profile).extract_from_directory(d)
+
+        sql_table_rules = [r for r in result.rules if r.rule_type == "sql_table"]
+        assert len(sql_table_rules) >= 1
+        # Table 'concept' should attach to type 'Concept' (case-insensitive)
+        attached = [
+            r for r in sql_table_rules
+            if r.attached_to_entity_type == "Concept"
+        ]
+        assert len(attached) >= 1, (
+            f"sql_table for table 'concept' should attach to "
+            f"Concept, got {[r.attached_to_entity_type for r in sql_table_rules]}"
+        )
+        assert attached[0].attached_to_entity_id.startswith("concept_")
+
+    def test_create_view_attaches_to_known_type_via_name_prefix(self, tmp_path):
+        """A CREATE VIEW concept_summary should attach to Concept via
+        the leading-token match in _infer_entity_type."""
+        d = self._write_sql(
+            tmp_path,
+            "CREATE VIEW concept_summary AS SELECT * FROM concept;\n",
+        )
+        profile = load_profile(MINIMAL_PROFILE_DIR)
+        result = CodeExtractor(profile=profile).extract_from_directory(d)
+
+        sql_view_rules = [r for r in result.rules if r.rule_type == "sql_view"]
+        assert len(sql_view_rules) >= 1
+        v = sql_view_rules[0]
+        # 'concept_summary' tokens: ['concept', 'summary']. Longest-
+        # prefix-first tries 'conceptsummary', then 'concept'. 'concept'
+        # matches profile type 'Concept'.
+        assert v.attached_to_entity_type == "Concept", (
+            f"sql_view 'concept_summary' should attach to Concept via "
+            f"prefix 'concept', got {v.attached_to_entity_type!r}"
+        )
+
+    def test_unknown_sql_object_leaves_attachment_empty(self, tmp_path):
+        """A SQL view whose name doesn't match any known type stays
+        unattached for Phase 4 to flag."""
+        d = self._write_sql(
+            tmp_path,
+            "CREATE VIEW mysterious_aggregate AS SELECT 1;\n",
+        )
+        profile = load_profile(MINIMAL_PROFILE_DIR)
+        result = CodeExtractor(profile=profile).extract_from_directory(d)
+
+        sql_view_rules = [r for r in result.rules if r.rule_type == "sql_view"]
+        assert len(sql_view_rules) >= 1
+        assert sql_view_rules[0].attached_to_entity_type == ""
+
+
+class TestProfileLookupCaseInsensitive:
+    """Review finding #2 (major): Profile.is_known_type() was case-
+    sensitive while compute_id() is case-insensitive. A record
+    declared with entity_type: 'concept' (lowercase) was flagged as
+    unknown but still got an ID — inconsistent. Fix makes lookups
+    case-insensitive."""
+
+    def test_is_known_type_case_insensitive(self):
+        profile = load_profile(MINIMAL_PROFILE_DIR)
+        # Profile declares 'Concept' (capitalised)
+        assert profile.is_known_type("Concept")
+        assert profile.is_known_type("concept")  # was failing before fix
+        assert profile.is_known_type("CONCEPT")
+        assert profile.is_known_type("CoNcEpT")
+
+    def test_get_entity_type_case_insensitive(self):
+        profile = load_profile(MINIMAL_PROFILE_DIR)
+        et = profile.get_entity_type("concept")  # lowercase input
+        assert et is not None
+        assert et.name == "Concept"  # canonical case preserved in output
+
+    def test_is_known_predicate_case_insensitive(self):
+        profile = load_profile(MINIMAL_PROFILE_DIR)
+        assert profile.is_known_predicate("AppliesTo")
+        assert profile.is_known_predicate("appliesto")
+        assert profile.is_known_predicate("APPLIESTO")
+
+    def test_governance_record_lowercase_type_no_false_warning(self, tmp_path):
+        """End-to-end: a Source B record with entity_type='concept'
+        (lowercase) must NOT generate a profile_warning, because the
+        profile recognises it case-insensitively."""
+        f = tmp_path / "gov.json"
+        f.write_text(
+            json.dumps([
+                {"element_name": "Concept One", "entity_type": "concept"},
+            ]),
+            encoding="utf-8",
+        )
+        profile = load_profile(MINIMAL_PROFILE_DIR)
+        result = GovernanceExtractor(profile=profile).extract_from_file(f)
+
+        r = result.records[0]
+        # No profile_warning should have been added — type is known
+        assert "profile_warning" not in r.extra_fields, (
+            f"Lowercase entity_type 'concept' should match profile "
+            f"type 'Concept' case-insensitively, but got warning: "
+            f"{r.extra_fields.get('profile_warning')!r}"
+        )
+        # And no result-level warning either
+        assert not any("concept" in w.lower() for w in result.warnings), (
+            f"Should not have warned about lowercase type, but warnings = "
+            f"{result.warnings}"
+        )
+        # ID still computed
+        assert r.id, "ID should be populated for known type (any case)"
+
+
 # ─── Cross-source ID alignment (the consolidation contract) ─────────────────
 
 

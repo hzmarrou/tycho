@@ -126,19 +126,36 @@ class Profile:
 
         If ``type_name`` is a subtype (e.g. "DirectMetric"), returns the
         parent EntityType ("Metric"). Returns None if no match.
+
+        Lookup is **case-insensitive** to align with
+        :func:`ontozense.core.identity.compute_id` (which lowercases its
+        type input). Without this, a record declared with
+        ``entity_type: "concept"`` (lowercase) would be flagged as
+        unknown by ``is_known_type`` while still getting a valid
+        deterministic ID — an inconsistency.
         """
+        target = type_name.strip().lower()
         for et in self.entity_types.values():
-            if et.name == type_name or type_name in et.subtypes:
+            if et.name.lower() == target:
+                return et
+            if any(sub.lower() == target for sub in et.subtypes):
                 return et
         return None
 
     def is_known_type(self, type_name: str) -> bool:
-        """Whether ``type_name`` is declared as an entity type or subtype."""
+        """Whether ``type_name`` is declared as an entity type or subtype.
+
+        Case-insensitive — see ``get_entity_type``.
+        """
         return self.get_entity_type(type_name) is not None
 
     def is_known_predicate(self, predicate_name: str) -> bool:
-        """Whether ``predicate_name`` is in the canonical predicate set."""
-        return predicate_name in self.predicates
+        """Whether ``predicate_name`` is in the canonical predicate set.
+
+        Case-insensitive for parity with ``is_known_type``.
+        """
+        target = predicate_name.strip().lower()
+        return any(p.lower() == target for p in self.predicates)
 
     def canonicalise_verb(self, verb: str) -> str:
         """Map a free-form verb phrase to a canonical predicate name.
