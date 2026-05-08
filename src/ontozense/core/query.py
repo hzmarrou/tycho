@@ -86,7 +86,11 @@ def _render_element(el: FusedElement, result: FusionResult) -> str:
     if el.business_rules:
         lines.append(f"**Business rules ({len(el.business_rules)}):**")
         for rule in el.business_rules:
-            lines.append(f"- {rule}")
+            # Tycho 1.0+: business_rules is list[BusinessRule] with a
+            # human-readable .description plus typed metadata. Pre-1.0
+            # callers stored bare strings — render either shape.
+            text = rule.description if hasattr(rule, "description") else str(rule)
+            lines.append(f"- {text}")
         lines.append("")
 
     # Relationships involving this element

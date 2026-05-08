@@ -511,7 +511,7 @@ class TestSourceDIdFirstAttachment:
         assert len(r.elements) == 1
         el = r.elements[0]
         assert "D" in el.sources
-        assert any("LOAN_MAX_TERM_DAYS" in br for br in el.business_rules)
+        assert any("LOAN_MAX_TERM_DAYS" in br.description for br in el.business_rules)
 
     def test_source_d_falls_back_to_name_when_no_attachment_id(self):
         """Unconstrained Source D rule (no attached_to_entity_id) still
@@ -865,7 +865,7 @@ class TestCrossSourceIdCollisionRegressions:
         el = r.elements[0]
         assert el.extra_fields["id"] == "concept_loan_111111"
         assert "D" in el.sources
-        assert any("MAX_TERM_DAYS" in br for br in el.business_rules)
+        assert any("MAX_TERM_DAYS" in br.description for br in el.business_rules)
 
 
 # ─── 11. CLI error handling for --source-a (review finding 3) ───────────────

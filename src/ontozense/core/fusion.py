@@ -139,6 +139,32 @@ class FieldConflict:
 
 
 @dataclass
+class BusinessRule:
+    """One business rule attached to an entity (Tycho 1.0+).
+
+    Replaces the pre-1.0 ``list[str]`` shape on ``FusedElement.business_rules``.
+    Carries enough structure for downstream tooling to render the rule
+    differently from the human-readable description, jump back to the
+    source line via the anchor, and group rules by ``rule_type``.
+
+    The wrap-up activates the dormant ``_anchor_from_code_provenance``
+    helper Phase 6 defined: every CodeRule that lands on a fused
+    element now contributes its (file, line, column, end_line, snippet)
+    as a ``FieldAnchor`` here.
+    """
+    rule_type: str          # "constant", "conditional", "function", "sql_check", ...
+    name: str               # e.g. "NPE_DPD_THRESHOLD"
+    expression: str         # source-text expression
+    description: str        # human-readable rendering (was list[str] item)
+    value: Optional[str] = None
+    referenced_symbols: list[str] = field(default_factory=list)
+    citations: list[str] = field(default_factory=list)
+    docstring: str = ""
+    confidence: float = 0.95
+    anchor: Optional[FieldAnchor] = None
+
+
+@dataclass
 class FusedElement:
     """One element in the fused rich data dictionary."""
     element_name: str
@@ -148,7 +174,7 @@ class FusedElement:
     citation: str = ""
     data_type: str = ""
     enum_values: list[str] = field(default_factory=list)
-    business_rules: list[str] = field(default_factory=list)
+    business_rules: list[BusinessRule] = field(default_factory=list)
     extra_fields: dict[str, Any] = field(default_factory=dict)
 
     # ── Provenance & quality ──
@@ -580,7 +606,10 @@ class FusionEngine:
     ) -> None:
         for rule in source_d.rules:
             matched = False
-            rule_desc = self._rule_to_description(rule)
+            # Build a typed BusinessRule with the human-readable
+            # description and the FieldAnchor derived from the rule's
+            # CodeProvenance (file, line, column, end_line, snippet).
+            br = self._build_business_rule(rule)
 
             # Profile-mode: Phase 3 may have already attached this rule
             # to an entity ID via _apply_profile. Try id-first.
@@ -590,7 +619,7 @@ class FusionEngine:
                 index, id_lookup, eid=attached_id, name=rule.name,
             )
             if el is not None:
-                el.business_rules.append(rule_desc)
+                el.business_rules.append(br)
                 if "D" not in el.sources:
                     el.sources.append("D")
                 matched = True
@@ -601,7 +630,7 @@ class FusionEngine:
                         index, id_lookup, name=sym.split(".")[-1],
                     )
                     if sym_el is not None:
-                        sym_el.business_rules.append(rule_desc)
+                        sym_el.business_rules.append(br)
                         if "D" not in sym_el.sources:
                             sym_el.sources.append("D")
                         matched = True
@@ -642,6 +671,30 @@ class FusionEngine:
             parts.append(f"[{fname}:{rule.provenance.line}]")
 
         return " ".join(parts)
+
+    @classmethod
+    def _build_business_rule(cls, rule: CodeRule) -> BusinessRule:
+        """Convert a Source D ``CodeRule`` to a typed ``BusinessRule``.
+
+        Activates the dormant ``_anchor_from_code_provenance`` helper
+        defined in Phase 6 so per-rule source coordinates land on the
+        ``BusinessRule.anchor`` field. ``description`` is the existing
+        ``_rule_to_description`` output — preserved so downstream
+        consumers (lint, query, report) can still display rules as
+        plain strings via ``br.description``.
+        """
+        return BusinessRule(
+            rule_type=rule.rule_type,
+            name=rule.name,
+            expression=rule.expression,
+            description=cls._rule_to_description(rule),
+            value=str(rule.value) if rule.value is not None else None,
+            referenced_symbols=list(rule.referenced_symbols),
+            citations=list(rule.citations),
+            docstring=rule.docstring,
+            confidence=rule.confidence,
+            anchor=cls._anchor_from_code_provenance(rule),
+        )
 
     # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -819,11 +872,11 @@ class FusionEngine:
     ) -> Optional[FieldAnchor]:
         """Map a Source D ``CodeRule.provenance`` to a ``FieldAnchor``.
 
-        Reserved for the eventual structured business-rule pipeline
-        (see Phase 6 scope notes). Today's ``business_rules`` field is
-        a list[str] with no per-element anchor slot, so this helper
-        isn't called yet — kept here so the contract for Source D is
-        documented and ready for follow-up.
+        Tycho 1.0+: called by ``_build_business_rule`` so every typed
+        ``BusinessRule`` carries the source coordinates of the
+        constant / conditional / function / SQL clause it came from.
+        Pre-1.0 this was a documented stub waiting for the structured
+        business-rule shape to land.
         """
         prov = rule.provenance
         if prov is None:

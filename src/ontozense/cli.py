@@ -991,6 +991,7 @@ def _reconstruct_fusion_result(raw: dict) -> "FusionResult":
     avoid duplicating the reconstruction logic.
     """
     from .core.fusion import (
+        BusinessRule,
         FieldAnchor,
         FusedElement,
         FusedRelationship,
@@ -1018,6 +1019,32 @@ def _reconstruct_fusion_result(raw: dict) -> "FusionResult":
             snippet=a.get("snippet", ""),
         )
 
+    def _business_rule_from(item) -> BusinessRule:
+        """Tycho 1.0+: read back a BusinessRule from a JSON dict.
+        Pre-1.0 fused JSONs stored business_rules as list[str]; for
+        backward compat, accept a string and wrap it in a minimal
+        BusinessRule with type/name unknown — the description is the
+        only payload available."""
+        if isinstance(item, str):
+            return BusinessRule(
+                rule_type="",
+                name="",
+                expression="",
+                description=item,
+            )
+        return BusinessRule(
+            rule_type=item.get("rule_type", ""),
+            name=item.get("name", ""),
+            expression=item.get("expression", ""),
+            description=item.get("description", ""),
+            value=item.get("value"),
+            referenced_symbols=list(item.get("referenced_symbols", [])),
+            citations=list(item.get("citations", [])),
+            docstring=item.get("docstring", ""),
+            confidence=item.get("confidence", 0.95),
+            anchor=_anchor_from_dict(item.get("anchor")),
+        )
+
     elements = []
     for re_ in raw.get("elements", []):
         el = FusedElement(
@@ -1028,7 +1055,10 @@ def _reconstruct_fusion_result(raw: dict) -> "FusionResult":
             citation=re_.get("citation", ""),
             data_type=re_.get("data_type", ""),
             enum_values=re_.get("enum_values", []),
-            business_rules=re_.get("business_rules", []),
+            business_rules=[
+                _business_rule_from(item)
+                for item in re_.get("business_rules", [])
+            ],
             extra_fields=re_.get("extra_fields", {}),
             sources=re_.get("sources", []),
             governance_validated=re_.get("governance_validated", False),
@@ -1298,6 +1328,45 @@ def _serialize_field_provenance(fp) -> dict:
     return out
 
 
+def _serialize_business_rule(br) -> dict:
+    """Serialize a BusinessRule to a JSON-friendly dict.
+
+    Tycho 1.0+: business_rules went from list[str] to list[BusinessRule].
+    Each rule emits all its typed fields. ``anchor`` is omitted when
+    None or empty, mirroring the FieldAnchor serialisation policy.
+    For backward compat with code that sneaks raw strings into
+    business_rules, fall back to wrapping the string in a minimal
+    dict with only ``description`` set.
+    """
+    if isinstance(br, str):
+        return {"rule_type": "", "name": "", "expression": "",
+                "description": br}
+    out = {
+        "rule_type": br.rule_type,
+        "name": br.name,
+        "expression": br.expression,
+        "description": br.description,
+        "value": br.value,
+        "referenced_symbols": list(br.referenced_symbols),
+        "citations": list(br.citations),
+        "docstring": br.docstring,
+        "confidence": br.confidence,
+    }
+    anchor = getattr(br, "anchor", None)
+    if anchor is not None and not anchor.is_empty():
+        out["anchor"] = {
+            "page": anchor.page,
+            "char_offset": anchor.char_offset,
+            "char_length": anchor.char_length,
+            "line": anchor.line,
+            "end_line": anchor.end_line,
+            "column": anchor.column,
+            "segment_id": anchor.segment_id,
+            "snippet": anchor.snippet,
+        }
+    return out
+
+
 def _serialize_element(el) -> dict:
     """Serialize a FusedElement to a JSON-friendly dict.
 
@@ -1312,7 +1381,9 @@ def _serialize_element(el) -> dict:
         "citation": el.citation,
         "data_type": el.data_type,
         "enum_values": el.enum_values,
-        "business_rules": el.business_rules,
+        "business_rules": [
+            _serialize_business_rule(br) for br in el.business_rules
+        ],
         "governance_validated": el.governance_validated,
         "confidence": round(el.confidence, 3),
         "sources": el.sources,
@@ -1799,7 +1870,9 @@ def fuse(
                 "citation": el.citation,
                 "data_type": el.data_type,
                 "enum_values": el.enum_values,
-                "business_rules": el.business_rules,
+                "business_rules": [
+                    _serialize_business_rule(br) for br in el.business_rules
+                ],
                 "governance_validated": el.governance_validated,
                 "confidence": round(el.confidence, 3),
                 "sources": el.sources,

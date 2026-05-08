@@ -342,7 +342,10 @@ class TestSourceAD:
         result = FusionEngine().fuse(source_a=a, source_d=d)
         el = result.get_element("threshold days")
         assert el.business_rules
-        assert "90" in el.business_rules[0]
+        # Tycho 1.0+: business_rules is list[BusinessRule]; the
+        # human-readable description carries the same content the
+        # pre-1.0 list[str] had.
+        assert "90" in el.business_rules[0].description
         assert "D" in el.sources
 
     def test_code_rule_matches_by_referenced_symbol(self):
@@ -355,7 +358,7 @@ class TestSourceAD:
         result = FusionEngine().fuse(source_a=a, source_d=d)
         el = result.get_element("status")
         assert el.business_rules
-        assert "classify" in el.business_rules[0]
+        assert "classify" in el.business_rules[0].description
 
     def test_unmatched_code_rule_tracked(self):
         a = _source_a(_concept("Default"))
@@ -373,7 +376,7 @@ class TestSourceAD:
         )
         result = FusionEngine().fuse(source_a=a, source_d=d)
         el = result.get_element("threshold days")
-        assert "Section 14" in el.business_rules[0]
+        assert "Section 14" in el.business_rules[0].description
 
 
 # ─── Conflict resolution (PLAYBOOK §4) ──────────────────────────────────────

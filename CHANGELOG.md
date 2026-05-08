@@ -36,6 +36,21 @@ refactor (Source C). This is the first stable release.
 
 ### Changed (BREAKING)
 
+- **`FusedElement.business_rules` is now `list[BusinessRule]`, not
+  `list[str]`.** Each rule carries `rule_type`, `name`, `expression`,
+  `description` (the human-readable rendering), `value`,
+  `referenced_symbols`, `citations`, `docstring`, `confidence`, and
+  an optional `FieldAnchor` (file/line/column/end_line/snippet). The
+  Phase 6 `_anchor_from_code_provenance` helper that was a documented
+  stub now actively threads source coordinates from `CodeRule`
+  through to every typed rule.
+  - Migration: anywhere reading a rule, switch from `for rule_str
+    in el.business_rules` (string) to `for rule in el.business_rules:
+    rule.description` (typed).
+  - Pre-1.0 fused JSONs with `business_rules: ["…"]` (raw strings)
+    are still loadable: each string wraps in a minimal `BusinessRule`
+    with only `description` set.
+
 - **Source C contract is now a JSON file, not a Python parser
   invocation.** `ontozense fuse --source-c <path>` expects a
   `SchemaResult` JSON file produced by an adapter, not a Django
