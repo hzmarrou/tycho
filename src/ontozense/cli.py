@@ -1536,6 +1536,16 @@ def report(
             "declared entity_types and predicates were populated."
         ),
     ),
+    reference: Path = typer.Option(
+        None, "--reference",
+        help=(
+            "Optional reference data dictionary (a fused-shape JSON "
+            "file representing the curated truth). When supplied, "
+            "the report includes precision / recall / F1 of the "
+            "fused output against the reference, both for elements "
+            "and for relationships."
+        ),
+    ),
     output: Path = typer.Option(
         None, "--output", "-o",
         help=(
@@ -1596,7 +1606,38 @@ def report(
             )
             raise typer.Exit(code=1)
 
-    report_obj = compute_benchmark(fusion_result, profile=loaded_profile)
+    # Tycho 1.0+ wrap-up #3: optional --reference compares the fused
+    # output against a curated truth dictionary and emits P/R/F1.
+    loaded_reference = None
+    reference_path_str = ""
+    if reference is not None:
+        if not reference.exists():
+            console.print(
+                f"[bold red][x] Reference file not found:[/] {reference}"
+            )
+            raise typer.Exit(code=1)
+        try:
+            ref_raw = json.loads(reference.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            console.print(
+                f"[bold red][x] Reference JSON parse error:[/] {reference}"
+            )
+            console.print(f"  [dim]Line {e.lineno}, col {e.colno}: {e.msg}[/]")
+            console.print(
+                "  The reference file should be a fused-shape JSON: "
+                "an object with [cyan]elements[/] and (optionally) "
+                "[cyan]relationships[/] arrays."
+            )
+            raise typer.Exit(code=1)
+        loaded_reference = _reconstruct_fusion_result(ref_raw)
+        reference_path_str = str(reference)
+
+    report_obj = compute_benchmark(
+        fusion_result,
+        profile=loaded_profile,
+        reference=loaded_reference,
+        reference_path=reference_path_str,
+    )
     md = render_markdown(report_obj)
 
     # Always emit markdown — to file if requested, else to stdout

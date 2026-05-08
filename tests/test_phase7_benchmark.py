@@ -620,3 +620,219 @@ class TestCli:
         )
         assert r.exit_code == 1
         assert "Traceback" not in r.output
+
+
+# ─── 10. Reference comparison (wrap-up #3) ─────────────────────────────────
+
+
+class TestReferenceComparison:
+    """Pin the reference-benchmark mode: compute_benchmark gets an
+    optional ``reference`` FusionResult, returns a populated
+    ``BenchmarkReport.reference_comparison`` with element- and
+    relationship-level precision/recall/F1."""
+
+    def test_no_reference_means_section_is_none(self):
+        """AC1: report without --reference produces None for the
+        section, byte-identical to pre-wrap-up output."""
+        r = compute_benchmark(_result([_el("X")]))
+        assert r.reference_comparison is None
+
+    def test_perfect_match_yields_p_r_f1_one(self):
+        """fused == reference (same elements, same relationships)
+        → P=R=F1=1.0."""
+        elements = [_el("A"), _el("B"), _el("C")]
+        rels = [
+            FusedRelationship(subject="A", predicate="rel", object="B", source="A"),
+        ]
+        fused = _result(elements, rels)
+        ref = _result([_el("A"), _el("B"), _el("C")], [
+            FusedRelationship(subject="A", predicate="rel", object="B", source="A"),
+        ])
+        r = compute_benchmark(fused, reference=ref)
+        rc = r.reference_comparison
+        assert rc is not None
+        assert rc.elements_precision == 1.0
+        assert rc.elements_recall == 1.0
+        assert rc.elements_f1 == 1.0
+        assert rc.relationships_precision == 1.0
+        assert rc.relationships_recall == 1.0
+        assert rc.missing_elements == []
+        assert rc.extra_elements == []
+
+    def test_partial_match_metrics(self):
+        """Fused has 3 elements (A, B, C); reference has (A, B, D).
+        TP=2 (A, B), FP=1 (C), FN=1 (D).
+        Precision = 2/3, Recall = 2/3, F1 = 2/3."""
+        fused = _result([_el("A"), _el("B"), _el("C")])
+        ref = _result([_el("A"), _el("B"), _el("D")])
+        r = compute_benchmark(fused, reference=ref)
+        rc = r.reference_comparison
+        assert rc.elements_true_positive == 2
+        assert rc.elements_false_positive == 1
+        assert rc.elements_false_negative == 1
+        assert abs(rc.elements_precision - 0.667) < 0.01
+        assert abs(rc.elements_recall - 0.667) < 0.01
+        assert abs(rc.elements_f1 - 0.667) < 0.01
+        assert rc.missing_elements == ["D"]
+        assert rc.extra_elements == ["C"]
+
+    def test_empty_fused_against_nonempty_reference(self):
+        """Recall = 0 (we missed everything); precision is 0/0 → 0
+        (no division by zero)."""
+        fused = _result([])
+        ref = _result([_el("A"), _el("B")])
+        r = compute_benchmark(fused, reference=ref)
+        rc = r.reference_comparison
+        assert rc.elements_precision == 0.0
+        assert rc.elements_recall == 0.0
+        assert rc.elements_f1 == 0.0
+        assert rc.missing_elements == ["A", "B"]
+
+    def test_id_match_wins_over_name_match(self):
+        """In profile mode, two elements with the same ID but
+        different surface names match. Pinned because this is the
+        cross-source ID alignment contract from Phases 1–5 applied
+        to reference comparison."""
+        fused = _result([
+            _el("CustomerID", entity_type="Concept", eid="concept_x_111"),
+        ])
+        # Reference uses a different surface name but same ID
+        ref = _result([
+            _el("customer-identifier", entity_type="Concept", eid="concept_x_111"),
+        ])
+        r = compute_benchmark(fused, reference=ref)
+        rc = r.reference_comparison
+        # Match by ID → 1 TP, no FP, no FN
+        assert rc.elements_true_positive == 1
+        assert rc.elements_false_positive == 0
+        assert rc.elements_false_negative == 0
+        assert rc.elements_f1 == 1.0
+
+    def test_relationship_predicate_match_is_case_insensitive(self):
+        """Match relationships on (normalised subj, lowercased pred,
+        normalised obj). Trivially case-insensitive, mirrors fusion
+        and benchmark predicate-coverage policy."""
+        fused = _result(
+            [_el("A"), _el("B")],
+            [FusedRelationship(
+                subject="A", predicate="AppliesTo", object="B", source="A",
+            )],
+        )
+        ref = _result(
+            [_el("A"), _el("B")],
+            [FusedRelationship(
+                subject="A", predicate="appliesto", object="B", source="A",
+            )],
+        )
+        r = compute_benchmark(fused, reference=ref)
+        rc = r.reference_comparison
+        assert rc.relationships_true_positive == 1
+        assert rc.relationships_f1 == 1.0
+
+    def test_markdown_includes_reference_section_when_supplied(self):
+        ref = _result([_el("A")])
+        r = compute_benchmark(_result([_el("A")]), reference=ref)
+        md = render_markdown(r)
+        assert "## Reference comparison" in md
+        assert "Precision" in md
+        assert "F1" in md
+
+    def test_markdown_omits_reference_section_without_reference(self):
+        r = compute_benchmark(_result([_el("A")]))
+        md = render_markdown(r)
+        assert "Reference comparison" not in md
+
+
+class TestCliReferenceFlag:
+    def _write_fused_json(self, tmp_path: Path, elements: list[dict]) -> Path:
+        f = tmp_path / "f.json"
+        f.write_text(
+            json.dumps({
+                "fusion_timestamp": "2026-05-08T00:00:00",
+                "sources_used": ["A"],
+                "summary": {},
+                "elements": elements,
+                "relationships": [],
+            }),
+            encoding="utf-8",
+        )
+        return f
+
+    def _basic_element(self, name: str, **overrides) -> dict:
+        base = {
+            "element_name": name,
+            "definition": "",
+            "is_critical": False,
+            "citation": "",
+            "data_type": "",
+            "enum_values": [],
+            "business_rules": [],
+            "governance_validated": False,
+            "confidence": 0.9,
+            "sources": ["A"],
+            "needs_review": False,
+            "conflicts": [],
+            "extra_fields": {},
+        }
+        base.update(overrides)
+        return base
+
+    def test_reference_flag_includes_section_in_output(self, tmp_path):
+        from typer.testing import CliRunner
+        from ontozense import cli
+
+        runner = CliRunner()
+        fused = self._write_fused_json(tmp_path, [
+            self._basic_element("A"), self._basic_element("B"),
+        ])
+        ref_path = tmp_path / "ref.json"
+        ref_path.write_text(json.dumps({
+            "fusion_timestamp": "", "sources_used": [], "summary": {},
+            "elements": [self._basic_element("A"), self._basic_element("B"),
+                         self._basic_element("C")],
+            "relationships": [],
+        }), encoding="utf-8")
+
+        out = tmp_path / "report.json"
+        r = runner.invoke(cli.app, [
+            "report", str(fused),
+            "--reference", str(ref_path),
+            "--output", str(out),
+        ])
+        assert r.exit_code == 0, r.output
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert data["reference_comparison"] is not None
+        rc = data["reference_comparison"]
+        assert rc["elements_true_positive"] == 2
+        assert rc["elements_false_negative"] == 1
+        assert rc["missing_elements"] == ["C"]
+
+    def test_missing_reference_clean_error(self, tmp_path):
+        from typer.testing import CliRunner
+        from ontozense import cli
+
+        runner = CliRunner()
+        fused = self._write_fused_json(tmp_path, [self._basic_element("X")])
+        r = runner.invoke(cli.app, [
+            "report", str(fused),
+            "--reference", str(tmp_path / "missing.json"),
+        ])
+        assert r.exit_code == 1
+        assert "Reference file not found" in r.output
+        assert "Traceback" not in r.output
+
+    def test_malformed_reference_clean_error(self, tmp_path):
+        from typer.testing import CliRunner
+        from ontozense import cli
+
+        runner = CliRunner()
+        fused = self._write_fused_json(tmp_path, [self._basic_element("X")])
+        bad = tmp_path / "bad.json"
+        bad.write_text("{not valid json", encoding="utf-8")
+        r = runner.invoke(cli.app, [
+            "report", str(fused),
+            "--reference", str(bad),
+        ])
+        assert r.exit_code == 1
+        assert "Reference JSON parse error" in r.output
+        assert "Traceback" not in r.output

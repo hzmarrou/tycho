@@ -39,7 +39,7 @@ from datetime import datetime
 from statistics import mean, median
 from typing import Any, Optional
 
-from .fusion import FusedElement, FusionResult
+from .fusion import FusedElement, FusionResult, normalise_name
 from .profile import Profile
 
 
@@ -108,6 +108,44 @@ class ProfileCoverage:
 
 
 @dataclass
+class ReferenceComparison:
+    """Tycho 1.0+ wrap-up #3: precision / recall / F1 of the fused
+    output against a curated reference dictionary.
+
+    The reference is supplied as a fused-shape JSON file (same shape
+    as the fuse output, but with only the canonical truth — typically
+    a domain expert's hand-curated data dictionary). Matching key:
+    profile-mode ``id`` if both sides have one, else
+    ``normalise_name(element_name)``.
+
+    Empty inputs produce all-zero metrics (no division by zero).
+    """
+    reference_path: str = ""
+
+    # Element-level
+    reference_element_total: int = 0
+    fused_element_total: int = 0
+    elements_true_positive: int = 0
+    elements_false_positive: int = 0
+    elements_false_negative: int = 0
+    elements_precision: float = 0.0
+    elements_recall: float = 0.0
+    elements_f1: float = 0.0
+    missing_elements: list[str] = field(default_factory=list)
+    extra_elements: list[str] = field(default_factory=list)
+
+    # Relationship-level (same idea for triples)
+    reference_relationship_total: int = 0
+    fused_relationship_total: int = 0
+    relationships_true_positive: int = 0
+    relationships_false_positive: int = 0
+    relationships_false_negative: int = 0
+    relationships_precision: float = 0.0
+    relationships_recall: float = 0.0
+    relationships_f1: float = 0.0
+
+
+@dataclass
 class BenchmarkReport:
     """The full Phase 7 pipeline-health snapshot."""
     timestamp: str = ""
@@ -122,11 +160,13 @@ class BenchmarkReport:
         default_factory=CorroborationStats,
     )
     profile_coverage: Optional[ProfileCoverage] = None
+    reference_comparison: Optional[ReferenceComparison] = None
 
     def to_dict(self) -> dict[str, Any]:
-        """JSON-friendly nested dict. ``None`` profile_coverage is
-        preserved so consumers can tell "no profile supplied" apart
-        from "profile supplied with zero coverage"."""
+        """JSON-friendly nested dict. ``None`` profile_coverage and
+        reference_comparison are preserved so consumers can tell
+        "no profile / reference supplied" apart from "supplied with
+        zero coverage"."""
         return asdict(self)
 
 
@@ -136,13 +176,23 @@ class BenchmarkReport:
 def compute_benchmark(
     fusion_result: FusionResult,
     profile: Optional[Profile] = None,
+    reference: Optional[FusionResult] = None,
+    reference_path: str = "",
 ) -> BenchmarkReport:
     """Compute a benchmark snapshot from a fused result.
 
     The fused result is read-only — this function never mutates it.
-    Profile is optional; when supplied, ``profile_coverage`` is filled
-    with which declared entity_types and predicates actually got
+
+    ``profile`` (optional): when supplied, ``profile_coverage`` is
+    filled with which declared entity_types and predicates got
     populated. Without a profile, that section is ``None``.
+
+    ``reference`` (optional, Tycho 1.0+): a fused-shape ``FusionResult``
+    representing the curated truth. When supplied, ``reference_comparison``
+    holds element- and relationship-level precision / recall / F1.
+    Without a reference, that section is ``None`` and AC1 byte-identity
+    of the report JSON is preserved (the key is omitted via the
+    Optional default).
     """
     report = BenchmarkReport(
         timestamp=datetime.utcnow().isoformat(),
@@ -158,6 +208,10 @@ def compute_benchmark(
     if profile is not None:
         report.profile_coverage = _compute_profile_coverage(
             fusion_result, profile,
+        )
+    if reference is not None:
+        report.reference_comparison = _compute_reference_comparison(
+            fusion_result, reference, reference_path,
         )
     return report
 
@@ -343,6 +397,105 @@ def _has_used_subtype(
     return False
 
 
+# ─── Reference comparison (wrap-up #3) ──────────────────────────────────────
+
+
+def _element_match_key(el: FusedElement) -> str:
+    """Matching key for an element across fused output and reference.
+
+    Profile mode: match by deterministic id when the element carries
+    one (the cross-source ID alignment contract from Phases 1–5).
+    Unconstrained: fall back to ``normalise_name(element_name)``.
+    """
+    eid = el.extra_fields.get("id", "") if el.extra_fields else ""
+    if eid:
+        return f"id:{eid}"
+    return f"name:{normalise_name(el.element_name)}"
+
+
+def _f1(precision: float, recall: float) -> float:
+    """F1 with safe division: returns 0.0 when both P and R are 0."""
+    if precision + recall == 0.0:
+        return 0.0
+    return 2.0 * precision * recall / (precision + recall)
+
+
+def _compute_reference_comparison(
+    fusion_result: FusionResult,
+    reference: FusionResult,
+    reference_path: str,
+) -> ReferenceComparison:
+    """Compare a fused output against a curated reference dictionary
+    and emit element- and relationship-level precision/recall/F1.
+
+    Both inputs are FusionResult-shaped — the reference is loaded
+    via the same ``_reconstruct_fusion_result`` path the rest of the
+    pipeline uses. Read-only on both inputs (no mutation).
+    """
+    # ── Elements ──
+    fused_keys = {
+        _element_match_key(el): el.element_name
+        for el in fusion_result.elements
+    }
+    ref_keys = {
+        _element_match_key(el): el.element_name
+        for el in reference.elements
+    }
+    tp = len(fused_keys.keys() & ref_keys.keys())
+    fp = len(fused_keys.keys() - ref_keys.keys())
+    fn = len(ref_keys.keys() - fused_keys.keys())
+
+    p = (tp / (tp + fp)) if (tp + fp) > 0 else 0.0
+    r = (tp / (tp + fn)) if (tp + fn) > 0 else 0.0
+
+    cmp = ReferenceComparison(
+        reference_path=reference_path,
+        reference_element_total=len(reference.elements),
+        fused_element_total=len(fusion_result.elements),
+        elements_true_positive=tp,
+        elements_false_positive=fp,
+        elements_false_negative=fn,
+        elements_precision=round(p, 3),
+        elements_recall=round(r, 3),
+        elements_f1=round(_f1(p, r), 3),
+        # Sorted lists give deterministic JSON output for run-vs-run
+        # diffability — same ranking across runs.
+        missing_elements=sorted(
+            ref_keys[k] for k in (ref_keys.keys() - fused_keys.keys())
+        ),
+        extra_elements=sorted(
+            fused_keys[k] for k in (fused_keys.keys() - ref_keys.keys())
+        ),
+    )
+
+    # ── Relationships (subject, predicate, object) triples ──
+    def _rel_key(rel) -> tuple[str, str, str]:
+        return (
+            normalise_name(rel.subject),
+            rel.predicate.lower(),
+            normalise_name(rel.object),
+        )
+
+    fused_rels = {_rel_key(rel) for rel in fusion_result.relationships}
+    ref_rels = {_rel_key(rel) for rel in reference.relationships}
+    rtp = len(fused_rels & ref_rels)
+    rfp = len(fused_rels - ref_rels)
+    rfn = len(ref_rels - fused_rels)
+    rp = (rtp / (rtp + rfp)) if (rtp + rfp) > 0 else 0.0
+    rr = (rtp / (rtp + rfn)) if (rtp + rfn) > 0 else 0.0
+
+    cmp.reference_relationship_total = len(reference.relationships)
+    cmp.fused_relationship_total = len(fusion_result.relationships)
+    cmp.relationships_true_positive = rtp
+    cmp.relationships_false_positive = rfp
+    cmp.relationships_false_negative = rfn
+    cmp.relationships_precision = round(rp, 3)
+    cmp.relationships_recall = round(rr, 3)
+    cmp.relationships_f1 = round(_f1(rp, rr), 3)
+
+    return cmp
+
+
 # ─── Markdown rendering ─────────────────────────────────────────────────────
 
 
@@ -472,6 +625,50 @@ def render_markdown(report: BenchmarkReport) -> str:
         if pc.predicates_unused:
             lines.append(
                 f"  - Unused: {', '.join(pc.predicates_unused)}"
+            )
+        lines.append("")
+
+    # ── Reference comparison (optional, wrap-up #3) ──
+    if report.reference_comparison is not None:
+        rc = report.reference_comparison
+        lines.append("## Reference comparison")
+        lines.append("")
+        if rc.reference_path:
+            lines.append(f"**Reference:** `{rc.reference_path}`")
+            lines.append("")
+        lines.append("| | Precision | Recall | F1 | TP | FP | FN |")
+        lines.append("|---|---:|---:|---:|---:|---:|---:|")
+        lines.append(
+            f"| Elements ({rc.fused_element_total} fused vs "
+            f"{rc.reference_element_total} ref) | "
+            f"{rc.elements_precision} | {rc.elements_recall} | "
+            f"**{rc.elements_f1}** | {rc.elements_true_positive} | "
+            f"{rc.elements_false_positive} | "
+            f"{rc.elements_false_negative} |"
+        )
+        lines.append(
+            f"| Relationships ({rc.fused_relationship_total} fused vs "
+            f"{rc.reference_relationship_total} ref) | "
+            f"{rc.relationships_precision} | "
+            f"{rc.relationships_recall} | "
+            f"**{rc.relationships_f1}** | "
+            f"{rc.relationships_true_positive} | "
+            f"{rc.relationships_false_positive} | "
+            f"{rc.relationships_false_negative} |"
+        )
+        if rc.missing_elements:
+            lines.append("")
+            lines.append(
+                f"**Missing from fused output ({len(rc.missing_elements)}):** "
+                f"{', '.join(rc.missing_elements[:20])}"
+                + (" …" if len(rc.missing_elements) > 20 else "")
+            )
+        if rc.extra_elements:
+            lines.append("")
+            lines.append(
+                f"**Extra in fused output ({len(rc.extra_elements)}):** "
+                f"{', '.join(rc.extra_elements[:20])}"
+                + (" …" if len(rc.extra_elements) > 20 else "")
             )
         lines.append("")
 
