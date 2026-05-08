@@ -18,3 +18,9 @@ venv/
 *.owl.bak
 *.rdf.bak
 .mypy_cache/
+
+# Third-party reference material kept locally for reading but not
+# redistributed via git (potential license / copyright concerns).
+docs/guidance_on_npl.en.md
+docs/guidance_on_npl.en.pdf
+docs/technical-report-kaprthy+.md

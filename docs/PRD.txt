@@ -1,0 +1,167 @@
+Ontozense Product Requirements Document (PRD)
+Title: Constrained Extraction + Validation + Consolidation Upgrade
+Audience: AI coding agent maintaining Ontozense
+Repository: C:\Users\hzmarrou\python\testing\ontozense
+Reference inspiration: https://github.com/Inspiring-Ming/OntoMetric
+Local reference checkout: C:\Users\hzmarrou\OneDrive\python\learning\OntoMetric
+
+1) Problem Statement
+Current Ontozense extraction is strong for broad recall, but ESG testing showed:
+- Free-form outputs can drift in type/predicate consistency.
+- Validation relies mostly on lint graph hygiene (orphans, undefined-used, gaps), not ontology/schema conformance.
+- Multi-document runs currently do simple concatenation (no true entity consolidation).
+- IDs and relation labels are not deterministic/canonical enough for stable comparisons across runs.
+- Provenance depth is uneven for entities/relationships.
+- We lack quality/cost benchmark metrics for constrained runs.
+
+Goal: Add an optional ontology-constrained workflow that improves output consistency and comparability without breaking current unconstrained behavior.
+
+2) Scope and Priority
+Highest impact first (must be implemented first):
+P1. Optional ontology-constrained mode (profile-driven, e.g., ESG).
+P2. Real multi-document consolidation (dedupe + alias normalization + relation merging).
+
+Next priority:
+P3. Validation stage before lint (semantic type checks + schema rules).
+P4. Deterministic IDs + canonical relation verbs.
+P5. Strong provenance granularity (segment/page anchors for all entities/relations).
+P6. Benchmark metrics for quality and efficiency.
+
+3) Product Principles
+- Backward compatible by default: existing unconstrained flow remains default.
+- Constraints are profile-driven and optional per run.
+- Prefer deterministic behavior when profile mode is enabled.
+- Preserve provenance and auditability at every stage.
+- Fail loudly on critical validation failures; do not silently "succeed" with invalid constrained output.
+
+4) Functional Requirements
+
+FR-1 Optional ontology-constrained mode
+- Add CLI option:
+  --profile <name>   (example: --profile esg)
+  Optional alias: --ontology-profile <name>
+- Default behavior with no profile remains current unconstrained mode.
+- In profile mode, extraction must be constrained by:
+  a) Allowed entity types
+  b) Allowed predicates (relation verbs)
+  c) Required fields per entity type
+  d) Cardinality/connection rules
+  e) Canonical relation verb mapping
+- Out-of-scope profile values should be rejected or normalized per profile config.
+
+FR-2 Profile system
+- Add profile config loading from repo-managed files (suggested path):
+  src/ontozense/profiles/<profile_name>/
+- Expected profile artifacts:
+  - schema.json (types, predicates, required fields, cardinality)
+  - prompt.txt or prompt fragments for constrained extraction
+  - alias_map.json (synonyms/normalization)
+  - validation_rules.json (profile-specific checks)
+  - relation_canonicalization.json (verb normalization)
+
+FR-3 Validation stage before lint
+- Add explicit validate stage in pipeline before lint.
+- Validate should run in constrained mode automatically (and optionally in unconstrained mode when requested).
+- Validation must include:
+  a) Semantic type checks (entity label/content plausibly matches declared type)
+  b) Schema rules (allowed types, required fields, allowed predicates, cardinality)
+  c) Entity/relationship filtering or fail-fast strategy configurable by profile.
+- Lint remains, but runs on post-validation output.
+
+FR-4 Real multi-doc consolidation
+- Replace concat placeholder for multi-doc merge.
+- Consolidation must include:
+  a) Entity normalization and alias resolution
+  b) Deterministic dedupe of entities across documents
+  c) Relationship dedupe and remapping to merged entity IDs
+  d) Conflict handling strategy for competing field values (reuse current priority/confidence/recency rules)
+  e) Provenance union (all source spans retained)
+- Output should report consolidation stats (merged entities, duplicates removed, relations deduped).
+
+FR-5 Deterministic IDs and canonical relation verbs
+- In profile mode, generate stable deterministic IDs (same input -> same IDs across runs).
+- Suggested strategy: type + normalized label (+ stable hash when needed).
+- Canonicalize relation verbs to profile-approved set.
+- Keep original extracted relation verb in provenance/extra metadata when canonicalized.
+
+FR-6 Provenance granularity
+- Ensure each entity and relation has consistent provenance anchors:
+  - source document
+  - segment ID
+  - page range/page number (when available)
+  - optional char offsets/snippet
+- For merged entities/relations, keep list of provenance entries (not just last writer).
+
+FR-7 Benchmark metrics
+- Add metrics outputs (JSON + console summary + log):
+  - semantic_accuracy_proxy
+  - schema_compliance
+  - relationship_retention_after_validation
+  - entity_retention_after_validation
+  - cost_per_validated_entity (if token/cost tracking available)
+  - validation_failures_by_rule
+- Metrics should be produced per document and aggregate for multi-doc runs.
+
+5) CLI/UX Requirements
+- Keep current commands usable as-is.
+- Add constrained path examples:
+  ontozense extract-a <docs...> --profile esg --json ...
+  ontozense validate <fused_or_extracted_json> --profile esg ...
+  ontozense lint <validated_json> --domain-dir ...
+- Clear output should state mode:
+  Mode: unconstrained OR Mode: constrained(profile=esg)
+- If profile is missing/invalid, fail with actionable error.
+
+6) Data/Output Requirements
+- Maintain existing output compatibility where possible.
+- Add metadata block fields:
+  profile_name
+  extraction_mode
+  validation_summary
+  consolidation_summary
+  metrics_summary
+- Preserve existing fields; only extend schema (no destructive rename unless migration provided).
+
+7) Non-Goals (for this iteration)
+- Do not hardcode ESG logic into core generic flow.
+- Do not remove current unconstrained extraction path.
+- Do not require Source B/C/D to use constrained mode for Source A improvements.
+
+8) Acceptance Criteria
+- AC1: Running without --profile behaves exactly like current baseline (backward compatibility).
+- AC2: Running with --profile esg enforces allowed types/predicates and required fields.
+- AC3: Multi-doc run no longer uses concat placeholder; merged counts reflect dedupe/consolidation.
+- AC4: Validation executes before lint in constrained flow and outputs rule-level results.
+- AC5: Deterministic IDs are stable across repeated runs with unchanged inputs.
+- AC6: Provenance exists on every entity/relation with segment/page-level anchors where available.
+- AC7: Benchmark metrics are emitted and persisted.
+
+9) Implementation Notes from OntoMetric (borrow ideas, adapt generically)
+- Prompt-level constraints:
+  Prompts\ontology_guided_extraction_prompt.txt
+  (allowed entity types, predicates, cardinality, required fields, deterministic ID patterns)
+- Validation patterns:
+  src\stage3_validation.py
+  (rule-based schema checks + semantic type gate + post-validation filtering)
+- Workflow documentation:
+  src\stage2_ontology_guided_extraction_README.txt
+  src\stage3_validation_README.txt
+
+Important: do not copy ESG-only assumptions directly into core Ontozense logic. Implement profile-driven generic infrastructure, then ship ESG as first profile.
+
+10) Suggested Delivery Order
+1. Profile system + constrained extraction mode switch.
+2. Multi-doc consolidation engine replacement.
+3. Validation stage integration before lint.
+4. Deterministic IDs + relation canonicalization.
+5. Provenance upgrades.
+6. Metrics and reporting.
+
+11) Definition of Done
+- All acceptance criteria pass.
+- Existing tests pass; new tests added for constrained mode and consolidation.
+- Documentation updated with:
+  - how to run constrained mode
+  - how to create new domain profiles
+  - validation/metrics interpretation
+- ESG profile included as reference implementation.
