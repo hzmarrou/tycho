@@ -296,6 +296,45 @@ class TestLoaderContractValidation:
         result = load_source_c_json(f)
         assert result.models == []
 
+    def test_models_item_must_be_object(self, tmp_path):
+        """Regression for round-2 review: ``models=[123]`` previously
+        crashed with AttributeError during reconstruction. Now it
+        surfaces as a clean SourceCContractError naming the bad item."""
+        from ontozense.core.source_c import SourceCContractError
+        f = self._write_json(tmp_path, {
+            "schema_version": "1.0",
+            "models": [123],
+        })
+        with pytest.raises(SourceCContractError, match=r"models\[0\] must be an object"):
+            load_source_c_json(f)
+
+    def test_field_item_must_be_object(self, tmp_path):
+        from ontozense.core.source_c import SourceCContractError
+        f = self._write_json(tmp_path, {
+            "schema_version": "1.0",
+            "models": [{"name": "X", "fields": [None]}],
+        })
+        with pytest.raises(SourceCContractError, match=r"models\[0\].fields\[0\] must be an object"):
+            load_source_c_json(f)
+
+    def test_relationship_item_must_be_object(self, tmp_path):
+        from ontozense.core.source_c import SourceCContractError
+        f = self._write_json(tmp_path, {
+            "schema_version": "1.0",
+            "models": [{"name": "X", "relationships": ["bad"]}],
+        })
+        with pytest.raises(SourceCContractError, match=r"relationships\[0\] must be an object"):
+            load_source_c_json(f)
+
+    def test_field_list_must_be_list(self, tmp_path):
+        from ontozense.core.source_c import SourceCContractError
+        f = self._write_json(tmp_path, {
+            "schema_version": "1.0",
+            "models": [{"name": "X", "fields": "not a list"}],
+        })
+        with pytest.raises(SourceCContractError, match="fields must be a list"):
+            load_source_c_json(f)
+
 
 # ─── 5. CLI integration: --source-c (review findings #2 + #4) ─────────────
 
@@ -380,7 +419,19 @@ class TestCliSourceC:
 class TestEndToEndAdapterToFuse:
     """Pin the migration path the reviewer flagged: an adapter writes
     a SchemaResult JSON, fuse consumes it. Without this test the
-    contract isn't actually exercised by CI — only its halves."""
+    contract isn't actually exercised by CI — only its halves.
+
+    Two tests at different rigor levels:
+
+      * ``test_synthetic_schemaresult_dump_then_fuse_consumes`` — a
+        fast core-helper-to-core-consumer round trip; doesn't actually
+        exercise the adapter boundary but pins the contract shape.
+      * ``test_django_adapter_subprocess_to_fuse`` — the true
+        adapter-CLI-to-fuse smoke test the post-Phase-7 review asked
+        for. Spawns the bundled Django adapter as a subprocess,
+        consumes its output via fuse. Slower but proves the migration
+        path actually works end-to-end.
+    """
 
     def test_synthetic_schemaresult_dump_then_fuse_consumes(self, tmp_path):
         """Use the dataclass dump helper to produce a SchemaResult
@@ -451,6 +502,101 @@ class TestEndToEndAdapterToFuse:
         assert "name" in names
         the_el = next(el for el in data["elements"] if el["element_name"] == "name")
         assert the_el["data_type"] == "string"
+
+    def test_django_adapter_subprocess_to_fuse(self, tmp_path):
+        """True end-to-end: spawn the bundled Django adapter as a
+        subprocess to produce a real SchemaResult JSON, then run
+        fuse --source-c on it. Slower than the synthetic test but
+        proves the migration path actually works for users who copy
+        the adapter command from the README.
+
+        Per post-Phase-7 review: the synthetic test alone is a core-
+        helper-to-core-consumer path, not adapter-CLI-to-fuse.
+        """
+        import os
+        import subprocess
+        import sys
+        from typer.testing import CliRunner
+        from ontozense import cli
+        import json as _json
+
+        # Create a tiny Django app with one model
+        app_dir = tmp_path / "myapp"
+        app_dir.mkdir()
+        (app_dir / "__init__.py").write_text("", encoding="utf-8")
+        (app_dir / "models.py").write_text(
+            "from django.db import models\n"
+            "class Customer(models.Model):\n"
+            "    name = models.CharField(max_length=200)\n"
+            "    email = models.EmailField()\n",
+            encoding="utf-8",
+        )
+
+        repo_root = Path(__file__).parent.parent
+        adapter_dir = repo_root / "adapters" / "django"
+        sc_path = tmp_path / "source-c.json"
+
+        # Run the adapter CLI exactly as a user would per the README
+        cmd = [
+            sys.executable,
+            str(adapter_dir / "django_to_json.py"),
+            str(app_dir),
+            "--output", str(sc_path),
+        ]
+        # Inherit env vars and overlay PYTHONPATH so the adapter's
+        # ``from ontozense.core.source_c import …`` works without
+        # needing the package installed in the test env.
+        full_env = dict(os.environ)
+        full_env["PYTHONPATH"] = (
+            str(repo_root / "src") + os.pathsep + str(adapter_dir)
+        )
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, env=full_env, timeout=30,
+        )
+        assert proc.returncode == 0, (
+            f"Adapter CLI failed.\nstdout: {proc.stdout}\n"
+            f"stderr: {proc.stderr}"
+        )
+        assert sc_path.exists(), "Adapter didn't produce the JSON file"
+
+        # The output JSON must be a valid SchemaResult
+        loaded = load_source_c_json(sc_path)
+        assert any(m.name == "Customer" for m in loaded.models)
+
+        # Now feed it to fuse + a tiny Source A so fuse has anything
+        # to fuse against
+        sa = tmp_path / "source-a.json"
+        sa.write_text(_json.dumps({
+            "domain_name": "t",
+            "concepts": [{
+                "name": "name",
+                "definition": "the customer's full legal name",
+                "citation": "",
+                "id": "",
+                "entity_type": "",
+                "confidence": [{"field_name": "name", "score": 0.9, "reason": "v"}],
+                "provenance": {"source_document": "doc.md"},
+            }],
+            "relationships": [],
+            "source_documents": ["doc.md"],
+            "extraction_timestamp": "2026-05-08T00:00:00",
+        }), encoding="utf-8")
+
+        out = tmp_path / "fused.json"
+        runner = CliRunner()
+        r = runner.invoke(cli.app, [
+            "fuse",
+            "--source-a", str(sa),
+            "--source-c", str(sc_path),
+            "--output", str(out),
+        ])
+        assert r.exit_code == 0, r.output
+        data = _json.loads(out.read_text(encoding="utf-8"))
+        # The Source A 'name' concept and the Source C 'name' field
+        # should consolidate. The fused element should carry C's
+        # data_type.
+        names = {el["element_name"] for el in data["elements"]}
+        assert "name" in names
 
 
 # ─── 7. Compatibility shim for old DjangoSchemaParser import path ─────────

@@ -298,6 +298,11 @@ def _parse_with_positions(text: str) -> list[tuple[int, dict]]:
     Single-object inputs (the common case for one-entry governance
     files) return a length-1 list with offset=0 (after leading
     whitespace).
+
+    JSON-strictness: empty input, trailing garbage, and trailing
+    commas in arrays are all rejected. The post-Phase-7 review
+    flagged that an over-permissive parser was silently accepting
+    malformed governance files.
     """
     decoder = json.JSONDecoder()
 
@@ -307,11 +312,13 @@ def _parse_with_positions(text: str) -> list[tuple[int, dict]]:
         i += 1
 
     if i >= len(text):
-        return []
+        raise ValueError("Empty JSON file")
 
-    # Single object → wrap as length-1 list
+    # Single object → wrap as length-1 list, then verify nothing
+    # significant follows (trailing garbage check).
     if text[i] == "{":
-        entry, _ = decoder.raw_decode(text, i)
+        entry, end = decoder.raw_decode(text, i)
+        _require_only_whitespace_after(text, end)
         return [(i, entry)]
 
     # Array
@@ -323,17 +330,65 @@ def _parse_with_positions(text: str) -> list[tuple[int, dict]]:
 
     i += 1  # skip the opening '['
     results: list[tuple[int, dict]] = []
-    while i < len(text):
-        # Skip whitespace and inter-element commas
-        while i < len(text) and (text[i].isspace() or text[i] == ","):
-            i += 1
-        if i >= len(text) or text[i] == "]":
-            break
-        # raw_decode returns (parsed_value, end_index_in_text)
+
+    # Skip whitespace inside the array
+    while i < len(text) and text[i].isspace():
+        i += 1
+    # Empty array short-circuit
+    if i < len(text) and text[i] == "]":
+        _require_only_whitespace_after(text, i + 1)
+        return results
+
+    # Element / comma loop. Each iteration parses exactly one
+    # element, then expects either ``]`` (end) or ``,`` (next
+    # element). Trailing comma — i.e. ``,]`` — is rejected.
+    while True:
+        if i >= len(text):
+            raise ValueError("Unterminated JSON array (no closing ']').")
         entry, end = decoder.raw_decode(text, i)
         results.append((i, entry))
         i = end
+
+        # Skip whitespace after element
+        while i < len(text) and text[i].isspace():
+            i += 1
+        if i >= len(text):
+            raise ValueError("Unterminated JSON array (no closing ']').")
+
+        if text[i] == "]":
+            i += 1
+            break
+        if text[i] != ",":
+            raise ValueError(
+                f"Expected ',' or ']' in JSON array at offset {i}, "
+                f"got {text[i]!r}."
+            )
+        i += 1  # consume comma
+
+        # Skip whitespace; reject trailing comma
+        while i < len(text) and text[i].isspace():
+            i += 1
+        if i >= len(text) or text[i] == "]":
+            raise ValueError(
+                f"Trailing comma in JSON array at offset {i}."
+            )
+
+    _require_only_whitespace_after(text, i)
     return results
+
+
+def _require_only_whitespace_after(text: str, offset: int) -> None:
+    """After consuming the top-level JSON value at ``offset``,
+    everything that follows must be whitespace. Any non-whitespace
+    character is trailing garbage and means the file is malformed."""
+    j = offset
+    while j < len(text):
+        if not text[j].isspace():
+            raise ValueError(
+                f"Unexpected trailing content at offset {j}: "
+                f"{text[j:j+20]!r}"
+            )
+        j += 1
 
 
 def _compute_line_starts(text: str) -> list[int]:

@@ -285,7 +285,44 @@ def load_source_c_json(path: Path) -> SchemaResult:
             f"{type(raw['models']).__name__}."
         )
 
-    return SchemaResult.from_json_dict(raw)
+    # Nested validation. The reconstruction in from_json_dict() does
+    # ``.get(...)`` on each model / field / relationship; if any of
+    # those is the wrong type (e.g. ``models=[123]`` or
+    # ``fields=[null]``) it would crash with a raw AttributeError —
+    # which the CLI then prints as a traceback. Validate the shape
+    # here so failures are user-facing.
+    for i, m in enumerate(raw["models"]):
+        if not isinstance(m, dict):
+            raise SourceCContractError(
+                f"Source C models[{i}] must be an object, got "
+                f"{type(m).__name__}."
+            )
+        for key, sub_kind in (("fields", "field"), ("relationships", "relationship")):
+            sub = m.get(key)
+            if sub is None:
+                continue
+            if not isinstance(sub, list):
+                raise SourceCContractError(
+                    f"Source C models[{i}].{key} must be a list, "
+                    f"got {type(sub).__name__}."
+                )
+            for j, item in enumerate(sub):
+                if not isinstance(item, dict):
+                    raise SourceCContractError(
+                        f"Source C models[{i}].{key}[{j}] must be an "
+                        f"object, got {type(item).__name__}."
+                    )
+
+    try:
+        return SchemaResult.from_json_dict(raw)
+    except (AttributeError, TypeError) as e:
+        # Belt-and-braces: any remaining shape error during
+        # reconstruction surfaces as a clean contract error rather
+        # than a raw traceback.
+        raise SourceCContractError(
+            f"Source C JSON has unexpected shape during reconstruction: "
+            f"{type(e).__name__}: {e}"
+        ) from e
 
 
 # ─── Profile application ─────────────────────────────────────────────────────

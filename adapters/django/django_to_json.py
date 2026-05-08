@@ -68,9 +68,10 @@ def main() -> int:
     out_path = Path(args.output)
     dump_source_c_json(result, out_path)
 
+    # ASCII-only: Windows cp1252 default codec can't encode "→".
     print(
         f"[ok] {len(result.models)} models from {args.models_dir} "
-        f"→ {out_path}"
+        f"-> {out_path}"
     )
     return 0
 

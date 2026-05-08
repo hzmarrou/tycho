@@ -265,3 +265,66 @@ class TestSourceBAnchors:
         rec = GovernanceRecord(element_name="X")
         assert rec.source_anchor is None
 
+
+# ─── Source B parser strict-mode (round 2 review) ────────────────────────────
+
+
+class TestSourceBParserStrictness:
+    """Pin that the position-tracking JSON parser rejects malformed
+    inputs that JSON-strictness disallows. Pre-fix, the parser
+    silently accepted trailing commas, trailing garbage, and empty
+    files — silently ingesting governance files that any other JSON
+    consumer would reject."""
+
+    def test_empty_file_rejected(self, extractor, tmp_path):
+        f = tmp_path / "empty.json"
+        f.write_text("", encoding="utf-8")
+        result = extractor.extract_from_file(f)
+        # The current shape: malformed input produces a result with
+        # warnings rather than raising. That shape is preserved here;
+        # the crucial guarantee is that the empty file does NOT
+        # silently produce 0 records with no warnings.
+        assert result.warnings, "Empty file must surface a warning"
+        assert any("empty" in w.lower() or "invalid" in w.lower()
+                   for w in result.warnings)
+
+    def test_trailing_comma_rejected(self, extractor, tmp_path):
+        f = tmp_path / "trailing_comma.json"
+        f.write_text('[{"element_name":"A"},]', encoding="utf-8")
+        result = extractor.extract_from_file(f)
+        assert result.warnings
+        assert any("trailing comma" in w.lower() for w in result.warnings)
+        # And the bad record is not silently extracted
+        assert result.records == []
+
+    def test_trailing_garbage_after_array_rejected(self, extractor, tmp_path):
+        f = tmp_path / "garbage.json"
+        f.write_text('[{"element_name":"A"}] junk', encoding="utf-8")
+        result = extractor.extract_from_file(f)
+        assert result.warnings
+        assert result.records == []
+
+    def test_trailing_garbage_after_single_object_rejected(self, extractor, tmp_path):
+        f = tmp_path / "garbage_obj.json"
+        f.write_text('{"element_name":"A"} junk', encoding="utf-8")
+        result = extractor.extract_from_file(f)
+        assert result.warnings
+        assert result.records == []
+
+    def test_missing_closing_bracket_rejected(self, extractor, tmp_path):
+        f = tmp_path / "unterminated.json"
+        f.write_text('[{"element_name":"A"}', encoding="utf-8")
+        result = extractor.extract_from_file(f)
+        assert result.warnings
+        assert result.records == []
+
+    def test_valid_array_with_mixed_whitespace_still_parses(self, extractor, tmp_path):
+        """Strict mode shouldn't accidentally reject pretty-printed
+        JSON with multiple newlines / indentation between entries."""
+        f = tmp_path / "ok.json"
+        f.write_text('[\n  {"element_name":"A"},\n  \n  {"element_name":"B"}\n]',
+                     encoding="utf-8")
+        result = extractor.extract_from_file(f)
+        assert len(result.records) == 2
+        assert not result.warnings
+
