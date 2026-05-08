@@ -35,8 +35,23 @@ from typing import Any
 
 
 # JSON schema version for the Source C contract. Bumped when the
-# serialised shape changes in a non-backward-compatible way.
+# serialised shape changes in a non-backward-compatible way. The
+# major component (the part before the dot) defines compatibility:
+# Tycho can read any minor version under a major it knows about.
 SCHEMA_VERSION = "1.0"
+SUPPORTED_MAJOR_VERSIONS = {"1"}
+
+
+class SourceCContractError(ValueError):
+    """Raised when a Source C JSON file violates the contract.
+
+    Distinct from ``json.JSONDecodeError`` (the file isn't valid JSON
+    at all) and ``OSError`` (the file isn't readable). This means the
+    JSON parsed but its shape is wrong: unsupported ``schema_version``,
+    missing required keys, wrong type for ``models``, etc. The CLI
+    catches this separately so it can point at the adapter docs and
+    the version-compatibility rules.
+    """
 
 
 # ─── Typed contract ──────────────────────────────────────────────────────────
@@ -220,13 +235,56 @@ def load_source_c_json(path: Path) -> SchemaResult:
     """Read a Source C JSON file (output of any adapter) and
     reconstruct a typed ``SchemaResult``.
 
-    Raises ``OSError`` if the file is unreadable, ``json.JSONDecodeError``
-    if it's not valid JSON. Callers (CLI) wrap these in user-facing
-    error messages. Older JSON files without ``schema_version`` are
-    accepted with a default of ``"1.0"`` — the field is informational
-    until a future breaking change exists.
+    Raises:
+      - ``OSError`` if the file is unreadable.
+      - ``json.JSONDecodeError`` if it isn't valid JSON.
+      - ``SourceCContractError`` if it parsed but the shape is wrong
+        (unsupported ``schema_version``, missing/wrong-typed
+        ``models`` list, etc.). Callers — typically the CLI — catch
+        this and print a user-facing message pointing at adapter
+        docs.
+
+    Older JSON files without ``schema_version`` are tolerated by
+    assuming ``"1.0"`` (the initial release shape). Files declaring a
+    major version this Tycho doesn't know about are rejected loudly —
+    silently parsing as 0 models is exactly the bug Phase 7 review
+    flagged.
     """
     raw = json.loads(path.read_text(encoding="utf-8"))
+
+    if not isinstance(raw, dict):
+        raise SourceCContractError(
+            f"Source C JSON root must be an object, got "
+            f"{type(raw).__name__}."
+        )
+
+    declared_version = raw.get("schema_version", SCHEMA_VERSION)
+    if not isinstance(declared_version, str):
+        raise SourceCContractError(
+            f"schema_version must be a string, got "
+            f"{type(declared_version).__name__}."
+        )
+    declared_major = declared_version.split(".", 1)[0]
+    if declared_major not in SUPPORTED_MAJOR_VERSIONS:
+        raise SourceCContractError(
+            f"Unsupported Source C schema_version {declared_version!r}. "
+            f"This Tycho understands major version(s): "
+            f"{sorted(SUPPORTED_MAJOR_VERSIONS)}. The adapter that "
+            f"produced this JSON may need updating."
+        )
+
+    if "models" not in raw:
+        raise SourceCContractError(
+            "Source C JSON missing required key 'models'. The adapter "
+            "must emit at least an empty list — see "
+            "adapters/README.md for the contract."
+        )
+    if not isinstance(raw["models"], list):
+        raise SourceCContractError(
+            f"Source C 'models' must be a list, got "
+            f"{type(raw['models']).__name__}."
+        )
+
     return SchemaResult.from_json_dict(raw)
 
 

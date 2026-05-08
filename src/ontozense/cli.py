@@ -1669,7 +1669,31 @@ def fuse(
         # SchemaResult contract in ontozense.core.source_c. Adapters
         # that produce this JSON live outside the package (see
         # adapters/django/, adapters/postgres/, or write your own).
-        from .core.source_c import load_source_c_json
+        from .core.source_c import load_source_c_json, SourceCContractError
+        # If the user passes a directory (the pre-1.0 input shape)
+        # surface a migration hint inline so they don't have to dig
+        # through the README.
+        if source_c_dir.is_dir():
+            console.print(
+                f"[bold red][x] Source C is now a JSON file, "
+                f"not a directory:[/] {source_c_dir}"
+            )
+            console.print(
+                "  In Tycho 1.0 the CLI consumes a SchemaResult JSON "
+                "produced by an adapter. For a Django models directory:"
+            )
+            console.print(
+                f"    [cyan]python -m adapters.django.django_to_json "
+                f"{source_c_dir} --output source-c.json[/]"
+            )
+            console.print(
+                "  Then re-run with [cyan]--source-c source-c.json[/]."
+            )
+            console.print(
+                "  See adapters/README.md for other adapters / writing "
+                "your own."
+            )
+            raise typer.Exit(code=1)
         try:
             sc = load_source_c_json(source_c_dir)
         except OSError as e:
@@ -1693,6 +1717,16 @@ def fuse(
             console.print(
                 "  The file should be a SchemaResult JSON — see "
                 "[cyan]ontozense.core.source_c[/]."
+            )
+            raise typer.Exit(code=1)
+        except SourceCContractError as e:
+            console.print(
+                f"[bold red][x] Source C JSON contract error:[/] "
+                f"{source_c_dir}"
+            )
+            console.print(f"  [dim]{e}[/]")
+            console.print(
+                "  See adapters/README.md for the SchemaResult contract."
             )
             raise typer.Exit(code=1)
         console.print(
