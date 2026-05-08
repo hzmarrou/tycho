@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..extractors.django_schema import SchemaModel, SchemaResult
+from .source_c import SchemaModel, SchemaResult
 from ..extractors.ontogpt_extractor import ExtractionResult
 
 

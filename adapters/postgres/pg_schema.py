@@ -1,8 +1,12 @@
-"""PostgreSQL schema parser.
+"""PostgreSQL → Source C SchemaResult adapter.
 
-Connects to a live PostgreSQL database and extracts schema information
-(tables, columns, types, primary keys, foreign keys) using information_schema.
-No Django, no SQLAlchemy — just psycopg2 and SQL.
+Reads a live PostgreSQL database via ``information_schema`` and emits
+a typed ``SchemaResult`` conforming to Tycho's Source C contract
+(:mod:`ontozense.core.source_c`).
+
+Bundled with the Tycho repo as a worked example, NOT part of the
+installed ``ontozense`` Python package — see ``adapters/README.md``.
+Requires ``psycopg2``.
 """
 
 from __future__ import annotations
@@ -10,7 +14,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .django_schema import SchemaField, SchemaModel, SchemaRelationship, SchemaResult
+from ontozense.core.source_c import (
+    SchemaField,
+    SchemaModel,
+    SchemaRelationship,
+    SchemaResult,
+)
 
 # PostgreSQL data_type → Playground property type mapping
 PG_TYPE_MAP = {

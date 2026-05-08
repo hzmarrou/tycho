@@ -34,7 +34,7 @@ from ontozense.extractors.governance_extractor import (
     GovernanceExtractionResult,
     GovernanceRecord,
 )
-from ontozense.extractors.django_schema import (
+from ontozense.core.source_c import (
     SchemaField,
     SchemaModel,
     SchemaRelationship,

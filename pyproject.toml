@@ -44,7 +44,11 @@ packages = ["src/ontozense"]
 "src/ontozense/templates" = "ontozense/templates"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# Discover tests in both the core test suite (tests/) and any
+# adapter-bundled tests (adapters/<name>/tests/). Adapter test
+# packages import their own parser via a per-adapter conftest
+# that puts the adapter dir on sys.path.
+testpaths = ["tests", "adapters"]
 pythonpath = ["src"]
 
 [tool.ruff]

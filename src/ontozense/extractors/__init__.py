@@ -1,5 +1,9 @@
 from .ontogpt_extractor import OntoGPTExtractor
-from .django_schema import DjangoSchemaParser, SchemaResult
+# Source C dataclasses live in core.source_c — re-export here for
+# back-compat. The Django parser (DjangoSchemaParser) has moved out
+# of the package to ``adapters/django/``; users now feed a
+# ``SchemaResult`` JSON file via ``ontozense fuse --source-c``.
+from ..core.source_c import SchemaResult
 from .domain_doc_extractor import (
     DomainDocumentExtractor,
     DomainDocumentExtractionResult,
@@ -28,7 +32,6 @@ from .code_extractor import (
 
 __all__ = [
     "OntoGPTExtractor",
-    "DjangoSchemaParser",
     "SchemaResult",
     # Source A — domain document extractor
     "DomainDocumentExtractor",

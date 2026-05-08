@@ -46,7 +46,7 @@ from ..extractors.governance_extractor import (
     GovernanceExtractionResult,
     GovernanceRecord,
 )
-from ..extractors.django_schema import SchemaField, SchemaModel, SchemaResult
+from .source_c import SchemaField, SchemaModel, SchemaResult
 from ..extractors.code_extractor import CodeExtractionResult, CodeRule
 
 

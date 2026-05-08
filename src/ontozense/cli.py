@@ -1585,7 +1585,12 @@ def fuse(
     ),
     source_c_dir: Path = typer.Option(
         None, "--source-c", "-c",
-        help="Source C schema: path to a Django models directory.",
+        help=(
+            "Source C schema: path to a SchemaResult JSON file. "
+            "Produce it with an adapter — see adapters/django/ or "
+            "adapters/postgres/ for examples, or write your own "
+            "targeting ontozense.core.source_c."
+        ),
     ),
     source_d_dir: Path = typer.Option(
         None, "--source-d", "-d",
@@ -1660,11 +1665,39 @@ def fuse(
         )
 
     if source_c_dir:
-        from .extractors.django_schema import DjangoSchemaParser
-        sc = DjangoSchemaParser(source_c_dir).parse()
+        # Tycho 1.0+: Source C is a JSON file conforming to the
+        # SchemaResult contract in ontozense.core.source_c. Adapters
+        # that produce this JSON live outside the package (see
+        # adapters/django/, adapters/postgres/, or write your own).
+        from .core.source_c import load_source_c_json
+        try:
+            sc = load_source_c_json(source_c_dir)
+        except OSError as e:
+            console.print(
+                f"[bold red][x] Source C file error:[/] {source_c_dir}"
+            )
+            console.print(f"  [dim]{type(e).__name__}: {e}[/]")
+            console.print(
+                "  Source C is a JSON file. See adapters/django/README.md "
+                "for an example of producing one from Django models."
+            )
+            raise typer.Exit(code=1)
+        except json.JSONDecodeError as e:
+            console.print(
+                f"[bold red][x] Source C JSON parse error:[/] "
+                f"{source_c_dir}"
+            )
+            console.print(
+                f"  [dim]Line {e.lineno}, col {e.colno}: {e.msg}[/]"
+            )
+            console.print(
+                "  The file should be a SchemaResult JSON — see "
+                "[cyan]ontozense.core.source_c[/]."
+            )
+            raise typer.Exit(code=1)
         console.print(
             f"[bold blue]Source C:[/] {len(sc.models)} schema models "
-            f"from {source_c_dir}"
+            f"from {source_c_dir.name}"
         )
 
     if source_d_dir:

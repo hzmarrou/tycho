@@ -21,12 +21,16 @@ from ontozense.extractors.code_extractor import (
     CodeProvenance,
     CodeRule,
 )
-from ontozense.extractors.django_schema import (
-    DjangoSchemaParser,
+from ontozense.core.source_c import (
     SchemaField,
     SchemaModel,
     SchemaResult,
 )
+# DjangoSchemaParser tests live in adapters/django/tests/ — see
+# adapters/django/tests/test_django_source_c_profile.py for the
+# end-to-end profile-aware tests that used to be ``TestSourceCProfileAware``
+# in this file. Profile-application logic itself is tested via
+# ``ontozense.core.source_c.apply_profile_to_schema``.
 from ontozense.extractors.governance_extractor import (
     GovernanceExtractor,
     GovernanceRecord,
@@ -167,78 +171,11 @@ class TestSourceBProfileAware:
         assert r.id == ""
 
 
-# ─── Source C (Django schema) profile awareness ──────────────────────────────
-
-
-class TestSourceCProfileAware:
-    """DjangoSchemaParser accepts ``profile=`` and gives models + fields IDs."""
-
-    def _write_minimal_models_dir(self, tmp_path: Path, model_name: str) -> Path:
-        """Create a tiny Django-models-shaped directory we can parse."""
-        models_dir = tmp_path / "myapp"
-        models_dir.mkdir()
-        (models_dir / "__init__.py").write_text("", encoding="utf-8")
-        (models_dir / "models.py").write_text(
-            f"from django.db import models\n\n"
-            f"class {model_name}(models.Model):\n"
-            f"    name = models.CharField(max_length=100)\n"
-            f"    description = models.TextField(blank=True)\n",
-            encoding="utf-8",
-        )
-        return models_dir
-
-    def test_no_profile_models_have_empty_profile_fields(self, tmp_path):
-        """Backward compat: no profile = empty id/entity_type."""
-        models_dir = self._write_minimal_models_dir(tmp_path, "Concept")
-        result = DjangoSchemaParser(models_dir).parse()
-        assert len(result.models) >= 1
-        m = result.models[0]
-        assert m.id == ""
-        assert m.entity_type == ""
-        for f in m.fields:
-            assert f.id == ""
-            assert f.entity_type == ""
-
-    def test_profile_assigns_entity_type_when_model_name_matches(self, tmp_path):
-        """The minimal profile declares 'Concept' as an entity type. A
-        Django model named Concept should get entity_type='Concept'."""
-        models_dir = self._write_minimal_models_dir(tmp_path, "Concept")
-        profile = load_profile(MINIMAL_PROFILE_DIR)
-        result = DjangoSchemaParser(models_dir, profile=profile).parse()
-        m = next(m for m in result.models if m.name == "Concept")
-        assert m.entity_type == "Concept"
-        assert m.id, "Profile mode must produce a deterministic model ID"
-        assert m.id.startswith("concept_")
-
-    def test_profile_fields_inherit_parent_entity_type(self, tmp_path):
-        """Fields are properties of their parent model — they inherit
-        the parent's entity_type and get unique IDs."""
-        models_dir = self._write_minimal_models_dir(tmp_path, "Concept")
-        profile = load_profile(MINIMAL_PROFILE_DIR)
-        result = DjangoSchemaParser(models_dir, profile=profile).parse()
-        m = next(m for m in result.models if m.name == "Concept")
-        assert len(m.fields) >= 2
-        for f in m.fields:
-            assert f.entity_type == "Concept"
-            assert f.id, f"Field {f.name!r} must have a deterministic ID"
-            assert f.id != m.id, "Field ID must differ from model ID"
-
-        # Different fields have different IDs
-        ids = [f.id for f in m.fields]
-        assert len(set(ids)) == len(ids), "Field IDs must be unique"
-
-    def test_profile_unknown_model_name_leaves_entity_type_empty(self, tmp_path):
-        """A model whose name isn't a profile entity type still gets
-        an ID (so consolidation sees it) but entity_type stays empty
-        for Phase 4 to flag."""
-        models_dir = self._write_minimal_models_dir(tmp_path, "Mystery")
-        profile = load_profile(MINIMAL_PROFILE_DIR)
-        result = DjangoSchemaParser(models_dir, profile=profile).parse()
-        m = next(m for m in result.models if m.name == "Mystery")
-        assert m.entity_type == ""
-        # ID still computed using model name as the type prefix —
-        # gives Phase 5 something to consolidate against.
-        assert m.id, "Even unknown-type models should get a deterministic ID"
+# Source C (Django schema) profile-aware tests moved to
+# adapters/django/tests/test_django_source_c_profile.py when the
+# parser was extracted to adapters/. Core profile-application logic
+# is tested in tests/test_phase3_core_source_c_profile.py via
+# ``apply_profile_to_schema`` directly.
 
 
 # ─── Source D (code) profile awareness ──────────────────────────────────────

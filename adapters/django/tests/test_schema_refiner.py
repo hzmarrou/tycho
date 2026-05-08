@@ -11,7 +11,8 @@ OPENNPL_DIR = Path(r"C:\Users\hzmarrou\OneDrive\python\projects\openNPL\npl_port
 
 @pytest.fixture
 def schema():
-    from ontozense.extractors.django_schema import DjangoSchemaParser
+    # The Django adapter is on sys.path via the per-adapter conftest.
+    from django_schema import DjangoSchemaParser
     if not OPENNPL_DIR.exists():
         pytest.skip("OpenNPL not cloned")
     return DjangoSchemaParser(OPENNPL_DIR).parse()

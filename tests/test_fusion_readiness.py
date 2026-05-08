@@ -43,7 +43,7 @@ from ontozense.extractors.governance_extractor import (
     GovernanceExtractionResult,
     GovernanceRecord,
 )
-from ontozense.extractors.django_schema import (
+from ontozense.core.source_c import (
     SchemaField,
     SchemaModel,
     SchemaRelationship,
@@ -512,7 +512,7 @@ class TestCrossSourceContract:
         """
         from ontozense.extractors.domain_doc_extractor import Concept
         from ontozense.extractors.governance_extractor import GovernanceRecord
-        from ontozense.extractors.django_schema import SchemaModel
+        from ontozense.core.source_c import SchemaModel
         from ontozense.extractors.code_extractor import CodeRule
 
         types = {Concept, GovernanceRecord, SchemaModel, CodeRule}
@@ -525,7 +525,7 @@ class TestCrossSourceContract:
         from dataclasses import fields as dc_fields
         from ontozense.extractors.domain_doc_extractor import Concept
         from ontozense.extractors.governance_extractor import GovernanceRecord
-        from ontozense.extractors.django_schema import SchemaModel
+        from ontozense.core.source_c import SchemaModel
         from ontozense.extractors.code_extractor import CodeRule
 
         expectations = {
