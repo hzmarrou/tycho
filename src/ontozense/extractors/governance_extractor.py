@@ -37,7 +37,16 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+# FieldAnchor is imported inside extract_from_file() at use time to
+# avoid a circular import: ontozense.core.fusion already imports
+# domain_doc / governance / schema dataclasses at module load. The
+# annotation below stays a string at runtime via the
+# ``from __future__ import annotations`` future, so the type checker
+# still sees the right reference.
+if TYPE_CHECKING:
+    from ..core.fusion import FieldAnchor
 
 
 # The fields we recognise and map to typed GovernanceRecord attributes.
@@ -78,6 +87,12 @@ class GovernanceRecord:
     # Profile-mode fields (empty in unconstrained mode):
     id: str = ""
     entity_type: str = ""
+    # Source B anchor — line + char_offset of this record's opening
+    # ``{`` in the governance JSON file, plus a snippet of the
+    # serialised entry. Populated by ``extract_from_file()``; left
+    # ``None`` for records constructed directly in tests / programmatic
+    # callers.
+    source_anchor: Optional[FieldAnchor] = None
 
     def needs_review(self, threshold: float = 0.7) -> bool:
         return self.confidence < threshold
@@ -127,28 +142,34 @@ class GovernanceExtractor:
     def extract_from_file(
         self, file_path: str | Path
     ) -> GovernanceExtractionResult:
+        # Deferred import: avoid module-load-time cycle with core.fusion.
+        from ..core.fusion import FieldAnchor
+
         file_path = Path(file_path)
         if not file_path.exists():
             raise FileNotFoundError(f"Governance file not found: {file_path}")
 
+        text = file_path.read_text(encoding="utf-8")
+
         try:
-            raw = json.loads(file_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as e:
+            entries_with_pos = _parse_with_positions(text)
+        except (json.JSONDecodeError, ValueError) as e:
             return GovernanceExtractionResult(
                 source_file=str(file_path),
                 warnings=[f"Invalid JSON: {e}"],
                 extraction_timestamp=datetime.utcnow().isoformat(),
             )
 
-        # Accept single object or array
-        entries = raw if isinstance(raw, list) else [raw]
-
         result = GovernanceExtractionResult(
             source_file=str(file_path),
             extraction_timestamp=datetime.utcnow().isoformat(),
         )
 
-        for idx, entry in enumerate(entries):
+        # Pre-compute line-start offsets so we can convert character
+        # offsets to (line, column) cheaply for each record.
+        line_starts = _compute_line_starts(text)
+
+        for idx, (start_offset, entry) in enumerate(entries_with_pos):
             if not isinstance(entry, dict):
                 result.warnings.append(
                     f"Entry {idx}: expected an object, got {type(entry).__name__}"
@@ -178,6 +199,22 @@ class GovernanceExtractor:
             else:
                 is_critical = bool(is_critical_raw)
 
+            # Compute the anchor for this record from its position in
+            # the source text. (line, column) are 1-indexed; snippet
+            # captures up to ~120 chars from the entry's opening brace
+            # for human verification.
+            line, column = _offset_to_line_column(start_offset, line_starts)
+            snippet_end = min(start_offset + 120, len(text))
+            snippet = text[start_offset:snippet_end].replace("\n", " ").strip()
+            anchor = FieldAnchor(
+                line=line,
+                column=column,
+                char_offset=start_offset,
+                char_length=0,
+                snippet=snippet,
+                segment_id=file_path.name,
+            )
+
             record = GovernanceRecord(
                 element_name=str(element_name).strip(),
                 domain_name=str(entry.get("domain_name", "")).strip(),
@@ -187,6 +224,7 @@ class GovernanceExtractor:
                 extra_fields=extras,
                 source_file=str(file_path),
                 entity_type=str(entry.get("entity_type", "")).strip(),
+                source_anchor=anchor,
             )
 
             # Profile-aware post-processing: applied only when a profile
@@ -242,3 +280,87 @@ class GovernanceExtractor:
                 # Label normalises to empty (e.g. all-punctuation):
                 # leave id="" so validation catches it.
                 record.id = ""
+
+
+# ─── Position-tracking JSON parser (for Source B anchors) ───────────────────
+
+
+def _parse_with_positions(text: str) -> list[tuple[int, dict]]:
+    """Parse a JSON file containing one object or an array of objects,
+    returning ``[(start_offset, parsed_dict), ...]``.
+
+    Source B anchors need to know WHERE in the source file each entry
+    started so reviewers can jump from a fused field back to the
+    governance JSON line. ``json.loads`` discards positional info, so
+    we walk the top-level structure manually using
+    ``json.JSONDecoder.raw_decode`` to parse one entry at a time.
+
+    Single-object inputs (the common case for one-entry governance
+    files) return a length-1 list with offset=0 (after leading
+    whitespace).
+    """
+    decoder = json.JSONDecoder()
+
+    # Skip leading whitespace
+    i = 0
+    while i < len(text) and text[i].isspace():
+        i += 1
+
+    if i >= len(text):
+        return []
+
+    # Single object → wrap as length-1 list
+    if text[i] == "{":
+        entry, _ = decoder.raw_decode(text, i)
+        return [(i, entry)]
+
+    # Array
+    if text[i] != "[":
+        raise ValueError(
+            f"Expected JSON array or object at top level, got "
+            f"{text[i]!r} at offset {i}"
+        )
+
+    i += 1  # skip the opening '['
+    results: list[tuple[int, dict]] = []
+    while i < len(text):
+        # Skip whitespace and inter-element commas
+        while i < len(text) and (text[i].isspace() or text[i] == ","):
+            i += 1
+        if i >= len(text) or text[i] == "]":
+            break
+        # raw_decode returns (parsed_value, end_index_in_text)
+        entry, end = decoder.raw_decode(text, i)
+        results.append((i, entry))
+        i = end
+    return results
+
+
+def _compute_line_starts(text: str) -> list[int]:
+    """Return a list of character offsets where each line starts.
+
+    Line N (1-indexed) starts at offset ``line_starts[N-1]``. Used
+    to convert character offsets to (line, column) for anchors.
+    """
+    starts = [0]
+    for i, ch in enumerate(text):
+        if ch == "\n":
+            starts.append(i + 1)
+    return starts
+
+
+def _offset_to_line_column(offset: int, line_starts: list[int]) -> tuple[int, int]:
+    """Convert a character offset to (1-indexed line, 1-indexed column)
+    using a precomputed list of line-start offsets.
+
+    Uses ``bisect_right`` for O(log N) lookup so this stays cheap on
+    larger governance files.
+    """
+    import bisect
+    # bisect_right returns the index of the first line_start > offset;
+    # the line containing ``offset`` is one before that (1-indexed).
+    line_idx = bisect.bisect_right(line_starts, offset) - 1
+    line_idx = max(line_idx, 0)
+    line = line_idx + 1
+    column = (offset - line_starts[line_idx]) + 1
+    return line, column

@@ -398,6 +398,10 @@ class FusionEngine:
         result: FusionResult,
     ) -> None:
         for rec in source_b.records:
+            # Phase 6 wrap-up #2: thread the record's source_anchor
+            # (the (line, column, file) of this entry in the
+            # governance JSON) through to every B-contributed field.
+            b_anchor = getattr(rec, "source_anchor", None)
             el = self._lookup(index, id_lookup, eid=rec.id, name=rec.element_name)
             if el is not None:
                 # Governance-validated: this Source A concept exists in
@@ -408,6 +412,7 @@ class FusionEngine:
                 if rec.definition:
                     self._set_field(
                         el, "definition", rec.definition, "B", rec.confidence,
+                        b_anchor,
                     )
 
                 # is_critical comes from Source B only
@@ -415,6 +420,7 @@ class FusionEngine:
                     el.is_critical = True
                     self._set_field(
                         el, "is_critical", "true", "B", rec.confidence,
+                        b_anchor,
                     )
 
                 # Citations are additive — both sources contribute
@@ -427,12 +433,10 @@ class FusionEngine:
                     elif not el.citation:
                         el.citation = rec.citation
                     # Record provenance without conflict detection.
-                    # Phase 6: preserve any anchor already attached to
-                    # the existing citation provenance — Source B
-                    # doesn't carry its own anchor yet, but Source A's
-                    # anchor still points at the original citation
-                    # extraction location, which stays valid after
-                    # appending B's text.
+                    # Preserve A's anchor if it had one (still points
+                    # at A's citation span); otherwise fall back to B's
+                    # anchor so the combined citation has *some*
+                    # location data.
                     existing = el.field_provenance.get(
                         "citation", FieldProvenance("", 0, ""),
                     )
@@ -440,12 +444,13 @@ class FusionEngine:
                         source="A+B",
                         confidence=max(existing.confidence, rec.confidence),
                         original_value=el.citation,
-                        anchor=existing.anchor,
+                        anchor=existing.anchor or b_anchor,
                     )
 
                 if rec.domain_name:
                     self._set_field(
                         el, "domain_name", rec.domain_name, "B", rec.confidence,
+                        b_anchor,
                     )
 
                 # Carry extra fields from governance
@@ -470,10 +475,12 @@ class FusionEngine:
                 if rec.definition:
                     self._set_field(
                         el, "definition", rec.definition, "B", rec.confidence,
+                        b_anchor,
                     )
                 if rec.domain_name:
                     self._set_field(
                         el, "domain_name", rec.domain_name, "B", rec.confidence,
+                        b_anchor,
                     )
                 if rec.is_critical:
                     el.is_critical = True

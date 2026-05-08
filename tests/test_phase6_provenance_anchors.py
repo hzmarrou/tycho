@@ -444,3 +444,110 @@ class TestJsonRoundTrip:
         c = result.elements[0].conflicts[0]
         assert c.winner.anchor is None
         assert c.rejected[0].anchor is None
+
+
+# ─── Source B anchor threading (wrap-up #2) ─────────────────────────────────
+
+
+class TestSourceBAnchorThreading:
+    """Pins that a GovernanceRecord's ``source_anchor`` lands on the
+    fused element's ``field_provenance`` for every B-contributed field
+    (definition, citation, domain_name, is_critical), and that the
+    citation merge path preserves it when A is absent or anchorless."""
+
+    def test_b_only_record_attaches_anchor_to_definition(self):
+        """B-only term: A didn't extract it. The new fused element
+        gets B's anchor on its definition / citation / etc."""
+        from ontozense.core.fusion import FusionEngine
+        from ontozense.extractors.governance_extractor import (
+            GovernanceExtractionResult, GovernanceRecord,
+        )
+
+        b_anchor = FieldAnchor(line=12, column=5, segment_id="gov.json")
+        sb = GovernanceExtractionResult(
+            records=[GovernanceRecord(
+                element_name="Solo",
+                domain_name="t",
+                definition="A B-only term.",
+                citation="GOV-2026",
+                is_critical=True,
+                confidence=0.95,
+                source_anchor=b_anchor,
+            )],
+        )
+        r = FusionEngine().fuse(source_b=sb)
+        el = r.elements[0]
+        defn_prov = el.field_provenance["definition"]
+        assert defn_prov.source == "B"
+        assert defn_prov.anchor == b_anchor
+
+    def test_a_plus_b_citation_merge_falls_back_to_b_anchor_when_a_unanchored(self):
+        """When Source A had no anchor on its citation but Source B
+        does, the combined ``A+B`` provenance carries B's anchor."""
+        from ontozense.core.fusion import FusionEngine
+        from ontozense.extractors.governance_extractor import (
+            GovernanceExtractionResult, GovernanceRecord,
+        )
+        from ontozense.extractors.domain_doc_extractor import (
+            Concept, DomainDocumentExtractionResult, FieldConfidence,
+        )
+
+        # A contributes citation but no anchor
+        c = Concept(name="Customer", definition="A buyer.", citation="Reg X")
+        c.confidence.append(FieldConfidence("name", 0.9, "v"))
+        sa = DomainDocumentExtractionResult(domain_name="t", concepts=[c])
+
+        b_anchor = FieldAnchor(line=42, column=3, segment_id="gov.json")
+        sb = GovernanceExtractionResult(
+            records=[GovernanceRecord(
+                element_name="Customer",
+                citation="GOV-CAT",
+                confidence=0.95,
+                source_anchor=b_anchor,
+            )],
+        )
+        r = FusionEngine().fuse(source_a=sa, source_b=sb)
+        el = r.elements[0]
+        cit_prov = el.field_provenance["citation"]
+        assert cit_prov.source == "A+B"
+        # A had no anchor → B's anchor takes over
+        assert cit_prov.anchor == b_anchor
+
+    def test_a_anchor_wins_over_b_in_citation_merge(self):
+        """When Source A has its own citation anchor, the merge keeps
+        A's (it points at the original extraction span). Pinned by
+        the existing Phase 6 fix; replicated here against a real
+        Source B anchor."""
+        from ontozense.core.fusion import FusionEngine
+        from ontozense.extractors.governance_extractor import (
+            GovernanceExtractionResult, GovernanceRecord,
+        )
+        from ontozense.extractors.domain_doc_extractor import (
+            Concept, DomainDocumentExtractionResult, FieldConfidence,
+            Provenance,
+        )
+
+        c = Concept(name="Customer", definition="A buyer.", citation="Reg X")
+        c.confidence.append(FieldConfidence("name", 0.9, "v"))
+        c.provenance = Provenance(
+            source_document="docA.md",
+            source_section="3.2",
+            source_text_snippet="Customer means…",
+        )
+        sa = DomainDocumentExtractionResult(domain_name="t", concepts=[c])
+
+        b_anchor = FieldAnchor(line=42, segment_id="gov.json")
+        sb = GovernanceExtractionResult(
+            records=[GovernanceRecord(
+                element_name="Customer",
+                citation="GOV-CAT",
+                confidence=0.95,
+                source_anchor=b_anchor,
+            )],
+        )
+        r = FusionEngine().fuse(source_a=sa, source_b=sb)
+        el = r.elements[0]
+        cit_prov = el.field_provenance["citation"]
+        # A's anchor wins
+        assert cit_prov.anchor.segment_id == "3.2"
+        assert cit_prov.anchor.snippet.startswith("Customer means")

@@ -180,3 +180,88 @@ class TestErrorHandling:
         result = extractor.extract_from_file(f)
         assert len(result.records) == 1
         assert result.warnings
+
+
+# ─── Source B anchors (wrap-up #2) ──────────────────────────────────────────
+
+
+class TestSourceBAnchors:
+    """The governance extractor captures the (line, column, char_offset,
+    snippet, segment_id=filename) of each entry's opening ``{`` so
+    fusion can attach an anchor per B-contributed field. Phase 6 added
+    the ``FieldAnchor`` shape; this wrap-up phase populates it from
+    Source B."""
+
+    def test_array_records_have_distinct_line_numbers(self, extractor, tmp_path):
+        """Each record in a JSON array gets a different line number
+        when the source is pretty-printed across multiple lines."""
+        f = tmp_path / "gov.json"
+        # Pretty-print with one record per indented block — typical
+        # human-curated governance file shape.
+        f.write_text(json.dumps([
+            {"element_name": "First", "definition": "a"},
+            {"element_name": "Second", "definition": "b"},
+            {"element_name": "Third", "definition": "c"},
+        ], indent=2), encoding="utf-8")
+
+        result = extractor.extract_from_file(f)
+        assert len(result.records) == 3
+        anchors = [r.source_anchor for r in result.records]
+        # All three got anchors
+        assert all(a is not None for a in anchors)
+        # And the lines are strictly increasing (entries are ordered)
+        lines = [a.line for a in anchors]
+        assert lines == sorted(lines)
+        assert len(set(lines)) == 3, "Each record must land on its own line"
+
+    def test_anchor_records_filename_in_segment_id(self, extractor, tmp_path):
+        f = tmp_path / "my-governance.json"
+        f.write_text(json.dumps({"element_name": "X"}), encoding="utf-8")
+        result = extractor.extract_from_file(f)
+        assert result.records[0].source_anchor.segment_id == "my-governance.json"
+
+    def test_anchor_snippet_starts_with_opening_brace(self, extractor, tmp_path):
+        """The captured snippet starts at the entry's ``{`` so a
+        reviewer reading the snippet sees recognisable JSON."""
+        f = tmp_path / "g.json"
+        f.write_text(json.dumps([
+            {"element_name": "Customer", "definition": "A buyer."},
+        ], indent=2), encoding="utf-8")
+        result = extractor.extract_from_file(f)
+        anchor = result.records[0].source_anchor
+        assert anchor.snippet.startswith("{")
+        assert "Customer" in anchor.snippet
+
+    def test_single_object_input_anchor_at_offset_zero(self, extractor, tmp_path):
+        """A single-object governance file (not an array) anchors
+        the one record at the start of the file (after any leading
+        whitespace)."""
+        f = tmp_path / "g.json"
+        f.write_text('{"element_name": "Solo", "definition": "x"}',
+                     encoding="utf-8")
+        result = extractor.extract_from_file(f)
+        anchor = result.records[0].source_anchor
+        assert anchor.char_offset == 0
+        assert anchor.line == 1
+        assert anchor.column == 1
+
+    def test_anchor_column_reflects_indentation(self, extractor, tmp_path):
+        """For pretty-printed arrays, the entry's column equals the
+        indentation level (the number of spaces before ``{`` plus 1
+        for 1-indexed)."""
+        f = tmp_path / "g.json"
+        f.write_text(json.dumps([
+            {"element_name": "A"},
+        ], indent=4), encoding="utf-8")
+        result = extractor.extract_from_file(f)
+        anchor = result.records[0].source_anchor
+        # json.dumps with indent=4 puts entries at column 5 (4 spaces + 1)
+        assert anchor.column == 5
+
+    def test_no_file_records_constructed_directly_have_no_anchor(self):
+        """A GovernanceRecord constructed without going through
+        extract_from_file (e.g. a unit test stub) has source_anchor=None,
+        which is the documented default."""
+        rec = GovernanceRecord(element_name="X")
+        assert rec.source_anchor is None
+
