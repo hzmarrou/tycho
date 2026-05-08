@@ -836,3 +836,158 @@ class TestCliReferenceFlag:
         assert r.exit_code == 1
         assert "Reference JSON parse error" in r.output
         assert "Traceback" not in r.output
+
+    def test_structurally_malformed_reference_clean_error(self, tmp_path):
+        """Round-4 review: a syntactically-valid JSON with the wrong
+        shape (e.g. ``{"elements": [123]}``) used to crash with
+        AttributeError during reconstruction. Now it raises
+        ReferenceContractError and the CLI prints a clean message."""
+        from typer.testing import CliRunner
+        from ontozense import cli
+
+        runner = CliRunner()
+        fused = self._write_fused_json(tmp_path, [self._basic_element("X")])
+        bad = tmp_path / "bad_shape.json"
+        bad.write_text(
+            json.dumps({"elements": [123], "relationships": []}),
+            encoding="utf-8",
+        )
+        r = runner.invoke(cli.app, [
+            "report", str(fused),
+            "--reference", str(bad),
+        ])
+        assert r.exit_code == 1
+        flat = " ".join(r.output.split())
+        assert "Reference JSON contract error" in flat
+        assert "elements[0] must be an object" in flat
+        assert "Traceback" not in r.output
+
+
+# ─── 11. Round-4 review regression tests ───────────────────────────────────
+
+
+class TestRound4ReviewRegressions:
+    """Pin the three failure modes the round-4 reviewer reproduced
+    against commit 8103235:
+
+      * Element matching with no IDs falsely conflates two entities
+        of different types that share a normalised name.
+      * Relationship matching ignored profile-mode IDs, so the same
+        triple over IDs vs over names counted as zero matches.
+      * Structurally malformed (but syntactically valid) reference
+        JSON crashed the loader instead of raising a clean error.
+    """
+
+    def test_element_match_distinguishes_by_entity_type(self):
+        """Repro: a fused Rule named "Default" should NOT match a
+        reference Concept named "Default" — different types, same
+        name, no IDs. Pre-fix this counted as TP=1; post-fix
+        TP=0, FP=1, FN=1."""
+        fused = _result([_el("Default", entity_type="Rule")])
+        ref = _result([_el("Default", entity_type="Concept")])
+        r = compute_benchmark(fused, reference=ref)
+        rc = r.reference_comparison
+        assert rc.elements_true_positive == 0
+        assert rc.elements_false_positive == 1
+        assert rc.elements_false_negative == 1
+
+    def test_element_match_typeless_legacy_still_works(self):
+        """When neither side declares entity_type (truly typeless
+        legacy payloads), name-only matching still functions —
+        the type guard only kicks in when at least one side has a
+        type."""
+        fused = _result([_el("Default")])
+        ref = _result([_el("Default")])
+        r = compute_benchmark(fused, reference=ref)
+        rc = r.reference_comparison
+        assert rc.elements_true_positive == 1
+
+    def test_relationship_match_uses_endpoint_ids(self):
+        """Repro: fused has elements with IDs and a relationship
+        ``Customer -> Order``; reference has the same IDs but
+        different surface names (CustomerOne -> OrderOne) and the
+        same relationship. Pre-fix the relationship scored as
+        TP=0; post-fix it should be TP=1 because endpoint IDs
+        align."""
+        fused = _result(
+            [
+                _el("Customer", entity_type="Concept", eid="concept_c_111"),
+                _el("Order", entity_type="Concept", eid="concept_o_222"),
+            ],
+            [FusedRelationship(
+                subject="Customer", predicate="rel", object="Order", source="A",
+            )],
+        )
+        ref = _result(
+            [
+                _el("CustomerOne", entity_type="Concept", eid="concept_c_111"),
+                _el("OrderOne", entity_type="Concept", eid="concept_o_222"),
+            ],
+            [FusedRelationship(
+                subject="CustomerOne", predicate="rel", object="OrderOne",
+                source="A",
+            )],
+        )
+        r = compute_benchmark(fused, reference=ref)
+        rc = r.reference_comparison
+        # Elements matched by ID
+        assert rc.elements_true_positive == 2
+        # Relationship: endpoints resolve to the same ID-keys on both
+        # sides, predicate matches case-insensitively → TP=1
+        assert rc.relationships_true_positive == 1
+        assert rc.relationships_false_positive == 0
+        assert rc.relationships_false_negative == 0
+        assert rc.relationships_f1 == 1.0
+
+    def test_relationship_match_falls_back_to_name_when_no_ids(self):
+        """Without IDs, relationship matching falls back to
+        normalised-name endpoints — the pre-fix behaviour for fully
+        unconstrained pipelines stays intact."""
+        fused = _result(
+            [_el("A"), _el("B")],
+            [FusedRelationship(
+                subject="A", predicate="rel", object="B", source="A",
+            )],
+        )
+        ref = _result(
+            [_el("A"), _el("B")],
+            [FusedRelationship(
+                subject="A", predicate="rel", object="B", source="A",
+            )],
+        )
+        r = compute_benchmark(fused, reference=ref)
+        rc = r.reference_comparison
+        assert rc.relationships_true_positive == 1
+        assert rc.relationships_f1 == 1.0
+
+    def test_structural_validation_at_load_time(self):
+        """Repro: ``{"elements": [123]}`` previously crashed at
+        ``_reconstruct_fusion_result`` with AttributeError. Now
+        ``validate_reference_shape`` raises
+        ReferenceContractError before reconstruction is attempted."""
+        from ontozense.core.benchmark import (
+            ReferenceContractError, validate_reference_shape,
+        )
+        with pytest.raises(ReferenceContractError, match="elements\\[0\\] must be an object"):
+            validate_reference_shape({"elements": [123]})
+
+    def test_structural_validation_missing_elements_key(self):
+        from ontozense.core.benchmark import (
+            ReferenceContractError, validate_reference_shape,
+        )
+        with pytest.raises(ReferenceContractError, match="missing required key 'elements'"):
+            validate_reference_shape({"relationships": []})
+
+    def test_structural_validation_root_must_be_object(self):
+        from ontozense.core.benchmark import (
+            ReferenceContractError, validate_reference_shape,
+        )
+        with pytest.raises(ReferenceContractError, match="root must be an object"):
+            validate_reference_shape(["not", "an", "object"])
+
+    def test_structural_validation_relationships_must_be_list(self):
+        from ontozense.core.benchmark import (
+            ReferenceContractError, validate_reference_shape,
+        )
+        with pytest.raises(ReferenceContractError, match="'relationships' must be a list"):
+            validate_reference_shape({"elements": [], "relationships": "bad"})

@@ -1611,6 +1611,9 @@ def report(
     loaded_reference = None
     reference_path_str = ""
     if reference is not None:
+        from .core.benchmark import (
+            ReferenceContractError, validate_reference_shape,
+        )
         if not reference.exists():
             console.print(
                 f"[bold red][x] Reference file not found:[/] {reference}"
@@ -1628,6 +1631,19 @@ def report(
                 "an object with [cyan]elements[/] and (optionally) "
                 "[cyan]relationships[/] arrays."
             )
+            raise typer.Exit(code=1)
+        # Round-4 review fix: structural validation BEFORE
+        # reconstruction so a malformed-but-syntactically-valid
+        # reference produces a clean message instead of an
+        # AttributeError traceback during _reconstruct_fusion_result.
+        try:
+            validate_reference_shape(ref_raw)
+        except ReferenceContractError as e:
+            console.print(
+                f"[bold red][x] Reference JSON contract error:[/] "
+                f"{reference}"
+            )
+            console.print(f"  [dim]{e}[/]")
             raise typer.Exit(code=1)
         loaded_reference = _reconstruct_fusion_result(ref_raw)
         reference_path_str = str(reference)

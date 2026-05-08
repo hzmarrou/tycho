@@ -156,7 +156,12 @@ class BusinessRule:
     name: str               # e.g. "NPE_DPD_THRESHOLD"
     expression: str         # source-text expression
     description: str        # human-readable rendering (was list[str] item)
-    value: Optional[str] = None
+    # ``value`` preserves the original CodeRule.value type — int, float,
+    # bool, str, list, dict — so a numeric threshold like ``90`` stays
+    # an int and downstream tooling can consume it as structured data
+    # rather than presentation text. Round-trip safe through JSON for
+    # all primitive types and JSON-serialisable containers.
+    value: Optional[Any] = None
     referenced_symbols: list[str] = field(default_factory=list)
     citations: list[str] = field(default_factory=list)
     docstring: str = ""
@@ -688,7 +693,12 @@ class FusionEngine:
             name=rule.name,
             expression=rule.expression,
             description=cls._rule_to_description(rule),
-            value=str(rule.value) if rule.value is not None else None,
+            # Preserve the original Python type — int, bool, list, etc.
+            # The previous implementation flattened to str(); the
+            # post-1.0 review (round 4) flagged that as lossy when
+            # callers want a numeric threshold or boolean flag as
+            # structured data, not display text.
+            value=rule.value,
             referenced_symbols=list(rule.referenced_symbols),
             citations=list(rule.citations),
             docstring=rule.docstring,

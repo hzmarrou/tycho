@@ -107,6 +107,68 @@ class ProfileCoverage:
     predicates_unused: list[str] = field(default_factory=list)
 
 
+class ReferenceContractError(ValueError):
+    """Raised when a reference dictionary file violates the expected
+    fused-shape contract.
+
+    Distinct from ``json.JSONDecodeError`` (file isn't valid JSON) —
+    this means the JSON parsed but its shape is wrong: missing
+    ``elements`` key, ``elements`` not a list, or list items aren't
+    objects. The ``ontozense report --reference`` CLI catches this
+    separately and emits a user-facing message pointing at the
+    expected contract, mirroring how ``SourceCContractError`` works
+    for ``--source-c``.
+    """
+
+
+def validate_reference_shape(raw: Any) -> None:
+    """Validate that ``raw`` (parsed JSON) has the fused-shape
+    contract a reference dictionary needs.
+
+    Reference files are expected to be a JSON object with at least
+    an ``elements`` array. Each element should be an object;
+    relationship items, when present, should also be objects.
+    Anything else raises ``ReferenceContractError`` so the CLI can
+    surface a clean message instead of crashing with an
+    AttributeError during ``_reconstruct_fusion_result``.
+    """
+    if not isinstance(raw, dict):
+        raise ReferenceContractError(
+            f"Reference JSON root must be an object, got "
+            f"{type(raw).__name__}."
+        )
+    if "elements" not in raw:
+        raise ReferenceContractError(
+            "Reference JSON missing required key 'elements'. The "
+            "reference file should be a fused-shape JSON: an object "
+            "with at least an 'elements' array."
+        )
+    if not isinstance(raw["elements"], list):
+        raise ReferenceContractError(
+            f"Reference 'elements' must be a list, got "
+            f"{type(raw['elements']).__name__}."
+        )
+    for i, el in enumerate(raw["elements"]):
+        if not isinstance(el, dict):
+            raise ReferenceContractError(
+                f"Reference elements[{i}] must be an object, got "
+                f"{type(el).__name__}."
+            )
+    rels = raw.get("relationships")
+    if rels is not None:
+        if not isinstance(rels, list):
+            raise ReferenceContractError(
+                f"Reference 'relationships' must be a list when "
+                f"present, got {type(rels).__name__}."
+            )
+        for i, r in enumerate(rels):
+            if not isinstance(r, dict):
+                raise ReferenceContractError(
+                    f"Reference relationships[{i}] must be an "
+                    f"object, got {type(r).__name__}."
+                )
+
+
 @dataclass
 class ReferenceComparison:
     """Tycho 1.0+ wrap-up #3: precision / recall / F1 of the fused
@@ -403,13 +465,25 @@ def _has_used_subtype(
 def _element_match_key(el: FusedElement) -> str:
     """Matching key for an element across fused output and reference.
 
-    Profile mode: match by deterministic id when the element carries
-    one (the cross-source ID alignment contract from Phases 1–5).
-    Unconstrained: fall back to ``normalise_name(element_name)``.
+    Resolution order:
+
+      1. **Profile-mode id** — when the element carries
+         ``extra_fields["id"]`` (the cross-source ID alignment
+         contract from Phases 1–5). The most precise match.
+      2. **Type-qualified name** — when the element has
+         ``extra_fields["entity_type"]`` but no id, namespace the
+         name by type so a Rule named "Default" doesn't falsely
+         match a Concept named "Default" (post-1.0 round-4 review).
+      3. **Plain normalised name** — last resort for fully typeless
+         legacy payloads. Same shape as pre-1.0 matching.
     """
-    eid = el.extra_fields.get("id", "") if el.extra_fields else ""
+    extras = el.extra_fields or {}
+    eid = extras.get("id", "")
     if eid:
         return f"id:{eid}"
+    et = extras.get("entity_type", "")
+    if et:
+        return f"name:{et}:{normalise_name(el.element_name)}"
     return f"name:{normalise_name(el.element_name)}"
 
 
@@ -418,6 +492,30 @@ def _f1(precision: float, recall: float) -> float:
     if precision + recall == 0.0:
         return 0.0
     return 2.0 * precision * recall / (precision + recall)
+
+
+def _build_endpoint_resolver(elements: list[FusedElement]) -> dict[str, str]:
+    """Build a normalised-name → match-key map for relationship endpoints.
+
+    Relationships reference elements by string (typically the
+    element's ``element_name``, sometimes its ``id``). To make the
+    relationship matching share the same ID-aware identity as
+    element matching (round-4 review fix), we precompute, for each
+    element on a side, the mapping ``normalise_name(name) →
+    _element_match_key(el)``. Then a relationship endpoint can be
+    resolved to the same key the element layer uses, so a fused
+    relationship over IDs aligns with a reference relationship over
+    surface names when both refer to the same logical entity.
+
+    The map is built once per side; the key family
+    (``id:`` / ``name:`` / ``name:type:``) prevents collisions
+    between modes.
+    """
+    resolver: dict[str, str] = {}
+    for el in elements:
+        normalised = normalise_name(el.element_name)
+        resolver[normalised] = _element_match_key(el)
+    return resolver
 
 
 def _compute_reference_comparison(
@@ -469,15 +567,31 @@ def _compute_reference_comparison(
     )
 
     # ── Relationships (subject, predicate, object) triples ──
-    def _rel_key(rel) -> tuple[str, str, str]:
-        return (
-            normalise_name(rel.subject),
-            rel.predicate.lower(),
-            normalise_name(rel.object),
-        )
+    # Use the same ID-aware identity as element matching so
+    # endpoints with profile-mode IDs but different surface names
+    # still resolve to the same relationship. Round-4 review repro:
+    # fused (Customer-id=X) -> Order, reference (CustomerOne-id=X)
+    # -> Order should be ONE matching triple, not zero.
+    fused_endpoint_keys = _build_endpoint_resolver(fusion_result.elements)
+    ref_endpoint_keys = _build_endpoint_resolver(reference.elements)
 
-    fused_rels = {_rel_key(rel) for rel in fusion_result.relationships}
-    ref_rels = {_rel_key(rel) for rel in reference.relationships}
+    def _rel_key(rel, endpoint_resolver: dict[str, str]) -> tuple[str, str, str]:
+        subj = endpoint_resolver.get(
+            normalise_name(rel.subject), normalise_name(rel.subject),
+        )
+        obj = endpoint_resolver.get(
+            normalise_name(rel.object), normalise_name(rel.object),
+        )
+        return (subj, rel.predicate.lower(), obj)
+
+    fused_rels = {
+        _rel_key(rel, fused_endpoint_keys)
+        for rel in fusion_result.relationships
+    }
+    ref_rels = {
+        _rel_key(rel, ref_endpoint_keys)
+        for rel in reference.relationships
+    }
     rtp = len(fused_rels & ref_rels)
     rfp = len(fused_rels - ref_rels)
     rfn = len(ref_rels - fused_rels)

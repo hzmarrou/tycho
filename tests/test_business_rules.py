@@ -118,7 +118,10 @@ class TestSourceDToBusinessRule:
         assert isinstance(br, BusinessRule)
         assert br.rule_type == "constant"
         assert br.name == "LOAN_MAX_DAYS"
-        assert br.value == "365"
+        # Round-4 review fix: BusinessRule.value preserves the
+        # original CodeRule.value type — int stays int, not str.
+        assert br.value == 365
+        assert isinstance(br.value, int)
         # Anchor came through from CodeProvenance
         assert br.anchor is not None
         assert br.anchor.line == 42
@@ -246,6 +249,39 @@ class TestJsonRoundTrip:
 
 
 class TestQueryRendering:
+    def test_value_preserves_non_string_types(self):
+        """Round-4 review minor: BusinessRule.value used to be
+        forced to str() during conversion, losing type info. Now
+        it preserves the original CodeRule.value type."""
+        from ontozense.extractors.code_extractor import CodeRule
+
+        sa = _doc([_concept("Loan")])
+        # int value
+        rule_int = CodeRule(
+            rule_type="constant", name="A",
+            expression="x", value=90,
+            referenced_symbols=["Loan"],
+        )
+        # bool value
+        rule_bool = CodeRule(
+            rule_type="constant", name="B",
+            expression="y", value=True,
+            referenced_symbols=["Loan"],
+        )
+        # list value (acceptable JSON-serialisable)
+        rule_list = CodeRule(
+            rule_type="constant", name="C",
+            expression="z", value=["a", "b"],
+            referenced_symbols=["Loan"],
+        )
+        sd = CodeExtractionResult(rules=[rule_int, rule_bool, rule_list])
+        r = FusionEngine().fuse(source_a=sa, source_d=sd)
+        rules = r.elements[0].business_rules
+        assert len(rules) == 3
+        assert rules[0].value == 90 and isinstance(rules[0].value, int)
+        assert rules[1].value is True and isinstance(rules[1].value, bool)
+        assert rules[2].value == ["a", "b"] and isinstance(rules[2].value, list)
+
     def test_typed_business_rules_render_via_description(self):
         from ontozense.core.query import query_element
 
