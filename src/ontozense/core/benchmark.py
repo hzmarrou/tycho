@@ -93,6 +93,15 @@ class ProfileCoverage:
     entity_types_total: int = 0
     entity_types_covered: int = 0
     entity_types_unused: list[str] = field(default_factory=list)
+    # Phase 7 wrap-up: subtype-level coverage. ``subtypes_total``
+    # counts every declared subtype across all entity types;
+    # ``subtypes_covered`` counts those actually used; ``subtypes_unused``
+    # lists the missing ones with their parent for context. A profile
+    # without subtypes (entity types declared with no ``subtypes``
+    # array) reports zero across all three.
+    subtypes_total: int = 0
+    subtypes_covered: int = 0
+    subtypes_unused: list[str] = field(default_factory=list)
     predicates_total: int = 0
     predicates_covered: int = 0
     predicates_unused: list[str] = field(default_factory=list)
@@ -286,6 +295,20 @@ def _compute_profile_coverage(
         if t not in used_types and not _has_used_subtype(t, used_types, profile)
     )
 
+    # Subtype-level coverage. Iterate every declared subtype across
+    # every entity type; a subtype is "covered" when its name appears
+    # directly in ``used_types``. Unused subtypes are surfaced with
+    # ``parent.subtype`` notation so the reviewer immediately sees
+    # which top-level the gap belongs to.
+    for parent_name, et in profile.entity_types.items():
+        for subtype in et.subtypes:
+            cov.subtypes_total += 1
+            if subtype in used_types:
+                cov.subtypes_covered += 1
+            else:
+                cov.subtypes_unused.append(f"{parent_name}.{subtype}")
+    cov.subtypes_unused.sort()
+
     used_predicates = {
         rel.predicate.lower()
         for rel in fusion_result.relationships
@@ -431,6 +454,17 @@ def render_markdown(report: BenchmarkReport) -> str:
             lines.append(
                 f"  - Unused: {', '.join(pc.entity_types_unused)}"
             )
+        # Subtype line only emits when the profile actually declares
+        # subtypes — keeps the report tidy for profiles that don't.
+        if pc.subtypes_total > 0:
+            lines.append(
+                f"- Subtypes covered: "
+                f"{pc.subtypes_covered}/{pc.subtypes_total}"
+            )
+            if pc.subtypes_unused:
+                lines.append(
+                    f"  - Unused: {', '.join(pc.subtypes_unused)}"
+                )
         lines.append(
             f"- Predicates covered: "
             f"{pc.predicates_covered}/{pc.predicates_total}"

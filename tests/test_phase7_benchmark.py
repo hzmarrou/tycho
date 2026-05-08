@@ -336,6 +336,86 @@ class TestProfileCoverage:
         pc = r.profile_coverage
         assert pc.predicates_covered >= 1
 
+    def test_subtypes_total_zero_for_no_subtype_profile(self):
+        """The minimal profile declares two flat entity types with no
+        subtypes — subtype counts must be zero across the board."""
+        profile = load_profile(MINIMAL_PROFILE_DIR)
+        r = compute_benchmark(_result([_el("X")]), profile=profile)
+        pc = r.profile_coverage
+        assert pc.subtypes_total == 0
+        assert pc.subtypes_covered == 0
+        assert pc.subtypes_unused == []
+
+    def test_subtype_coverage_with_subtyped_profile(self, tmp_path):
+        """Profile with one parent type Metric having three subtypes;
+        only DirectMetric is used in the fused output. Subtype
+        coverage must report 1/3 with the two unused dotted-named."""
+        profile_dir = tmp_path / "subtype_profile"
+        profile_dir.mkdir()
+        (profile_dir / "schema.json").write_text(
+            json.dumps({
+                "profile_name": "subtype_test",
+                "profile_version": "1.0.0",
+                "entity_types": {
+                    "Metric": {
+                        "required": [],
+                        "subtypes": [
+                            "DirectMetric",
+                            "CalculatedMetric",
+                            "InputMetric",
+                        ],
+                    },
+                },
+                "predicates": {},
+            }),
+            encoding="utf-8",
+        )
+        profile = load_profile(profile_dir)
+        r = compute_benchmark(
+            _result([_el("X", entity_type="DirectMetric")]),
+            profile=profile,
+        )
+        pc = r.profile_coverage
+        assert pc.subtypes_total == 3
+        assert pc.subtypes_covered == 1
+        # Unused list is sorted, parent-prefixed
+        assert pc.subtypes_unused == [
+            "Metric.CalculatedMetric",
+            "Metric.InputMetric",
+        ]
+        # Parent type Metric is reported as covered (subtype usage
+        # bubbles up — Phase 4 behaviour)
+        assert "Metric" not in pc.entity_types_unused
+
+    def test_subtype_zero_coverage_lists_all(self, tmp_path):
+        """Profile with subtypes, none used → all unused, none covered."""
+        profile_dir = tmp_path / "subtype_unused"
+        profile_dir.mkdir()
+        (profile_dir / "schema.json").write_text(
+            json.dumps({
+                "profile_name": "test",
+                "profile_version": "1.0.0",
+                "entity_types": {
+                    "Metric": {
+                        "required": [],
+                        "subtypes": ["DirectMetric", "CalculatedMetric"],
+                    },
+                },
+                "predicates": {},
+            }),
+            encoding="utf-8",
+        )
+        profile = load_profile(profile_dir)
+        # No elements with entity_type
+        r = compute_benchmark(_result([_el("X")]), profile=profile)
+        pc = r.profile_coverage
+        assert pc.subtypes_total == 2
+        assert pc.subtypes_covered == 0
+        assert pc.subtypes_unused == [
+            "Metric.CalculatedMetric",
+            "Metric.DirectMetric",
+        ]
+
 
 # ─── 7. Markdown rendering ─────────────────────────────────────────────────
 
@@ -366,6 +446,42 @@ class TestMarkdownRender:
         md = render_markdown(r)
         assert "## Profile coverage" in md
         assert "Entity types covered:" in md
+
+    def test_render_omits_subtype_line_for_no_subtype_profile(self):
+        """Minimal profile has no subtypes → render must not include
+        a 'Subtypes covered' line, keeping the report tidy."""
+        profile = load_profile(MINIMAL_PROFILE_DIR)
+        r = compute_benchmark(_result([_el("X")]), profile=profile)
+        md = render_markdown(r)
+        assert "Subtypes covered:" not in md
+
+    def test_render_includes_subtype_line_for_subtyped_profile(self, tmp_path):
+        """Profile with subtypes → render shows the subtype coverage
+        line and lists unused with parent-dotted names."""
+        profile_dir = tmp_path / "subtype_render"
+        profile_dir.mkdir()
+        (profile_dir / "schema.json").write_text(
+            json.dumps({
+                "profile_name": "test",
+                "profile_version": "1.0.0",
+                "entity_types": {
+                    "Metric": {
+                        "required": [],
+                        "subtypes": ["DirectMetric", "CalculatedMetric"],
+                    },
+                },
+                "predicates": {},
+            }),
+            encoding="utf-8",
+        )
+        profile = load_profile(profile_dir)
+        r = compute_benchmark(
+            _result([_el("X", entity_type="DirectMetric")]),
+            profile=profile,
+        )
+        md = render_markdown(r)
+        assert "Subtypes covered: 1/2" in md
+        assert "Metric.CalculatedMetric" in md
 
 
 # ─── 8. AC1: report is read-only on the fused result ───────────────────────
