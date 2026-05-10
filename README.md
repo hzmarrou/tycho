@@ -4,7 +4,7 @@ Auto-generate rich data dictionaries and domain ontologies from four
 complementary sources: authoritative documents, governance references,
 database schemas, and production code.
 
-Ontozense does the mechanical 60–70% of the work, so domain experts
+Tycho does the mechanical 60–70% of the work, so domain experts
 review a draft with provenance, confidence scores, conflict detection,
 typed per-field anchors back to the source, and structural validation
 against a domain profile — instead of starting from a blank
@@ -43,7 +43,7 @@ draft and commit corrections back into the knowledge base.
 concepts it finds; fusion merges by normalised name. Use this when
 you don't yet know the target ontology shape.
 
-**Profile mode** (with `--profile <dir>`). You hand Ontozense a small
+**Profile mode** (with `--profile <dir>`). You hand Tycho a small
 profile package (`schema.json` + optional sidecars) declaring the
 allowed entity types, predicates, alias map, ID format, and canonical
 verbs. The LLM is constrained to that vocabulary; concepts get
@@ -92,18 +92,18 @@ pip install -e ".[dev]"
 # 1. Extract from one or more domain documents (needs Azure OpenAI key).
 #    Add --profile <dir> for ontology-constrained extraction with
 #    deterministic IDs and a fixed vocabulary.
-ontozense extract-a path/to/reg-part1.md path/to/reg-part2.md \
+Tycho extract-a path/to/reg-part1.md path/to/reg-part2.md \
   --profile docs/profile-examples/esg \
   --json source-a.json --domain-dir domains/mydomain
 
 # 2. (Optional) Route a whole folder by content type
-ontozense ingest domains/mydomain/sources/ --dry-run
+Tycho ingest domains/mydomain/sources/ --dry-run
 
 # 3. Fuse everything into a rich data dictionary. --source-a is
 #    repeatable: each document gets consolidated by deterministic
 #    id (profile mode) or normalised name (unconstrained), with
 #    multi-doc corroboration tracked.
-ontozense fuse \
+Tycho fuse \
   --source-a source-a.json \
   --source-b governance.json \
   --source-c path/to/django/models/ \
@@ -113,33 +113,33 @@ ontozense fuse \
 # 4. Validate against the profile (profile mode only).
 #    --mode flag (default) annotates findings; --mode filter drops
 #    invalid entities and cascade-drops dangling relationships.
-ontozense validate fused.json \
+Tycho validate fused.json \
   --profile docs/profile-examples/esg \
   --output validated.json
 
 # 5. Find contradictions, orphans, coverage gaps, structural holes
-ontozense lint fused.json
+Tycho lint fused.json
 
 # 6. Ask an LLM to suggest bridging concepts for structural gaps
-ontozense suggest-bridges fused.json -o bridges.md
+Tycho suggest-bridges fused.json -o bridges.md
 
 # 7. Generate a benchmark snapshot — element counts, confidence
 #    distribution, conflict stats, anchor coverage, multi-doc
 #    corroboration, profile-coverage of declared types/predicates.
 #    JSON is machine-diffable for run-vs-run comparison.
-ontozense report fused.json \
+Tycho report fused.json \
   --profile docs/profile-examples/esg \
   --output report.json --markdown report.md
 
 # 8. Look up any element across all sources
-ontozense query "Default" --fused fused.json
+Tycho query "Default" --fused fused.json
 
 # 9. File expert reviews back into the knowledge base
-ontozense file-back my-review.md --domain-dir domains/mydomain
+Tycho file-back my-review.md --domain-dir domains/mydomain
 ```
 
 For the full walkthrough with an NPL (Non-Performing Loans) example,
-see [docs/ontozense-npl-tutorial.md](docs/ontozense-npl-tutorial.md).
+see [docs/Tycho-npl-tutorial.md](docs/Tycho-npl-tutorial.md).
 
 ## Design principles
 
@@ -161,7 +161,7 @@ see [docs/ontozense-npl-tutorial.md](docs/ontozense-npl-tutorial.md).
 - **Honest failure modes.** Exit code 2 for zero output, exit code 3
   for all-low-confidence output and validation errors, exit code 1
   for usage errors. Scripts can rely on these.
-- **Human is the final authority.** Ontozense produces a 60–70%
+- **Human is the final authority.** Tycho produces a 60–70%
   draft. Experts review, edit, and accept corrections via file-back.
 - **Backward-compatible by default.** Every phase of the pipeline
   upgrade was gated on byte-identical output for the unconstrained
@@ -179,9 +179,9 @@ The following commands are retained from the earlier OWL-centric
 pipeline and still work, but the main flow above uses the newer
 four-source architecture:
 
-- `ontozense extract` — generic OntoGPT extraction
-- `ontozense refine` — validate/normalise/deduplicate an OWL graph
-- `ontozense export` — OWL → Playground JSON
-- `ontozense convert` — existing extraction JSON → Playground JSON
-- `ontozense diff` — compare two OWL ontologies
-- `ontozense info` — stats for an OWL graph
+- `Tycho extract` — generic OntoGPT extraction
+- `Tycho refine` — validate/normalise/deduplicate an OWL graph
+- `Tycho export` — OWL → Playground JSON
+- `Tycho convert` — existing extraction JSON → Playground JSON
+- `Tycho diff` — compare two OWL ontologies
+- `Tycho info` — stats for an OWL graph
