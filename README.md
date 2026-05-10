@@ -1,4 +1,4 @@
-# Ontozense
+# Tycho
 
 Auto-generate rich data dictionaries and domain ontologies from four
 complementary sources: authoritative documents, governance references,
