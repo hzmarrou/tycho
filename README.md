@@ -92,18 +92,18 @@ pip install -e ".[dev]"
 # 1. Extract from one or more domain documents (needs Azure OpenAI key).
 #    Add --profile <dir> for ontology-constrained extraction with
 #    deterministic IDs and a fixed vocabulary.
-Tycho extract-a path/to/reg-part1.md path/to/reg-part2.md \
+ontozense extract-a path/to/reg-part1.md path/to/reg-part2.md \
   --profile docs/profile-examples/esg \
   --json source-a.json --domain-dir domains/mydomain
 
 # 2. (Optional) Route a whole folder by content type
-Tycho ingest domains/mydomain/sources/ --dry-run
+ontozense ingest domains/mydomain/sources/ --dry-run
 
 # 3. Fuse everything into a rich data dictionary. --source-a is
 #    repeatable: each document gets consolidated by deterministic
 #    id (profile mode) or normalised name (unconstrained), with
 #    multi-doc corroboration tracked.
-Tycho fuse \
+ontozense fuse \
   --source-a source-a.json \
   --source-b governance.json \
   --source-c path/to/django/models/ \
@@ -113,33 +113,33 @@ Tycho fuse \
 # 4. Validate against the profile (profile mode only).
 #    --mode flag (default) annotates findings; --mode filter drops
 #    invalid entities and cascade-drops dangling relationships.
-Tycho validate fused.json \
+ontozense validate fused.json \
   --profile docs/profile-examples/esg \
   --output validated.json
 
 # 5. Find contradictions, orphans, coverage gaps, structural holes
-Tycho lint fused.json
+ontozense lint fused.json
 
 # 6. Ask an LLM to suggest bridging concepts for structural gaps
-Tycho suggest-bridges fused.json -o bridges.md
+ontozense suggest-bridges fused.json -o bridges.md
 
 # 7. Generate a benchmark snapshot — element counts, confidence
 #    distribution, conflict stats, anchor coverage, multi-doc
 #    corroboration, profile-coverage of declared types/predicates.
 #    JSON is machine-diffable for run-vs-run comparison.
-Tycho report fused.json \
+ontozense report fused.json \
   --profile docs/profile-examples/esg \
   --output report.json --markdown report.md
 
 # 8. Look up any element across all sources
-Tycho query "Default" --fused fused.json
+ontozense query "Default" --fused fused.json
 
 # 9. File expert reviews back into the knowledge base
-Tycho file-back my-review.md --domain-dir domains/mydomain
+ontozense file-back my-review.md --domain-dir domains/mydomain
 ```
 
 For the full walkthrough with an NPL (Non-Performing Loans) example,
-see [docs/Tycho-npl-tutorial.md](docs/Tycho-npl-tutorial.md).
+see [docs/ontozense-npl-tutorial.md](docs/ontozense-npl-tutorial.md).
 
 ## Design principles
 
@@ -179,9 +179,9 @@ The following commands are retained from the earlier OWL-centric
 pipeline and still work, but the main flow above uses the newer
 four-source architecture:
 
-- `Tycho extract` — generic OntoGPT extraction
-- `Tycho refine` — validate/normalise/deduplicate an OWL graph
-- `Tycho export` — OWL → Playground JSON
-- `Tycho convert` — existing extraction JSON → Playground JSON
-- `Tycho diff` — compare two OWL ontologies
-- `Tycho info` — stats for an OWL graph
+- `ontozense extract` — generic OntoGPT extraction
+- `ontozense refine` — validate/normalise/deduplicate an OWL graph
+- `ontozense export` — OWL → Playground JSON
+- `ontozense convert` — existing extraction JSON → Playground JSON
+- `ontozense diff` — compare two OWL ontologies
+- `ontozense info` — stats for an OWL graph
