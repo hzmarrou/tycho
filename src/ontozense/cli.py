@@ -41,12 +41,35 @@ console = Console()
 
 
 def _load_env() -> None:
-    """Load .env file if present."""
+    """Load .env file if present, then alias the Azure SDK env-var
+    naming convention to LiteLLM's so users with the Azure standard
+    ``AZURE_OPENAI_*`` keys don't have to add duplicate ``AZURE_*``
+    entries.
+
+    LiteLLM (called via OntoGPT) expects:
+      AZURE_API_KEY, AZURE_API_BASE, AZURE_API_VERSION
+    while the Azure SDK convention is:
+      AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION
+
+    When only the Azure SDK names are set, this function copies their
+    values to the LiteLLM names. When both are set, the explicit
+    LiteLLM name wins (no clobbering).
+    """
+    import os
     try:
         from dotenv import load_dotenv
         load_dotenv()
     except ImportError:
         pass
+
+    _azure_aliases = {
+        "AZURE_API_KEY": "AZURE_OPENAI_API_KEY",
+        "AZURE_API_BASE": "AZURE_OPENAI_ENDPOINT",
+        "AZURE_API_VERSION": "AZURE_OPENAI_API_VERSION",
+    }
+    for litellm_name, azure_sdk_name in _azure_aliases.items():
+        if not os.environ.get(litellm_name) and os.environ.get(azure_sdk_name):
+            os.environ[litellm_name] = os.environ[azure_sdk_name]
 
 
 # ─── ingest (router-based dispatch) ───────────────────────────────────────────

@@ -231,6 +231,16 @@ class DomainDocumentExtractor:
             f"Domain profile: {profile.profile_name} "
             f"(version {profile.profile_version})"
         )
+        # YAML ``description: |-`` is a literal block scalar — every
+        # line of the embedded markdown must be indented to nest
+        # under the block. Pre-fix, only the first line of
+        # ``prompt_section`` was indented by the f-string's leading
+        # spaces, so any multi-line prompt_fragment.md broke the
+        # generated YAML and OntoGPT failed to parse it. textwrap.indent
+        # leaves blank lines blank (YAML-correct) and prefixes every
+        # other line with 2 spaces.
+        import textwrap
+        prompt_section_indented = textwrap.indent(prompt_section, "  ")
 
         # Required-field rules per type — surfaced so the LLM emits them
         required_rules = []
@@ -246,7 +256,7 @@ id: http://w3id.org/ontozense/profile_constrained_extraction
 name: profile_constrained_extraction
 title: Profile-constrained Domain Document Extraction ({profile.profile_name})
 description: |-
-  {prompt_section}
+{prompt_section_indented}
 
   Allowed entity types (use exactly these names — do not invent types):
 {types_block}

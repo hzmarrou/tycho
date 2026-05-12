@@ -124,6 +124,32 @@ class TestExtractorConstruction:
         assert "Rule" in content
         assert "AppliesTo" in content
 
+    def test_profile_constructor_generates_valid_yaml(self):
+        """Round-5 regression (ESG validation run): the generated
+        profile template must parse cleanly as YAML. Pre-fix, the
+        ``description: |-`` literal block scalar got the embedded
+        multi-line ``prompt_fragment.md`` content with only its first
+        line indented, breaking the YAML block. OntoGPT then failed
+        with a generic stderr that the CLI displayed as an opaque
+        ``RuntimeError: OntoGPT failed`` masking the real issue."""
+        import yaml
+        # Use the ESG profile since it has a longer multi-line
+        # prompt_fragment.md — that's the failure mode the round-5
+        # validation run surfaced.
+        ESG_DIR = Path(__file__).parent.parent / "docs" / "profile-examples" / "esg"
+        if not ESG_DIR.exists():
+            pytest.skip("ESG reference profile not found")
+        profile = load_profile(ESG_DIR)
+        ext = DomainDocumentExtractor(profile=profile)
+        content = ext.template_path.read_text(encoding="utf-8")
+        # Should parse without error
+        parsed = yaml.safe_load(content)
+        assert parsed is not None
+        # And the description block should contain the full prompt
+        # fragment, not be truncated to the first line.
+        assert "ESG Domain Constraints" in parsed["description"]
+        assert "Allowed entity types" in parsed["description"]
+
     def test_profile_constructor_with_explicit_template_overrides(self, tmp_path):
         """If user passes both profile AND template_path, the explicit
         template wins. Useful for power users."""

@@ -24,3 +24,9 @@ venv/
 docs/guidance_on_npl.en.md
 docs/guidance_on_npl.en.pdf
 docs/technical-report-kaprthy+.md
+# Validation source documents (regulator-published, copyrighted, large).
+docs/ESG/
+
+# Default Excel output written by ``ontozense extract-a`` to the cwd
+# when --output isn't specified. Tests-only side-effect.
+source-a-extraction.xlsx
