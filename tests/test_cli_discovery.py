@@ -17,9 +17,8 @@ What ``discover`` does (per the plan):
       * ``candidate-provenance.json`` — per-candidate evidence
         breakdown (so a reviewer can trace any candidate back to
         the source row it came from).
-      * ``concept-mappings.json`` — the architecture reserves this
-        artifact for induced alias / merge mappings. The file is
-        written empty by ``discover``; no command in this
+      * ``concept-mappings.json`` — written as
+        ``{"mappings": []}`` by ``discover``. No command in this
         implementation populates it.
 
 The architecture pins one constraint that's easy to miss: the
@@ -161,14 +160,13 @@ class TestDiscoverArtifacts:
                 f"Candidate {entry['candidate_id']!r} has empty provenance"
             )
 
-    def test_concept_mappings_initially_empty_placeholder(
+    def test_concept_mappings_written_as_empty_mappings_object(
         self, tmp_path: Path,
     ):
-        """concept-mappings.json is written empty by discover. The
-        architecture reserves this artifact for induced alias /
-        merge mappings, but no command in this implementation
-        populates it. The file must exist and be JSON-parseable so
-        downstream tooling has a stable shape to expect."""
+        """concept-mappings.json is written as ``{"mappings": []}``
+        by discover. No command in this implementation populates
+        it. The file must exist and be JSON-parseable so downstream
+        tooling has a stable shape to expect."""
         source_a = tmp_path / "source-a.json"
         _write_source_a(source_a, [{"name": "Customer", "definition": "A."}])
         domain_dir = tmp_path / "domain"
@@ -263,11 +261,13 @@ class TestDiscoverSourceMerging:
         assert graph["relationships"] == []
 
     def test_source_c_flag_accepted_without_crash(self, tmp_path: Path):
-        """Forward-compat: build_candidate_graph's Source C hook is
-        still a placeholder, but the CLI surface must already
-        accept the flag so it doesn't break when ingestion lands."""
+        """The ``--source-c`` flag is accepted by ``discover``. Its
+        payload is passed through to ``build_candidate_graph``,
+        which does not extract candidate concepts or relationships
+        from Source C in this implementation; the command must
+        still exit cleanly."""
         c = tmp_path / "c.json"
-        c.write_text(json.dumps({"some_future_shape": []}), encoding="utf-8")
+        c.write_text(json.dumps({"opaque_payload": []}), encoding="utf-8")
         domain_dir = tmp_path / "domain"
         result = runner.invoke(app, [
             "discover",
@@ -277,9 +277,13 @@ class TestDiscoverSourceMerging:
         assert result.exit_code == 0, result.output
 
     def test_source_d_flag_accepted_without_crash(self, tmp_path: Path):
-        """Same forward-compat as --source-c."""
+        """The ``--source-d`` flag is accepted by ``discover``. Its
+        payload is passed through to ``build_candidate_graph``,
+        which does not extract candidate concepts or relationships
+        from Source D in this implementation; the command must
+        still exit cleanly."""
         d = tmp_path / "d.json"
-        d.write_text(json.dumps({"some_future_shape": []}), encoding="utf-8")
+        d.write_text(json.dumps({"opaque_payload": []}), encoding="utf-8")
         domain_dir = tmp_path / "domain"
         result = runner.invoke(app, [
             "discover",
@@ -1465,13 +1469,12 @@ class TestDiscoveryWorkflowEndToEnd:
         self, tmp_path: Path,
     ):
         """When ``discover --profile`` applies an alias_map, the
-        merged candidates land in a single ``Concept`` subtype.
+        merged candidates land in a single subtype downstream.
         ``induce-profile`` then writes a profile derived from those
         merged candidates. The emitted profile is a different
-        artifact (it doesn't carry the original alias_map by
-        default — alias induction is a follow-up task), but the
-        *count* of distinct Concept subtypes reflects the alias-
-        driven merge."""
+        artifact (it does not include derived alias mappings), but
+        the *count* of distinct subtypes reflects the alias-driven
+        merge."""
         from ontozense.core.profile import load_profile
 
         seed_profile = tmp_path / "seed-profile"

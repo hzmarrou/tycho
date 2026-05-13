@@ -2350,17 +2350,19 @@ def discover(
     source_c: list[Path] = typer.Option(
         None, "--source-c",
         help=(
-            "Path to a Source C schema JSON. Repeatable. Ingestion in "
-            "build_candidate_graph is a forward-compat placeholder today; "
-            "the flag is accepted so wiring is in place when ingestion "
-            "lands."
+            "Path to a Source C schema JSON. Repeatable. The flag is "
+            "accepted and the payload is passed through unchanged; "
+            "Source C contents do not affect candidate generation in "
+            "this implementation."
         ),
     ),
     source_d: list[Path] = typer.Option(
         None, "--source-d",
         help=(
-            "Path to a Source D code/rules JSON. Repeatable. Same "
-            "forward-compat status as --source-c."
+            "Path to a Source D code / rules JSON. Repeatable. The "
+            "flag is accepted and the payload is passed through "
+            "unchanged; Source D contents do not affect candidate "
+            "generation in this implementation."
         ),
     ),
     profile: Path = typer.Option(
@@ -2389,10 +2391,9 @@ def discover(
       - ``candidate-provenance.json`` — per-candidate evidence
         breakdown, so a reviewer can trace any candidate back to
         the source row it came from.
-      - ``concept-mappings.json`` — empty placeholder
-        ``{"mappings": []}``. The architecture reserves this
-        artifact for induced alias / merge mappings; no command
-        in this implementation populates it.
+      - ``concept-mappings.json`` — written as
+        ``{"mappings": []}``. No command in this implementation
+        populates it.
 
     Discovery is intentionally permissive: it does not filter
     candidates by score or type. Run ``induce-profile`` afterwards
@@ -2607,17 +2608,14 @@ def _validate_record_entries(
 
 
 def _load_source_passthrough(paths: list[Path]) -> dict | None:
-    """For sources whose ingestion isn't locked yet (Source C / D —
-    :func:`build_candidate_graph` has placeholder hooks for these).
-    The CLI surface is forward-compatible: it accepts the flag and
-    forwards a merged dict so wiring is in place when ingestion
-    lands. Until then, the merged dict is a no-op inside the
-    builder.
+    """Generic loader / merger for the Source C and Source D
+    ``--source-*`` flags on ``discover``.
 
     Single-file inputs pass through unchanged. Multi-file inputs
-    are last-write-wins on the top-level dict — callers should not
-    rely on specific merge semantics for C/D until those sources
-    ingest properly.
+    are last-write-wins on the top-level dict. The merged dict is
+    returned to the caller; :func:`build_candidate_graph` does not
+    extract candidate concepts or relationships from these
+    payloads in this implementation.
     """
     if not paths:
         return None

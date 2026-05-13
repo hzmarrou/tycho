@@ -1,10 +1,10 @@
 """Candidate graph builder for the discovery / profile-induction
 workflow (profile induction architecture, Phase 1 / Task 2).
 
-This module turns raw source outputs (Source A concepts +
-relationships, Source B governance records, with placeholder hooks
-for Source C / Source D) into a merged :class:`CandidateGraph` of
-:class:`CandidateConcept` and :class:`CandidateRelationship` objects.
+This module turns raw source outputs (Source A concepts and
+relationships, Source B governance records) into a merged
+:class:`CandidateGraph` of :class:`CandidateConcept` and
+:class:`CandidateRelationship` objects.
 
 ## Merge contract (per ``docs/PROFILE_INDUCTION_ARCHITECTURE.md`` §"Candidate merge rules")
 
@@ -149,11 +149,9 @@ def build_candidate_graph(
         ``element_name`` and optionally ``entity_type``, ``id``,
         ``definition``.
       - ``source_c`` / ``source_d`` — accepted in the signature
-        to match the architecture's four-source contract, but
-        this builder does not extract concepts or relationships
-        from those payloads. See the architecture's "Module
-        Layout" section for the design of Source C (schema) and
-        Source D (code) ingestion.
+        so callers can pass them uniformly across sources. Their
+        payloads do not affect candidate generation in this
+        implementation.
 
     Any source argument can be ``None`` or absent. Empty / missing
     labels are skipped silently.
@@ -208,11 +206,9 @@ def build_candidate_graph(
                 alias_map=aliases,
             )
 
-    # source_c and source_d are accepted in build_candidate_graph's
-    # signature to match the architecture's four-source contract.
-    # This builder does not consume their contents; the CLI's
-    # ``--source-c`` / ``--source-d`` flags route through here so
-    # command-line wiring is uniform across sources.
+    # source_c and source_d are accepted so callers can pass them
+    # uniformly across sources. Their payloads do not affect the
+    # candidate concepts or relationships this builder emits.
 
     # ─── Relationship ingestion ───────────────────────────────────────────
     relationships: list[CandidateRelationship] = []

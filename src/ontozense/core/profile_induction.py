@@ -30,25 +30,22 @@ for technical-like ones. This module honours that by:
     them in the report's ``rejected_examples`` so a reviewer can
     see why they were dropped.
 
-Predicate, alias, and required-field induction (also described in
-the architecture's "Profile Induction Design" section) are not
-implemented in this module: this function's signature operates on
-:class:`CandidateConcept` only, so predicate induction (which
-needs the ``CandidateRelationship`` list) is unreachable here;
-alias induction would need observed-merge evidence beyond what
-:class:`CandidateConcept` carries; required-field induction would
-need per-attribute population data the contracts do not currently
-record.
+The emitted schema declares ``Concept`` and (when there are
+supporting-band candidates) ``TechnicalArtifact`` entity types,
+with the classified candidates as their subtypes. The schema's
+``predicates``, ``alias_map``, and ``canonical_verbs`` fields are
+emitted as empty objects — the emitted profile does not include
+derived predicates, aliases, or canonical verbs.
 
 ## Sidecar files
 
 In addition to ``schema.json``, the function emits the three
 sidecar files the profile loader supports:
 
-  - ``alias_map.json`` — emitted empty ``{}``. The file is written
-    so the directory has a fixed shape for downstream tooling;
-    alias induction is described in the architecture but not
-    implemented in this module.
+  - ``alias_map.json`` — emitted as an empty JSON object. The file
+    is written so the induced profile directory has a fixed shape
+    for downstream tooling. The emitted profile does not include
+    derived alias mappings.
   - ``prompt_fragment.md`` — domain-neutral guidance for the
     constrained second pass, loaded into ``Profile.prompt_fragment``.
   - ``induction_report.json`` — the audit trail, including the
@@ -331,12 +328,10 @@ def _build_schema(
         "description": f"Induced draft profile for {domain_name}",
         "entity_types": entity_types,
         # Predicates, alias_map, and canonical_verbs are emitted
-        # empty: this module does not consume the
-        # CandidateRelationship list (so predicate induction is
-        # unreachable from this signature), and induced aliases /
-        # verbs would require evidence aggregation beyond what
-        # :class:`CandidateConcept` carries. The keys are present
-        # so the schema is symmetric with hand-authored profiles.
+        # as empty objects. The keys are present so the schema is
+        # symmetric with hand-authored profiles; the emitted
+        # profile does not include derived predicates, aliases, or
+        # canonical verbs.
         "predicates": {},
         "alias_map": {},
         "canonical_verbs": {},
