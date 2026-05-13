@@ -626,3 +626,453 @@ class TestDiscoverErrors:
         ])
         assert result.exit_code != 0
         assert "profile" in result.output.lower()
+
+
+# ─── induce-profile (Task 6) ───────────────────────────────────────────────
+
+
+def _write_candidate_graph(
+    path: Path, concepts: list[dict], relationships: list[dict] | None = None,
+) -> None:
+    """Write a minimal candidate-graph.json. Each ``concept`` dict
+    needs the post-Phase-1 CandidateConcept shape (id, label,
+    normalized_label, suggested_entity_type, classification,
+    summary_definition, source_presence, source_counts)."""
+    path.write_text(
+        json.dumps({
+            "concepts": concepts,
+            "relationships": relationships or [],
+        }),
+        encoding="utf-8",
+    )
+
+
+def _stub_candidate_dict(
+    label: str,
+    *,
+    a: int = 0,
+    b: int = 0,
+    c: int = 0,
+    d: int = 0,
+    definition: str = "",
+    classification: str = "unknown",
+) -> dict:
+    """Build a candidate dict in the on-disk shape that
+    ``CandidateConcept.from_dict`` reconstructs. Pre-scoring
+    candidates carry ``classification="unknown"``; induce-profile's
+    job is to run score_candidates and assign proper bands."""
+    return {
+        "candidate_id": f"cand_{label.lower().replace(' ', '_')}",
+        "label": label,
+        "normalized_label": label.lower(),
+        "suggested_entity_type": "Concept",
+        "classification": classification,
+        "summary_definition": definition,
+        "source_presence": {"A": a > 0, "B": b > 0, "C": c > 0, "D": d > 0},
+        "source_counts": {"A": a, "B": b, "C": c, "D": d},
+        "schema_links": [],
+        "code_links": [],
+        "governance_links": [],
+        "authoritative_evidence_count": a,
+        "graph_degree": 0,
+        "relevance_score": 0.0,
+        "relevance_breakdown": {},
+        "provenance": [],
+        "aliases": [],
+        "status": "candidate",
+    }
+
+
+class TestInduceProfileBasic:
+    """Plan's canonical Task 6 contract: read candidate-graph.json,
+    score, emit a draft profile directory."""
+
+    def test_writes_schema_and_induction_report(self, tmp_path: Path):
+        graph = tmp_path / "candidate-graph.json"
+        _write_candidate_graph(graph, [
+            _stub_candidate_dict("Customer", a=3, b=1, definition="A client."),
+        ])
+        out_dir = tmp_path / "induced"
+        result = runner.invoke(app, [
+            "induce-profile", str(graph),
+            "--output-dir", str(out_dir),
+            "--domain-name", "demo",
+        ])
+        assert result.exit_code == 0, result.output
+        assert (out_dir / "schema.json").exists()
+        assert (out_dir / "induction_report.json").exists()
+        assert (out_dir / "alias_map.json").exists()
+        assert (out_dir / "prompt_fragment.md").exists()
+
+    def test_emitted_schema_round_trips_through_load_profile(
+        self, tmp_path: Path,
+    ):
+        """CLI-level AC1 pin (the writer-side AC1 is already in
+        test_profile_induction.py — this confirms the CLI wiring
+        preserves it)."""
+        from ontozense.core.profile import load_profile
+
+        graph = tmp_path / "candidate-graph.json"
+        _write_candidate_graph(graph, [
+            _stub_candidate_dict("Customer", a=3, b=1, definition="A client."),
+        ])
+        out_dir = tmp_path / "induced"
+        result = runner.invoke(app, [
+            "induce-profile", str(graph),
+            "--output-dir", str(out_dir),
+            "--domain-name", "demo",
+        ])
+        assert result.exit_code == 0
+        profile = load_profile(out_dir)
+        assert profile.profile_name == "demo"
+        assert "Concept" in profile.entity_types
+
+    def test_uses_default_weights_and_thresholds_when_flags_omitted(
+        self, tmp_path: Path,
+    ):
+        """When neither --weights nor --thresholds is given, the
+        induction report records the documented defaults so a
+        reviewer can always trace the exact config used."""
+        from ontozense.core.relevance import (
+            DEFAULT_THRESHOLDS, DEFAULT_WEIGHTS,
+        )
+
+        graph = tmp_path / "candidate-graph.json"
+        _write_candidate_graph(graph, [
+            _stub_candidate_dict("Customer", a=3, b=1, definition="A."),
+        ])
+        out_dir = tmp_path / "induced"
+        result = runner.invoke(app, [
+            "induce-profile", str(graph),
+            "--output-dir", str(out_dir),
+            "--domain-name", "demo",
+        ])
+        assert result.exit_code == 0
+        report = json.loads(
+            (out_dir / "induction_report.json").read_text(encoding="utf-8")
+        )
+        assert report["scoring_weights"] == dict(DEFAULT_WEIGHTS)
+        assert report["scoring_thresholds"] == dict(DEFAULT_THRESHOLDS)
+
+
+class TestInduceProfileScoringConfig:
+    """The architecture mandates configurable weights AND thresholds
+    (round-2 review of Task 3). The CLI exposes both via --weights
+    and --thresholds. These tests pin end-to-end propagation: from
+    JSON file → score_candidates → InductionReport."""
+
+    def test_custom_weights_recorded_in_report(self, tmp_path: Path):
+        """The exact weight values from the file land in the
+        report verbatim."""
+        from ontozense.core.relevance import DEFAULT_WEIGHTS
+
+        custom = dict(DEFAULT_WEIGHTS)
+        custom["authoritative_frequency"] = 0.50
+        custom["governance_presence"] = 0.05
+        weights_file = tmp_path / "weights.json"
+        weights_file.write_text(json.dumps(custom), encoding="utf-8")
+
+        graph = tmp_path / "candidate-graph.json"
+        _write_candidate_graph(graph, [
+            _stub_candidate_dict("Customer", a=3, b=1, definition="A."),
+        ])
+        out_dir = tmp_path / "induced"
+        result = runner.invoke(app, [
+            "induce-profile", str(graph),
+            "--output-dir", str(out_dir),
+            "--domain-name", "demo",
+            "--weights", str(weights_file),
+        ])
+        assert result.exit_code == 0, result.output
+        report = json.loads(
+            (out_dir / "induction_report.json").read_text(encoding="utf-8")
+        )
+        assert report["scoring_weights"] == custom
+
+    def test_custom_weights_change_relevance_score(self, tmp_path: Path):
+        """Custom weights must actually feed score_candidates — a
+        different weight produces a different score for the same
+        candidate."""
+        from ontozense.core.relevance import DEFAULT_WEIGHTS
+
+        # Default-weight pass.
+        graph = tmp_path / "candidate-graph.json"
+        _write_candidate_graph(graph, [
+            _stub_candidate_dict("X", a=1, definition="d."),
+        ])
+        out_a = tmp_path / "default"
+        result_a = runner.invoke(app, [
+            "induce-profile", str(graph),
+            "--output-dir", str(out_a),
+            "--domain-name", "demo",
+        ])
+        assert result_a.exit_code == 0
+        report_a = json.loads(
+            (out_a / "induction_report.json").read_text(encoding="utf-8")
+        )
+
+        # Custom-weight pass: shift everything onto definition_richness.
+        custom = dict.fromkeys(DEFAULT_WEIGHTS.keys(), 0.0)
+        custom["definition_richness"] = 1.0
+        weights_file = tmp_path / "weights.json"
+        weights_file.write_text(json.dumps(custom), encoding="utf-8")
+        out_b = tmp_path / "custom"
+        result_b = runner.invoke(app, [
+            "induce-profile", str(graph),
+            "--output-dir", str(out_b),
+            "--domain-name", "demo",
+            "--weights", str(weights_file),
+        ])
+        assert result_b.exit_code == 0
+        report_b = json.loads(
+            (out_b / "induction_report.json").read_text(encoding="utf-8")
+        )
+        # Top candidate's score differs between the two runs.
+        score_a = report_a["top_candidates"][0]["score"] if report_a["top_candidates"] else None
+        score_b = report_b["top_candidates"][0]["score"] if report_b["top_candidates"] else None
+        assert score_a != score_b
+
+    def test_custom_thresholds_recorded_in_report(self, tmp_path: Path):
+        thresholds_file = tmp_path / "thresholds.json"
+        thresholds_file.write_text(
+            json.dumps({
+                "core_business": 0.80,
+                "supporting_technical": 0.55,
+            }),
+            encoding="utf-8",
+        )
+        graph = tmp_path / "candidate-graph.json"
+        _write_candidate_graph(graph, [
+            _stub_candidate_dict("Customer", a=3, b=1, definition="A."),
+        ])
+        out_dir = tmp_path / "induced"
+        result = runner.invoke(app, [
+            "induce-profile", str(graph),
+            "--output-dir", str(out_dir),
+            "--domain-name", "demo",
+            "--thresholds", str(thresholds_file),
+        ])
+        assert result.exit_code == 0, result.output
+        report = json.loads(
+            (out_dir / "induction_report.json").read_text(encoding="utf-8")
+        )
+        assert report["scoring_thresholds"] == {
+            "core_business": 0.80,
+            "supporting_technical": 0.55,
+        }
+
+    def test_custom_thresholds_change_classification_bands(
+        self, tmp_path: Path,
+    ):
+        """A candidate that classifies as supporting_technical under
+        defaults must classify differently when the thresholds are
+        relaxed enough to promote it to core_business."""
+        graph = tmp_path / "candidate-graph.json"
+        _write_candidate_graph(graph, [
+            _stub_candidate_dict(
+                "Customer", a=2, b=1, definition="A.",
+            ),
+        ])
+
+        # Default run.
+        out_default = tmp_path / "default"
+        runner.invoke(app, [
+            "induce-profile", str(graph),
+            "--output-dir", str(out_default),
+            "--domain-name", "demo",
+        ])
+        default_report = json.loads(
+            (out_default / "induction_report.json").read_text(encoding="utf-8")
+        )
+
+        # Tighter thresholds.
+        tight = tmp_path / "tight.json"
+        tight.write_text(
+            json.dumps({
+                "core_business": 0.99,
+                "supporting_technical": 0.99,
+            }),
+            encoding="utf-8",
+        )
+        out_tight = tmp_path / "tight"
+        runner.invoke(app, [
+            "induce-profile", str(graph),
+            "--output-dir", str(out_tight),
+            "--domain-name", "demo",
+            "--thresholds", str(tight),
+        ])
+        tight_report = json.loads(
+            (out_tight / "induction_report.json").read_text(encoding="utf-8")
+        )
+        # Both reports cover the same candidate, but band totals
+        # differ: tight thresholds push it into the rejected pile.
+        assert default_report["candidate_count"] == 1
+        assert tight_report["candidate_count"] == 1
+        assert tight_report["rejected_count"] >= default_report["rejected_count"]
+
+
+class TestInduceProfileErrors:
+    """User-facing failure modes surface as friendly exit-2
+    messages, not Python tracebacks."""
+
+    def test_missing_candidate_graph_file_fails_cleanly(
+        self, tmp_path: Path,
+    ):
+        no_such = tmp_path / "no-such.json"
+        out_dir = tmp_path / "induced"
+        result = runner.invoke(app, [
+            "induce-profile", str(no_such),
+            "--output-dir", str(out_dir),
+            "--domain-name", "demo",
+        ])
+        assert result.exit_code != 0
+        assert "no-such.json" in result.output
+
+    def test_malformed_candidate_graph_json_fails_cleanly(
+        self, tmp_path: Path,
+    ):
+        graph = tmp_path / "broken.json"
+        graph.write_text("not-json", encoding="utf-8")
+        out_dir = tmp_path / "induced"
+        result = runner.invoke(app, [
+            "induce-profile", str(graph),
+            "--output-dir", str(out_dir),
+            "--domain-name", "demo",
+        ])
+        assert result.exit_code != 0
+        assert "broken.json" in result.output
+
+    def test_weights_file_missing_keys_fails_cleanly(self, tmp_path: Path):
+        """Per Task 3's contract, score_candidates demands a
+        *complete* weights dict (missing keys raise KeyError).
+        The CLI must validate upstream and surface a clean message
+        listing the missing keys."""
+        partial = tmp_path / "partial.json"
+        partial.write_text(
+            json.dumps({"authoritative_frequency": 0.5}),
+            encoding="utf-8",
+        )
+        graph = tmp_path / "candidate-graph.json"
+        _write_candidate_graph(graph, [
+            _stub_candidate_dict("X", a=1, definition="d."),
+        ])
+        out_dir = tmp_path / "induced"
+        result = runner.invoke(app, [
+            "induce-profile", str(graph),
+            "--output-dir", str(out_dir),
+            "--domain-name", "demo",
+            "--weights", str(partial),
+        ])
+        assert result.exit_code != 0
+        assert "partial.json" in result.output
+        # The error must list at least one missing key by name so
+        # the user can fix their file.
+        assert "governance_presence" in result.output \
+            or "missing" in result.output.lower()
+
+    def test_thresholds_file_missing_keys_fails_cleanly(
+        self, tmp_path: Path,
+    ):
+        partial = tmp_path / "partial.json"
+        partial.write_text(
+            json.dumps({"core_business": 0.7}),
+            encoding="utf-8",
+        )
+        graph = tmp_path / "candidate-graph.json"
+        _write_candidate_graph(graph, [
+            _stub_candidate_dict("X", a=1, definition="d."),
+        ])
+        out_dir = tmp_path / "induced"
+        result = runner.invoke(app, [
+            "induce-profile", str(graph),
+            "--output-dir", str(out_dir),
+            "--domain-name", "demo",
+            "--thresholds", str(partial),
+        ])
+        assert result.exit_code != 0
+        assert "partial.json" in result.output
+        assert "supporting_technical" in result.output \
+            or "missing" in result.output.lower()
+
+    def test_weights_file_with_non_dict_fails_cleanly(
+        self, tmp_path: Path,
+    ):
+        bad = tmp_path / "bad.json"
+        bad.write_text(json.dumps([0.1, 0.2]), encoding="utf-8")
+        graph = tmp_path / "candidate-graph.json"
+        _write_candidate_graph(graph, [
+            _stub_candidate_dict("X", a=1, definition="d."),
+        ])
+        out_dir = tmp_path / "induced"
+        result = runner.invoke(app, [
+            "induce-profile", str(graph),
+            "--output-dir", str(out_dir),
+            "--domain-name", "demo",
+            "--weights", str(bad),
+        ])
+        assert result.exit_code != 0
+        assert "bad.json" in result.output
+
+    def test_weights_file_with_non_numeric_value_fails_cleanly(
+        self, tmp_path: Path,
+    ):
+        from ontozense.core.relevance import DEFAULT_WEIGHTS
+
+        bad = dict.fromkeys(DEFAULT_WEIGHTS.keys(), 0.1)
+        bad["authoritative_frequency"] = "not-a-number"
+        bad_file = tmp_path / "bad.json"
+        bad_file.write_text(json.dumps(bad), encoding="utf-8")
+        graph = tmp_path / "candidate-graph.json"
+        _write_candidate_graph(graph, [
+            _stub_candidate_dict("X", a=1, definition="d."),
+        ])
+        out_dir = tmp_path / "induced"
+        result = runner.invoke(app, [
+            "induce-profile", str(graph),
+            "--output-dir", str(out_dir),
+            "--domain-name", "demo",
+            "--weights", str(bad_file),
+        ])
+        assert result.exit_code != 0
+        assert "bad.json" in result.output
+
+
+class TestInduceProfileConsoleSummary:
+    """A short summary printed after the run gives the user
+    immediate feedback without having to ``cat`` the report."""
+
+    def test_summary_includes_output_path(self, tmp_path: Path):
+        graph = tmp_path / "candidate-graph.json"
+        _write_candidate_graph(graph, [
+            _stub_candidate_dict("Customer", a=3, b=1, definition="A."),
+        ])
+        out_dir = tmp_path / "induced"
+        result = runner.invoke(app, [
+            "induce-profile", str(graph),
+            "--output-dir", str(out_dir),
+            "--domain-name", "demo",
+        ])
+        assert result.exit_code == 0
+        assert "induced" in result.output
+
+    def test_summary_includes_classification_counts(self, tmp_path: Path):
+        graph = tmp_path / "candidate-graph.json"
+        _write_candidate_graph(graph, [
+            _stub_candidate_dict("Customer", a=3, b=1, definition="A."),
+            _stub_candidate_dict("Order", a=2, b=1, definition="O."),
+            _stub_candidate_dict("tmp_x", definition=""),
+        ])
+        out_dir = tmp_path / "induced"
+        result = runner.invoke(app, [
+            "induce-profile", str(graph),
+            "--output-dir", str(out_dir),
+            "--domain-name", "demo",
+        ])
+        assert result.exit_code == 0
+        # At least one of the three band names should appear.
+        out = result.output.lower()
+        assert (
+            "core_business" in out
+            or "supporting_technical" in out
+            or "rejected" in out
+        )

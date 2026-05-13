@@ -2628,5 +2628,242 @@ def _load_source_passthrough(paths: list[Path]) -> dict | None:
     return merged
 
 
+# ─── induce-profile (profile induction workflow) ────────────────────────────
+
+
+@app.command(name="induce-profile")
+def induce_profile(
+    candidate_graph: Path = typer.Argument(
+        ...,
+        help=(
+            "Path to a candidate-graph.json file (typically produced by "
+            "``ontozense discover``)."
+        ),
+    ),
+    output_dir: Path = typer.Option(
+        ..., "--output-dir",
+        help="Directory to write the induced profile into. Created if missing.",
+    ),
+    domain_name: str = typer.Option(
+        ..., "--domain-name",
+        help="Becomes ``profile_name`` in the emitted schema.json.",
+    ),
+    weights: Path = typer.Option(
+        None, "--weights",
+        help=(
+            "Optional JSON file with per-signal weights. Must be a flat "
+            "object containing every key in DEFAULT_WEIGHTS (7 signals). "
+            "Defaults to DEFAULT_WEIGHTS when omitted."
+        ),
+    ),
+    thresholds: Path = typer.Option(
+        None, "--thresholds",
+        help=(
+            "Optional JSON file with classification thresholds. Must be a "
+            "flat object with ``core_business`` and "
+            "``supporting_technical`` keys. Defaults to "
+            "DEFAULT_THRESHOLDS when omitted."
+        ),
+    ),
+) -> None:
+    """Score a candidate graph and emit an induced draft profile.
+
+    Reads ``<CANDIDATE_GRAPH>``, applies the relevance scoring stage
+    (``core_business`` / ``supporting_technical`` / ``noise``), and
+    writes a loader-compatible profile directory under
+    ``<OUTPUT_DIR>``:
+
+      - schema.json
+      - alias_map.json
+      - prompt_fragment.md
+      - induction_report.json
+
+    The induction report records the exact weights and thresholds
+    used (defaults when no override is given), so a reviewer can
+    reproduce the band assignments end-to-end.
+    """
+    from .core.discovery_contracts import CandidateConcept
+    from .core.profile_induction import write_induced_profile
+    from .core.relevance import (
+        DEFAULT_THRESHOLDS, DEFAULT_WEIGHTS, score_candidates,
+    )
+
+    # ── Load the candidate graph ──
+    try:
+        raw = _load_json(candidate_graph)
+    except _SourceLoadError as err:
+        console.print(
+            f"[red]Failed to load candidate graph {err.path}:[/] {err}"
+        )
+        raise typer.Exit(code=2)
+
+    if not isinstance(raw, dict):
+        console.print(
+            f"[red]Candidate graph {candidate_graph} is not a JSON "
+            f"object[/] (got {type(raw).__name__})"
+        )
+        raise typer.Exit(code=2)
+
+    try:
+        concepts = [
+            CandidateConcept.from_dict(c)
+            for c in raw.get("concepts", [])
+        ]
+    except (TypeError, KeyError) as err:
+        console.print(
+            f"[red]Candidate graph {candidate_graph} has malformed "
+            f"concept entries:[/] {err}"
+        )
+        raise typer.Exit(code=2)
+
+    # ── Optional weights / thresholds overrides ──
+    weight_map: dict[str, float] | None = None
+    if weights is not None:
+        try:
+            weight_map = _load_scoring_config(
+                weights,
+                required_keys=set(DEFAULT_WEIGHTS.keys()),
+                label="--weights",
+            )
+        except _SourceLoadError as err:
+            console.print(
+                f"[red]Failed to load --weights {err.path}:[/] {err}"
+            )
+            raise typer.Exit(code=2)
+
+    threshold_map: dict[str, float] | None = None
+    if thresholds is not None:
+        try:
+            threshold_map = _load_scoring_config(
+                thresholds,
+                required_keys=set(DEFAULT_THRESHOLDS.keys()),
+                label="--thresholds",
+            )
+        except _SourceLoadError as err:
+            console.print(
+                f"[red]Failed to load --thresholds {err.path}:[/] {err}"
+            )
+            raise typer.Exit(code=2)
+
+    # ── Score, then write ──
+    scored = score_candidates(
+        concepts, weights=weight_map, thresholds=threshold_map,
+    )
+    out_path = write_induced_profile(
+        domain_name=domain_name,
+        candidates=scored,
+        out_dir=output_dir,
+        weights=weight_map,
+        thresholds=threshold_map,
+    )
+
+    # ── Console summary ──
+    _print_induction_summary(scored, out_path)
+
+
+# ─── Scoring-config helpers (induce-profile) ────────────────────────────────
+
+
+def _load_scoring_config(
+    path: Path,
+    *,
+    required_keys: set[str],
+    label: str,
+) -> dict[str, float]:
+    """Load a JSON scoring-config file (``--weights`` or
+    ``--thresholds``) and validate it's a complete, flat,
+    numeric-valued dict.
+
+    Strict checks (any failure raises :class:`_SourceLoadError`
+    so the CLI surfaces a clean exit-2 message):
+
+      - top level must be a JSON object;
+      - every key in ``required_keys`` must be present (lists the
+        missing keys in the error so the user can patch the file);
+      - extra keys are flagged so typos don't silently get ignored;
+      - every value must be a number (``int`` or ``float``).
+
+    The completeness check mirrors :func:`score_candidates`' own
+    contract (missing keys → ``KeyError`` downstream). Validating
+    at the CLI boundary surfaces a friendly message instead.
+    """
+    raw = _load_json(path)
+    if not isinstance(raw, dict):
+        raise _SourceLoadError(
+            path,
+            f"{label} file must be a JSON object "
+            f"(got top-level {type(raw).__name__}).",
+        )
+
+    present = set(raw.keys())
+    missing = required_keys - present
+    if missing:
+        raise _SourceLoadError(
+            path,
+            f"{label} file is missing required keys: "
+            f"{sorted(missing)}. Expected exactly: "
+            f"{sorted(required_keys)}.",
+        )
+    extra = present - required_keys
+    if extra:
+        raise _SourceLoadError(
+            path,
+            f"{label} file has unexpected keys: {sorted(extra)}. "
+            f"Expected only: {sorted(required_keys)}.",
+        )
+
+    for key, value in raw.items():
+        # Reject bools explicitly — ``True`` is a subclass of
+        # ``int`` so otherwise it'd slip through and become 1.0,
+        # which is almost certainly a config mistake the user
+        # wants flagged.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise _SourceLoadError(
+                path,
+                f"{label}[{key!r}] must be a number "
+                f"(got {type(value).__name__}: {value!r}).",
+            )
+
+    return {k: float(v) for k, v in raw.items()}
+
+
+def _print_induction_summary(scored, out_path: Path) -> None:
+    """Print a short post-run summary so the user gets feedback
+    without having to immediately ``cat`` the induction report."""
+    core = sum(1 for c in scored if c.classification == "core_business")
+    supporting = sum(
+        1 for c in scored if c.classification == "supporting_technical"
+    )
+    rejected = sum(
+        1 for c in scored
+        if c.classification not in ("core_business", "supporting_technical")
+    )
+
+    console.print(f"[green]Induced profile written to[/] {out_path}")
+    console.print(
+        f"  [bold]Candidates:[/] {len(scored)} total — "
+        f"core_business={core}, "
+        f"supporting_technical={supporting}, "
+        f"rejected={rejected}"
+    )
+
+    selected = sorted(
+        [
+            c for c in scored
+            if c.classification in ("core_business", "supporting_technical")
+        ],
+        key=lambda c: c.relevance_score,
+        reverse=True,
+    )[:5]
+    if selected:
+        console.print("  [bold]Top selected (by score):[/]")
+        for c in selected:
+            console.print(
+                f"    - {c.label} "
+                f"(score={c.relevance_score:.3f}, "
+                f"classification={c.classification})"
+            )
+
+
 if __name__ == "__main__":
     app()
