@@ -287,6 +287,190 @@ class TestDiscoverSourceMerging:
         assert result.exit_code == 0, result.output
 
 
+# ─── Source B shape support (round-1 reviewer finding) ─────────────────────
+
+
+class TestSourceBShapeSupport:
+    """The Source B governance JSON shape that ships with the repo
+    (``docs/governance_example.json``) is a top-level array. The
+    governance extractor also accepts a single object. ``discover``
+    must accept those same shapes — not just the synthetic
+    ``{"records": [...]}`` wrapper the candidate graph uses
+    internally. Reviewer-round-1 finding: top-level arrays were
+    crashing with ``AttributeError: 'list' object has no attribute
+    'get'`` instead of friendly handling."""
+
+    def test_source_b_top_level_array_accepted(self, tmp_path: Path):
+        """The shipped ``docs/governance_example.json`` shape."""
+        b = tmp_path / "governance.json"
+        b.write_text(
+            json.dumps([
+                {"element_name": "Borrower", "definition": "From B."},
+                {"element_name": "Collateral", "definition": "Also B."},
+            ]),
+            encoding="utf-8",
+        )
+        domain_dir = tmp_path / "domain"
+        result = runner.invoke(app, [
+            "discover",
+            "--source-b", str(b),
+            "--domain-dir", str(domain_dir),
+        ])
+        assert result.exit_code == 0, result.output
+        raw = json.loads(
+            (domain_dir / "discovery" / "candidate-graph.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        labels = {c["label"] for c in raw["concepts"]}
+        assert labels == {"Borrower", "Collateral"}
+
+    def test_source_b_single_object_accepted(self, tmp_path: Path):
+        """Single-record governance file (the other format the
+        governance extractor accepts at test_governance_extractor.py:56)."""
+        b = tmp_path / "single.json"
+        b.write_text(
+            json.dumps({
+                "element_name": "Exposure",
+                "definition": "A financial exposure.",
+            }),
+            encoding="utf-8",
+        )
+        domain_dir = tmp_path / "domain"
+        result = runner.invoke(app, [
+            "discover",
+            "--source-b", str(b),
+            "--domain-dir", str(domain_dir),
+        ])
+        assert result.exit_code == 0, result.output
+        raw = json.loads(
+            (domain_dir / "discovery" / "candidate-graph.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        labels = {c["label"] for c in raw["concepts"]}
+        assert labels == {"Exposure"}
+
+    def test_source_b_wrapped_records_form_still_accepted(
+        self, tmp_path: Path,
+    ):
+        """The internal ``{"records": [...]}`` wrapper (the shape
+        candidate_graph reads natively) is also accepted, both for
+        forward-compat with any pipeline that already emits this
+        form and so callers can pre-normalise if they want."""
+        b = tmp_path / "wrapped.json"
+        b.write_text(
+            json.dumps({
+                "records": [
+                    {"element_name": "Customer", "definition": "C."},
+                ],
+            }),
+            encoding="utf-8",
+        )
+        domain_dir = tmp_path / "domain"
+        result = runner.invoke(app, [
+            "discover",
+            "--source-b", str(b),
+            "--domain-dir", str(domain_dir),
+        ])
+        assert result.exit_code == 0
+        raw = json.loads(
+            (domain_dir / "discovery" / "candidate-graph.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert {c["label"] for c in raw["concepts"]} == {"Customer"}
+
+    def test_source_b_mixed_shapes_across_multiple_files_merge(
+        self, tmp_path: Path,
+    ):
+        """Repeated ``--source-b`` flags can carry files with
+        different shapes; each is normalised independently and the
+        records concatenate."""
+        single = tmp_path / "single.json"
+        array = tmp_path / "array.json"
+        wrapped = tmp_path / "wrapped.json"
+        single.write_text(
+            json.dumps({"element_name": "Single", "definition": "1."}),
+            encoding="utf-8",
+        )
+        array.write_text(
+            json.dumps([
+                {"element_name": "FromArrayA", "definition": "2a."},
+                {"element_name": "FromArrayB", "definition": "2b."},
+            ]),
+            encoding="utf-8",
+        )
+        wrapped.write_text(
+            json.dumps({
+                "records": [
+                    {"element_name": "Wrapped", "definition": "3."},
+                ],
+            }),
+            encoding="utf-8",
+        )
+        domain_dir = tmp_path / "domain"
+        result = runner.invoke(app, [
+            "discover",
+            "--source-b", str(single),
+            "--source-b", str(array),
+            "--source-b", str(wrapped),
+            "--domain-dir", str(domain_dir),
+        ])
+        assert result.exit_code == 0, result.output
+        raw = json.loads(
+            (domain_dir / "discovery" / "candidate-graph.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert {c["label"] for c in raw["concepts"]} == {
+            "Single", "FromArrayA", "FromArrayB", "Wrapped",
+        }
+
+    def test_source_b_unrecognised_shape_surfaces_friendly_error(
+        self, tmp_path: Path,
+    ):
+        """A JSON file that's neither a single governance object,
+        an array, nor a ``{"records": [...]}`` wrapper must surface
+        a clean exit-2 error — not an AttributeError traceback."""
+        bad = tmp_path / "bad.json"
+        bad.write_text(json.dumps("just a string"), encoding="utf-8")
+        domain_dir = tmp_path / "domain"
+        result = runner.invoke(app, [
+            "discover",
+            "--source-b", str(bad),
+            "--domain-dir", str(domain_dir),
+        ])
+        assert result.exit_code != 0
+        # The error message should reference the path and the
+        # accepted shapes so the user can self-diagnose.
+        assert "bad.json" in result.output
+        assert "Source B" in result.output
+
+    def test_source_b_array_with_non_object_entry_surfaces_friendly_error(
+        self, tmp_path: Path,
+    ):
+        """An array that mixes governance objects with non-object
+        entries (e.g. a stray string) must fail loudly with a path
+        and entry index, not crash inside the merge loop."""
+        bad = tmp_path / "mixed.json"
+        bad.write_text(
+            json.dumps([
+                {"element_name": "Valid"},
+                "not-an-object",
+            ]),
+            encoding="utf-8",
+        )
+        domain_dir = tmp_path / "domain"
+        result = runner.invoke(app, [
+            "discover",
+            "--source-b", str(bad),
+            "--domain-dir", str(domain_dir),
+        ])
+        assert result.exit_code != 0
+        assert "mixed.json" in result.output
+
+
 # ─── --profile flag: light normalisation only ──────────────────────────────
 
 

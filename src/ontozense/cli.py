@@ -2340,8 +2340,11 @@ def discover(
     source_b: list[Path] = typer.Option(
         None, "--source-b",
         help=(
-            "Path to a Source B governance JSON. Repeatable — records "
-            "lists are concatenated."
+            "Path to a Source B governance JSON. Repeatable. Accepts the "
+            "same shapes the governance extractor does: a single object "
+            "({'element_name': ...}), a top-level array of such objects "
+            "(the shape of docs/governance_example.json), or a "
+            "{'records': [...]} wrapper."
         ),
     ),
     source_c: list[Path] = typer.Option(
@@ -2512,15 +2515,94 @@ def _merge_source_a(paths: list[Path]) -> dict | None:
 
 
 def _merge_source_b(paths: list[Path]) -> dict | None:
-    """Concatenate ``records`` across one or more Source B governance
-    JSON files. Same None-vs-empty semantics as :func:`_merge_source_a`."""
+    """Concatenate the governance records across one or more Source B
+    JSON files, normalising each file's shape on the way in.
+
+    Accepts the three shapes a real Source B file can have:
+
+      - **Single object** (e.g. one-record governance file) —
+        ``{"element_name": "...", ...}`` → wrapped as a length-1
+        records list.
+      - **Top-level array** — the shape of
+        ``docs/governance_example.json`` and the array form the
+        governance extractor accepts → used directly.
+      - **Wrapped form** — ``{"records": [...]}`` — the internal
+        shape :func:`build_candidate_graph` consumes natively;
+        accepted for round-trip with any pipeline that emits it.
+
+    Anything else raises :class:`_SourceLoadError` so the CLI can
+    surface a clean exit-2 message instead of a traceback. Same
+    ``None``-vs-empty semantics as :func:`_merge_source_a`.
+    """
     if not paths:
         return None
     merged: dict = {"records": []}
     for path in paths:
         raw = _load_json(path)
-        merged["records"].extend(raw.get("records", []))
+        merged["records"].extend(_normalise_source_b_payload(raw, path))
     return merged
+
+
+def _normalise_source_b_payload(payload, path: Path) -> list:
+    """Map one raw Source B JSON payload to a list of record dicts.
+
+    See :func:`_merge_source_b` for the accepted input shapes.
+    Validates that array entries are objects so a mixed array
+    (``[{...}, "stray"]``) fails loudly with the offending index
+    rather than crashing inside the candidate-graph builder.
+    """
+    # Wrapped form: pass the records list through (still validate
+    # entries are dicts so a malformed wrapper doesn't crash later).
+    if isinstance(payload, dict) and isinstance(payload.get("records"), list):
+        _validate_record_entries(payload["records"], path, context="records")
+        return payload["records"]
+
+    # Single governance object: an object with an element_name field.
+    if isinstance(payload, dict) and isinstance(
+        payload.get("element_name"), str
+    ):
+        return [payload]
+
+    # Top-level array of governance objects.
+    if isinstance(payload, list):
+        _validate_record_entries(payload, path, context="array")
+        return payload
+
+    # Empty dict is ambiguous but harmless — no records, no error.
+    if isinstance(payload, dict) and not payload:
+        return []
+
+    # Anything else: the caller gave us a JSON shape we can't map
+    # to records. Surface a friendly error explaining what's
+    # accepted so they can self-diagnose.
+    type_name = type(payload).__name__
+    raise _SourceLoadError(
+        path,
+        f"Source B file shape not recognised (got top-level {type_name}). "
+        f"Accepted shapes: a single governance object "
+        f"{{'element_name': ...}}, an array of such objects "
+        f"(see docs/governance_example.json), or a "
+        f"{{'records': [...]}} wrapper.",
+    )
+
+
+def _validate_record_entries(
+    entries: list, path: Path, *, context: str,
+) -> None:
+    """Pin each Source B array / records entry to an object. A non-
+    object entry (string, number, null, nested list) is the
+    classic AttributeError-on-`.get()` trap; raising here surfaces
+    the entry index in the error message so the user can find the
+    bad row in their file."""
+    for idx, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise _SourceLoadError(
+                path,
+                f"Source B {context}[{idx}] is not an object "
+                f"(got {type(entry).__name__}). Every governance "
+                f"record must be a JSON object with at least an "
+                f"element_name field.",
+            )
 
 
 def _load_source_passthrough(paths: list[Path]) -> dict | None:
