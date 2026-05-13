@@ -2948,35 +2948,48 @@ def rebuild(
     console.print(
         f"[bold]Rebuild plan for profile[/] '[cyan]{loaded.profile_name}[/]':"
     )
-    console.print()
-    console.print(
+    print()
+    print(
         "Run the following commands in order to rebuild the fused "
         "dictionary using the reviewed profile:"
     )
-    console.print()
-    console.print(
-        f"  1. [cyan]ontozense extract-a[/] <docs> "
+    print()
+    # Command lines emitted via plain ``print`` so Rich's terminal-
+    # width wrapping never breaks a step across visual lines (which
+    # would also break copy-paste). Flags below match the exact
+    # signatures of the corresponding commands in this file —
+    # round-1 reviewer finding pinned ``ontozense fuse`` and
+    # ``ontozense report`` against their actual flag sets.
+    print(
+        f"  1. ontozense extract-a <docs> "
         f"--profile {profile} "
-        f"--json {domain_dir}/extract/source-a.json"
-    )
-    console.print(
-        f"  2. [cyan]ontozense fuse[/] <source-a.json> "
-        f"[<source-b.json>] [<source-c.json>] [<source-d.json>] "
-        f"--profile {profile} "
-        f"--output {domain_dir}/fused.json"
-    )
-    console.print(
-        f"  3. [cyan]ontozense validate[/] {domain_dir}/fused.json "
-        f"--profile {profile}"
-    )
-    console.print(
-        f"  4. [cyan]ontozense lint[/] {domain_dir}/fused.json"
-    )
-    console.print(
-        f"  5. [cyan]ontozense report[/] {domain_dir}/fused.json "
+        f"--json {domain_dir}/extract/source-a.json "
         f"--domain-dir {domain_dir}"
     )
-    console.print()
+    print(
+        f"  2. ontozense fuse "
+        f"--source-a {domain_dir}/extract/source-a.json "
+        f"[--source-b {domain_dir}/source-b.json] "
+        f"[--source-c {domain_dir}/source-c.json] "
+        f"[--source-d {domain_dir}/source-d.json] "
+        f"--output {domain_dir}/fused.json "
+        f"--domain-dir {domain_dir}"
+    )
+    print(
+        f"  3. ontozense validate {domain_dir}/fused.json "
+        f"--profile {profile} "
+        f"--domain-dir {domain_dir}"
+    )
+    print(
+        f"  4. ontozense lint {domain_dir}/fused.json "
+        f"--domain-dir {domain_dir}"
+    )
+    print(
+        f"  5. ontozense report {domain_dir}/fused.json "
+        f"--profile {profile} "
+        f"--markdown {domain_dir}/report.md"
+    )
+    print()
     console.print(
         "[yellow]Note:[/] direct orchestration of this chain is "
         "deferred to a follow-up task. Run the commands manually "

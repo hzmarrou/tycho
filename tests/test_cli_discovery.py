@@ -1281,6 +1281,97 @@ class TestRebuildStub:
         assert result.exit_code == 0, result.output
 
 
+class TestRebuildPlanCorrectness:
+    """Round-1 reviewer finding: the *printed plan* is the product
+    of the stub. If the plan tells the user to run a command with
+    a flag that command doesn't accept, the user hits a typer parse
+    error immediately. These tests pin the plan against the real
+    command signatures end-to-end.
+
+    Strong correctness pin: every ``--flag`` the plan mentions in a
+    given step must be accepted by the corresponding command (per
+    its ``--help`` output)."""
+
+    def _capture_plan(self, tmp_path: Path) -> str:
+        profile_dir = tmp_path / "profile"
+        _write_minimal_profile(profile_dir, {})
+        result = runner.invoke(app, [
+            "rebuild",
+            "--profile", str(profile_dir),
+            "--domain-dir", str(tmp_path / "domain"),
+        ])
+        assert result.exit_code == 0
+        return result.output
+
+    def test_fuse_step_uses_source_flags_not_positionals(
+        self, tmp_path: Path,
+    ):
+        """The exact round-1 bug: ``fuse`` uses ``--source-a/b/c/d``
+        flags, not positional source paths."""
+        plan = self._capture_plan(tmp_path)
+        fuse_lines = [l for l in plan.splitlines() if "ontozense fuse" in l]
+        assert fuse_lines, "plan does not mention `ontozense fuse`"
+        fuse_text = "\n".join(fuse_lines)
+        assert "--source-a" in fuse_text
+
+    def test_fuse_step_does_not_mention_profile_flag(
+        self, tmp_path: Path,
+    ):
+        """The other half of the round-1 fuse bug: ``fuse`` does not
+        accept ``--profile``."""
+        plan = self._capture_plan(tmp_path)
+        fuse_lines = [l for l in plan.splitlines() if "ontozense fuse" in l]
+        fuse_text = "\n".join(fuse_lines)
+        assert "--profile" not in fuse_text
+
+    def test_report_step_does_not_mention_domain_dir_flag(
+        self, tmp_path: Path,
+    ):
+        """``report`` doesn't have ``--domain-dir``; the previous
+        plan suggested it incorrectly."""
+        plan = self._capture_plan(tmp_path)
+        report_lines = [
+            l for l in plan.splitlines() if "ontozense report" in l
+        ]
+        assert report_lines, "plan does not mention `ontozense report`"
+        report_text = "\n".join(report_lines)
+        assert "--domain-dir" not in report_text
+
+    def test_every_plan_flag_is_accepted_by_its_command(
+        self, tmp_path: Path,
+    ):
+        """The strong end-to-end pin: scan every ``--flag`` token in
+        each plan step and verify it's accepted by the corresponding
+        command. This catches round-1-style bugs (flags that don't
+        exist on a command) and would catch any future drift if a
+        downstream command's argument list changes."""
+        import re
+
+        plan = self._capture_plan(tmp_path)
+
+        commands = ["extract-a", "fuse", "validate", "lint", "report"]
+        help_for: dict[str, str] = {}
+        for cmd in commands:
+            help_for[cmd] = runner.invoke(app, [cmd, "--help"]).output
+
+        flag_pattern = re.compile(r"--[a-z][a-z\-]+")
+        for line in plan.splitlines():
+            for cmd in commands:
+                if f"ontozense {cmd}" not in line:
+                    continue
+                # Found a plan step. Strip the `[` and `]` decorations
+                # users use to mark optional flags so we can scan flags
+                # cleanly.
+                cleaned = line.replace("[", " ").replace("]", " ")
+                for flag in flag_pattern.findall(cleaned):
+                    assert flag in help_for[cmd], (
+                        f"Plan suggests `{cmd} {flag}`, but `{cmd}` "
+                        f"does not accept that flag "
+                        f"(per `ontozense {cmd} --help`)"
+                    )
+                break  # one command per line
+
+
 class TestInduceProfileConsoleSummary:
     """A short summary printed after the run gives the user
     immediate feedback without having to ``cat`` the report."""
