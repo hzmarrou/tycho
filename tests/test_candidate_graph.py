@@ -192,6 +192,110 @@ class TestIdFirstMergeContract:
         assert "cand_id_rule_default_aaaaaa" in cand_ids
         assert "cand_id_concept_default_bbbbbb" in cand_ids
 
+    def test_name_only_contribution_after_ambiguity_does_not_silently_merge(
+        self,
+    ):
+        """Round-1 reviewer finding: after a normalised label is
+        split into two ambiguous candidates (different ids), a later
+        name-only contribution must NOT be silently attached to
+        either — neither is guaranteed to be the right destination.
+
+        Previously the index's ``by_name[norm]`` still pointed at
+        the first candidate, so name-only contributions and
+        relationship endpoints leaked into it. The fix routes such
+        contributions to a separate ambiguous-bucket candidate."""
+        source_a = {
+            "concepts": [
+                {"name": "Default", "id": "L1",
+                 "entity_type": "Concept", "definition": "Loan default."},
+                {"name": "Default", "id": "L2",
+                 "entity_type": "Concept", "definition": "Credit default."},
+            ],
+            "relationships": [],
+        }
+        source_b = {
+            "records": [
+                {"element_name": "default",
+                 "definition": "Governance note — unclear destination."},
+            ],
+        }
+        graph = build_candidate_graph(source_a=source_a, source_b=source_b)
+
+        # The two ambiguous id-bearing candidates must NOT have
+        # absorbed Source B's evidence — source_presence['B'] must
+        # stay False on both.
+        l1 = next(
+            c for c in graph.concepts
+            if c.candidate_id == "cand_id_L1"
+        )
+        l2 = next(
+            c for c in graph.concepts
+            if c.candidate_id == "cand_id_L2"
+        )
+        assert l1.source_presence["B"] is False, (
+            "L1 silently absorbed an ambiguous name-only contribution"
+        )
+        assert l2.source_presence["B"] is False, (
+            "L2 silently absorbed an ambiguous name-only contribution"
+        )
+
+        # The name-only contribution lands somewhere — pin that it
+        # surfaces in *some* candidate (typically a separate
+        # ambiguous-bucket candidate), not lost.
+        b_bearing = [c for c in graph.concepts if c.source_presence["B"]]
+        assert len(b_bearing) >= 1, (
+            "Name-only contribution for an ambiguous norm was lost"
+        )
+
+    def test_relationship_endpoint_on_ambiguous_label_drops_edge(self):
+        """A relationship endpoint that normalises to an ambiguous
+        norm cannot be safely resolved — the edge must be dropped,
+        matching the architecture's 'unresolved endpoints are
+        skipped' rule. Previously the endpoint silently resolved to
+        the first candidate (whichever was created earlier)."""
+        source_a = {
+            "concepts": [
+                {"name": "Default", "id": "L1",
+                 "entity_type": "Concept", "definition": "Loan default."},
+                {"name": "Default", "id": "L2",
+                 "entity_type": "Concept", "definition": "Credit default."},
+                {"name": "Borrower",
+                 "entity_type": "Concept", "definition": "A borrower."},
+            ],
+            "relationships": [
+                {"subject": "Borrower", "predicate": "Has",
+                 "object": "Default"},
+            ],
+        }
+        graph = build_candidate_graph(source_a=source_a)
+        # The edge must not have silently resolved into either
+        # ambiguous candidate.
+        assert len(graph.relationships) == 0
+
+    def test_unambiguous_relationship_endpoint_still_resolves(self):
+        """Negative pin: only ambiguous endpoints should be dropped.
+        An endpoint that normalises to a non-ambiguous norm in the
+        same graph must still resolve cleanly."""
+        source_a = {
+            "concepts": [
+                {"name": "Default", "id": "L1",
+                 "entity_type": "Concept", "definition": "Loan default."},
+                {"name": "Default", "id": "L2",
+                 "entity_type": "Concept", "definition": "Credit default."},
+                {"name": "Borrower",
+                 "entity_type": "Concept", "definition": "A borrower."},
+                {"name": "Loan",
+                 "entity_type": "Concept", "definition": "A loan."},
+            ],
+            "relationships": [
+                # Both endpoints unambiguous — must resolve cleanly.
+                {"subject": "Borrower", "predicate": "Holds",
+                 "object": "Loan"},
+            ],
+        }
+        graph = build_candidate_graph(source_a=source_a)
+        assert len(graph.relationships) == 1
+
     def test_existing_has_no_id_incoming_has_id_promotes(self):
         """When an existing candidate (from an earlier source) lacks
         an id and a later source contributes the same normalised

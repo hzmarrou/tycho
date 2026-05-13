@@ -104,19 +104,29 @@ class _CandidateIndex:
     Keeps three parallel maps so merge lookup is O(1):
 
       - ``by_key`` — the canonical store, keyed by an opaque internal
-        key (``"id:<id>"`` or ``"name:<norm>"`` or ``"name:<norm>#id:<id>"``
-        for collision survivors).
+        key (``"id:<id>"`` or ``"name:<norm>"`` or
+        ``"name:<norm>#id:<id>"`` for collision survivors, or
+        ``"name:<norm>#ambiguous"`` for the bucket that holds
+        name-only contributions whose destination is undetermined).
       - ``by_id`` — id → key, used for the first-priority lookup.
       - ``by_name`` — normalised label → key, used for the
         second-priority lookup.
+      - ``ambiguous_norms`` — the set of normalised labels for which
+        two or more id-bearing candidates have been seen with
+        distinct ids. Name-only contributions and relationship
+        endpoints that hit one of these norms are not safely
+        attributable to a single candidate, so they route through
+        the dedicated ambiguous-bucket key (for upserts) or resolve
+        to ``None`` (for relationship endpoints).
 
-    All three are kept consistent on each mutation.
+    All four are kept consistent on each mutation.
     """
 
     def __init__(self) -> None:
         self.by_key: dict[str, CandidateConcept] = {}
         self.by_id: dict[str, str] = {}
         self.by_name: dict[str, str] = {}
+        self.ambiguous_norms: set[str] = set()
 
     def values(self) -> list[CandidateConcept]:
         return list(self.by_key.values())
@@ -333,6 +343,34 @@ def _upsert(
         )
         return
 
+    # 1b. Ambiguity guard. If this norm has already been split into
+    # multiple id-bearing candidates, a name-only contribution can't
+    # be safely attached to either of them — neither is guaranteed
+    # to be the right destination. Route to a dedicated
+    # ambiguous-bucket candidate so the contribution is recorded
+    # but not silently misattributed.
+    if not eid and norm in index.ambiguous_norms:
+        ambig_key = f"name:{norm}#ambiguous"
+        if ambig_key not in index.by_key:
+            bucket = _new_candidate(
+                norm=norm, label=label, definition=definition,
+                raw_type=raw_type, source_type=source_type,
+                eid="", evidence=evidence,
+                canonical_label=canonical_label,
+            )
+            # Distinguish the bucket from regular cand_<norm> ids so
+            # downstream consumers can spot it.
+            index.by_key[ambig_key] = replace(
+                bucket,
+                candidate_id=f"cand_ambig_{norm.replace(' ', '_')}",
+            )
+        else:
+            _merge_into(
+                index, ambig_key, evidence, label, definition,
+                source_type, raw_type, canonical_label=canonical_label,
+            )
+        return
+
     # 2. Normalised-label hit (already alias-expanded) — disambiguation cases:
     if norm in index.by_name:
         existing_key = index.by_name[norm]
@@ -340,8 +378,10 @@ def _upsert(
         existing_id = _candidate_id_of(existing)
         if eid and existing_id and existing_id != eid:
             # Case 4: ambiguity — same name, different ids. Keep
-            # them separate via a composite key. Future scoring /
-            # human review can surface the ambiguity.
+            # them separate via a composite key, and mark the norm
+            # as ambiguous so subsequent name-only contributions and
+            # relationship endpoints can't silently leak into one
+            # of the splits.
             collision_key = f"name:{norm}#id:{eid}"
             if collision_key not in index.by_key:
                 index.by_key[collision_key] = _new_candidate(
@@ -355,6 +395,7 @@ def _upsert(
                     canonical_label=canonical_label,
                 )
                 index.by_id[eid] = collision_key
+                index.ambiguous_norms.add(norm)
             else:
                 _merge_into(
                     index, collision_key, evidence, label, definition,
@@ -415,11 +456,10 @@ def _new_candidate(
     """Construct a fresh :class:`CandidateConcept` for a never-seen-before
     normalised label.
 
-    ``label`` is the original surface form (preserved on the candidate's
-    ``label`` field). ``canonical_label`` is the alias-resolved form —
-    when it differs from the surface form, both are tracked in the
-    initial ``aliases`` list so future merges can find the candidate
-    via either spelling.
+    ``label`` is the original surface form. ``canonical_label`` is
+    the alias-resolved form — when it differs from the surface form,
+    both are tracked in the initial ``aliases`` list so subsequent
+    merges find the candidate via either spelling.
     """
     candidate_id = (
         f"cand_id_{eid}"
@@ -555,6 +595,13 @@ def _resolve_endpoint_to_candidate_id(
     canonical_label = _resolve_alias(endpoint_label, alias_map or {})
     norm = normalize_label(canonical_label)
     if not norm:
+        return None
+    # Ambiguity guard: if the norm has multiple id-bearing
+    # candidates with distinct ids, the endpoint can't be safely
+    # attributed to any single one. Treat as unresolvable so the
+    # caller drops the relationship (same path as "no candidate
+    # exists at all").
+    if norm in index.ambiguous_norms:
         return None
     key = index.by_name.get(norm)
     if key is None:
