@@ -134,6 +134,13 @@ class InductionReport:
     suggested predicates, suggested required fields per type, and
     free-form ``review_notes`` for things the induction stage
     surfaces for the reviewer but can't decide automatically.
+
+    ``scoring_thresholds`` (Phase 1 contract amendment added during
+    Task 4) records which classification cut-offs the induction
+    used — paired with ``scoring_weights`` it lets a reviewer
+    reproduce the band assignments exactly. Defaulted to an empty
+    dict so legacy reports (emitted before this field existed) load
+    cleanly via :meth:`from_dict`.
     """
     domain_name: str
     generated_at: str
@@ -147,6 +154,7 @@ class InductionReport:
     predicate_suggestions: list[dict[str, Any]]
     required_field_suggestions: dict[str, list[str]]
     review_notes: list[str]
+    scoring_thresholds: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

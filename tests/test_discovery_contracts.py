@@ -158,3 +158,78 @@ class TestInductionReport:
             review_notes=["Review aliases before production use."],
         )
         assert InductionReport.from_dict(report.to_dict()) == report
+
+    def test_scoring_thresholds_defaults_to_empty_dict(self):
+        # Backward-compatibility pin: callers that construct an
+        # InductionReport without explicitly setting scoring_thresholds
+        # (e.g. existing tests, existing serialised reports) must
+        # still work — the field gets a default-factory empty dict.
+        report = InductionReport(
+            domain_name="demo",
+            generated_at="2026-05-13T10:00:00",
+            candidate_count=0,
+            selected_core_count=0,
+            selected_supporting_count=0,
+            rejected_count=0,
+            scoring_weights={},
+            top_candidates=[],
+            rejected_examples=[],
+            predicate_suggestions=[],
+            required_field_suggestions={},
+            review_notes=[],
+        )
+        assert report.scoring_thresholds == {}
+
+    def test_round_trip_with_scoring_thresholds(self):
+        report = InductionReport(
+            domain_name="demo",
+            generated_at="2026-05-13T10:00:00",
+            candidate_count=5,
+            selected_core_count=2,
+            selected_supporting_count=1,
+            rejected_count=2,
+            scoring_weights={
+                "authoritative_frequency": 0.25,
+                "governance_presence": 0.20,
+            },
+            top_candidates=[],
+            rejected_examples=[],
+            predicate_suggestions=[],
+            required_field_suggestions={},
+            review_notes=[],
+            scoring_thresholds={
+                "core_business": 0.70,
+                "supporting_technical": 0.40,
+            },
+        )
+        raw = report.to_dict()
+        # Serialised JSON must carry both maps explicitly so a
+        # reviewer can see which thresholds the induction used.
+        assert raw["scoring_thresholds"] == {
+            "core_business": 0.70,
+            "supporting_technical": 0.40,
+        }
+        assert InductionReport.from_dict(raw) == report
+
+    def test_from_dict_handles_legacy_json_without_thresholds_key(self):
+        # An InductionReport JSON file emitted *before* the
+        # scoring_thresholds field was added must still load. The
+        # dataclass's default_factory fills in the missing key as an
+        # empty dict.
+        legacy = {
+            "domain_name": "demo",
+            "generated_at": "2026-05-13T10:00:00",
+            "candidate_count": 0,
+            "selected_core_count": 0,
+            "selected_supporting_count": 0,
+            "rejected_count": 0,
+            "scoring_weights": {},
+            "top_candidates": [],
+            "rejected_examples": [],
+            "predicate_suggestions": [],
+            "required_field_suggestions": {},
+            "review_notes": [],
+            # scoring_thresholds intentionally absent
+        }
+        loaded = InductionReport.from_dict(legacy)
+        assert loaded.scoring_thresholds == {}
