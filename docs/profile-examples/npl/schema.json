@@ -1,0 +1,196 @@
+{
+  "profile_name": "npl",
+  "profile_version": "1.0.0",
+  "description": "Non-Performing Loan (NPL) profile derived from the Open Risk Manual NPLO ontology (https://www.openriskmanual.org/ns/nplo.owl). 7 top-level entity types with 12 subtypes covering counterparties, loans, collateral, forbearance, enforcement, and external collection. Aligns with the EBA NPL Data Templates. Copy this folder to your domain workspace and edit to taste.",
+
+  "entity_types": {
+    "Counterparty": {
+      "required": [],
+      "optional": ["identifier", "country", "jurisdiction"],
+      "subtypes": [
+        "Borrower",
+        "CorporateBorrower",
+        "IndividualBorrower",
+        "CollectionAgent",
+        "InsolvencyPractitioner",
+        "InsuranceProvider",
+        "RatingAgency",
+        "Receiver"
+      ]
+    },
+    "CounterpartyGroup": {
+      "required": [],
+      "optional": ["group_identifier", "group_name"]
+    },
+    "Loan": {
+      "required": [],
+      "optional": [
+        "loan_identifier",
+        "loan_asset_class",
+        "origination_date",
+        "exposure_amount",
+        "dpd",
+        "ifrs_stage",
+        "is_non_performing"
+      ],
+      "subtypes": ["CorporateLoan", "PersonalLoan"]
+    },
+    "Collateral": {
+      "required": [],
+      "optional": [
+        "collateral_identifier",
+        "collateral_type",
+        "valuation_amount",
+        "valuation_date"
+      ],
+      "subtypes": ["PropertyCollateral"]
+    },
+    "Forbearance": {
+      "required": [],
+      "optional": ["forbearance_type", "start_date", "end_date"]
+    },
+    "Enforcement": {
+      "required": [],
+      "optional": ["enforcement_type", "start_date", "outcome"]
+    },
+    "ExternalCollection": {
+      "required": [],
+      "optional": ["collection_type", "start_date", "status"]
+    }
+  },
+
+  "predicates": {
+    "HasBorrower": {
+      "subject_types": ["Loan"],
+      "object_types": ["Borrower"],
+      "cardinality": "N:1"
+    },
+    "HasBorrowedLoan": {
+      "subject_types": ["Borrower"],
+      "object_types": ["Loan"],
+      "cardinality": "1:N"
+    },
+    "CpIsPartOfGroup": {
+      "subject_types": ["Borrower"],
+      "object_types": ["CounterpartyGroup"],
+      "cardinality": "N:1"
+    },
+    "GroupIncludesBorrower": {
+      "subject_types": ["CounterpartyGroup"],
+      "object_types": ["Borrower"],
+      "cardinality": "1:N"
+    },
+    "CollateralConcernsBorrower": {
+      "subject_types": ["Collateral"],
+      "object_types": ["Borrower"],
+      "cardinality": "N:N"
+    },
+    "CollateralConcernsLoan": {
+      "subject_types": ["Collateral"],
+      "object_types": ["Loan"],
+      "cardinality": "N:N"
+    },
+    "CollectionConcernsBorrower": {
+      "subject_types": ["ExternalCollection"],
+      "object_types": ["Borrower"],
+      "cardinality": "N:N"
+    },
+    "CollectionConcernsLoan": {
+      "subject_types": ["ExternalCollection"],
+      "object_types": ["Loan"],
+      "cardinality": "N:N"
+    },
+    "CollectionIsUndertakenBy": {
+      "subject_types": ["ExternalCollection"],
+      "object_types": ["CollectionAgent"],
+      "cardinality": "N:1"
+    },
+    "EnforcementConcernsBorrower": {
+      "subject_types": ["Enforcement"],
+      "object_types": ["Borrower"],
+      "cardinality": "N:N"
+    },
+    "EnforcementConcernsLoan": {
+      "subject_types": ["Enforcement"],
+      "object_types": ["Loan"],
+      "cardinality": "N:N"
+    },
+    "ForbearanceConcernsBorrower": {
+      "subject_types": ["Forbearance"],
+      "object_types": ["Borrower"],
+      "cardinality": "N:N"
+    },
+    "ForbearanceConcernsLoan": {
+      "subject_types": ["Forbearance"],
+      "object_types": ["Loan"],
+      "cardinality": "N:N"
+    }
+  },
+
+  "id_format": {
+    "strategy": "type_label_hash",
+    "hash_length": 6
+  },
+
+  "alias_map": {
+    "obligor": "Borrower",
+    "debtor": "Borrower",
+    "loan customer": "Borrower",
+    "corporate counterparty": "CorporateBorrower",
+    "retail borrower": "IndividualBorrower",
+    "retail customer": "IndividualBorrower",
+    "private individual": "IndividualBorrower",
+    "exposure": "Loan",
+    "credit facility": "Loan",
+    "credit exposure": "Loan",
+    "security": "Collateral",
+    "pledge": "Collateral",
+    "real estate collateral": "PropertyCollateral",
+    "mortgage collateral": "PropertyCollateral",
+    "debt collection agency": "CollectionAgent",
+    "external servicer": "CollectionAgent",
+    "rating agency": "RatingAgency",
+    "insurance company": "InsuranceProvider",
+    "insolvency administrator": "InsolvencyPractitioner",
+    "court-appointed receiver": "Receiver",
+    "client group": "CounterpartyGroup",
+    "related party group": "CounterpartyGroup",
+    "forbearance measure": "Forbearance",
+    "loan modification": "Forbearance",
+    "restructuring": "Forbearance",
+    "enforcement action": "Enforcement",
+    "recovery action": "Enforcement"
+  },
+
+  "canonical_verbs": {
+    "has borrower": "HasBorrower",
+    "is borrowed by": "HasBorrower",
+    "is owed by": "HasBorrower",
+    "borrowed by": "HasBorrower",
+    "has borrowed": "HasBorrowedLoan",
+    "holds loan": "HasBorrowedLoan",
+    "is the borrower of": "HasBorrowedLoan",
+    "belongs to group": "CpIsPartOfGroup",
+    "is part of group": "CpIsPartOfGroup",
+    "is member of": "CpIsPartOfGroup",
+    "includes": "GroupIncludesBorrower",
+    "group contains": "GroupIncludesBorrower",
+    "secures loan": "CollateralConcernsLoan",
+    "is collateral for": "CollateralConcernsLoan",
+    "covers loan": "CollateralConcernsLoan",
+    "secures borrower": "CollateralConcernsBorrower",
+    "is collateral of": "CollateralConcernsBorrower",
+    "undertaken by": "CollectionIsUndertakenBy",
+    "is undertaken by": "CollectionIsUndertakenBy",
+    "performed by": "CollectionIsUndertakenBy",
+    "collects from": "CollectionConcernsBorrower",
+    "collection on loan": "CollectionConcernsLoan",
+    "enforces on": "EnforcementConcernsBorrower",
+    "enforcement against": "EnforcementConcernsBorrower",
+    "enforcement on loan": "EnforcementConcernsLoan",
+    "forbearance for": "ForbearanceConcernsBorrower",
+    "applies forbearance to": "ForbearanceConcernsBorrower",
+    "modification of": "ForbearanceConcernsLoan",
+    "restructures loan": "ForbearanceConcernsLoan"
+  }
+}

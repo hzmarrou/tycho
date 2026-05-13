@@ -1,0 +1,43 @@
+{
+  "_comment": "Sidecar alias map for NPL deployments. Overlays the alias_map in schema.json with deployment-specific synonyms (your organisation's preferred labels) without editing the shared schema. Keys are case-insensitive.",
+
+  "npl": "Loan",
+  "npe": "Loan",
+  "non-performing exposure": "Loan",
+  "non-performing loan": "Loan",
+  "impaired loan": "Loan",
+  "stage 3 exposure": "Loan",
+
+  "performing loan": "Loan",
+  "performing exposure": "Loan",
+  "stage 1 exposure": "Loan",
+  "stage 2 exposure": "Loan",
+
+  "corporate customer": "CorporateBorrower",
+  "sme borrower": "CorporateBorrower",
+  "smes": "CorporateBorrower",
+  "small business borrower": "CorporateBorrower",
+
+  "retail loan": "PersonalLoan",
+  "consumer loan": "PersonalLoan",
+  "personal credit": "PersonalLoan",
+
+  "mortgage": "PropertyCollateral",
+  "real-estate collateral": "PropertyCollateral",
+  "residential property": "PropertyCollateral",
+  "commercial real estate": "PropertyCollateral",
+
+  "loan restructuring": "Forbearance",
+  "repayment holiday": "Forbearance",
+  "term extension": "Forbearance",
+  "rate reduction": "Forbearance",
+
+  "foreclosure": "Enforcement",
+  "lien execution": "Enforcement",
+  "judicial recovery": "Enforcement",
+  "out-of-court enforcement": "Enforcement",
+
+  "debt recovery": "ExternalCollection",
+  "third-party collection": "ExternalCollection",
+  "external servicing": "ExternalCollection"
+}
