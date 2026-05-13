@@ -26,6 +26,12 @@ spreadsheet.
                                                               (Karpathy feedback loop)
 ```
 
+*The diagram above shows the post-profile pipeline. For the
+**discovery workflow** (Path 1) that produces a draft profile
+from the same four sources via `discover` → `induce-profile` →
+`rebuild`, see [Discovery workflow](#discovery-workflow-no-profile-yet)
+below.*
+
 Each source contributes only the fields it can defensibly produce.
 Fusion combines them with per-field provenance, conflict resolution,
 and (in profile mode) cross-source ID alignment so the same canonical
