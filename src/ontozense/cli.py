@@ -2882,5 +2882,109 @@ def _print_induction_summary(scored, out_path: Path) -> None:
             )
 
 
+# ─── rebuild (profile induction workflow — stub orchestrator) ──────────────
+
+
+@app.command(name="rebuild")
+def rebuild(
+    profile: Path = typer.Option(
+        ..., "--profile",
+        help=(
+            "Directory containing the (reviewed and edited) induced "
+            "profile. The profile is loaded and validated; the printed "
+            "rebuild plan is parameterised by its profile_name."
+        ),
+    ),
+    domain_dir: Path = typer.Option(
+        ..., "--domain-dir",
+        help=(
+            "Per-domain workspace directory. Used in the printed plan as "
+            "the conventional location for intermediate / output files."
+        ),
+    ),
+    source_a: list[Path] = typer.Option(
+        None, "--source-a",
+        help=(
+            "Source A extraction inputs. Accepted for forward-compat "
+            "with the eventual orchestrator; informational only in the "
+            "v1 stub."
+        ),
+    ),
+    source_b: Path = typer.Option(
+        None, "--source-b",
+        help="Source B governance JSON. Same forward-compat note as --source-a.",
+    ),
+    source_c: Path = typer.Option(
+        None, "--source-c",
+        help="Source C schema JSON. Same forward-compat note as --source-a.",
+    ),
+    source_d: Path = typer.Option(
+        None, "--source-d",
+        help="Source D code / rules JSON. Same forward-compat note as --source-a.",
+    ),
+) -> None:
+    """Print the rebuild plan for an induced / reviewed profile.
+
+    Per the implementation plan, this command is a stub in v1: it
+    loads and validates the supplied profile, then prints the chain
+    of existing pipeline commands the user should run by hand to
+    rebuild the fused dictionary with the reviewed profile.
+
+    Direct orchestration of the chain (running ``extract-a``,
+    ``fuse``, ``validate``, ``lint``, ``report`` in sequence
+    in-process) is deferred to a follow-up task once the discovery
+    flow is stable. The flag surface here matches what the
+    orchestrator will eventually consume, so the CLI contract is
+    stable across that change.
+    """
+    from .core.profile import ProfileError, load_profile
+
+    try:
+        loaded = load_profile(profile)
+    except ProfileError as err:
+        console.print(f"[red]Failed to load --profile {profile}:[/] {err}")
+        raise typer.Exit(code=2)
+
+    console.print(
+        f"[bold]Rebuild plan for profile[/] '[cyan]{loaded.profile_name}[/]':"
+    )
+    console.print()
+    console.print(
+        "Run the following commands in order to rebuild the fused "
+        "dictionary using the reviewed profile:"
+    )
+    console.print()
+    console.print(
+        f"  1. [cyan]ontozense extract-a[/] <docs> "
+        f"--profile {profile} "
+        f"--json {domain_dir}/extract/source-a.json"
+    )
+    console.print(
+        f"  2. [cyan]ontozense fuse[/] <source-a.json> "
+        f"[<source-b.json>] [<source-c.json>] [<source-d.json>] "
+        f"--profile {profile} "
+        f"--output {domain_dir}/fused.json"
+    )
+    console.print(
+        f"  3. [cyan]ontozense validate[/] {domain_dir}/fused.json "
+        f"--profile {profile}"
+    )
+    console.print(
+        f"  4. [cyan]ontozense lint[/] {domain_dir}/fused.json"
+    )
+    console.print(
+        f"  5. [cyan]ontozense report[/] {domain_dir}/fused.json "
+        f"--domain-dir {domain_dir}"
+    )
+    console.print()
+    console.print(
+        "[yellow]Note:[/] direct orchestration of this chain is "
+        "deferred to a follow-up task. Run the commands manually "
+        "for now and review the output between steps. The "
+        "--source-a/-b/-c/-d flags are accepted for forward-compat "
+        "but are informational only in this stub."
+    )
+
+
 if __name__ == "__main__":
     app()

@@ -1115,6 +1115,171 @@ class TestInduceProfileErrors:
         assert result.exit_code != 0
         assert "candidate-graph.json" in result.output
 
+    def test_concepts_field_not_a_list_fails_cleanly(
+        self, tmp_path: Path,
+    ):
+        """Pin the up-front shape guard for ``concepts``. The
+        Task 6 round-2 reviewer noted this guard was added but
+        not exercised by a test; this commit closes the residual
+        pin so a future regression that loosens the guard is
+        caught here."""
+        graph = tmp_path / "candidate-graph.json"
+        graph.write_text(
+            json.dumps({
+                "concepts": "not-a-list",  # top-level shape error
+                "relationships": [],
+            }),
+            encoding="utf-8",
+        )
+        out_dir = tmp_path / "induced"
+        result = runner.invoke(app, [
+            "induce-profile", str(graph),
+            "--output-dir", str(out_dir),
+            "--domain-name", "demo",
+        ])
+        assert result.exit_code != 0
+        assert "candidate-graph.json" in result.output
+        assert "concepts" in result.output.lower()
+
+
+# ─── rebuild (Task 7 — stub orchestrator per the plan) ─────────────────────
+
+
+class TestRebuildStub:
+    """Per the implementation plan, ``rebuild`` is a stub in v1:
+    it loads (and validates) the supplied profile, then prints
+    the rebuild plan — the chain of existing commands the user
+    should run manually to rebuild the fused dictionary with the
+    reviewed profile. Direct orchestration of that chain is
+    deferred to a follow-up task once the discovery flow is
+    stable."""
+
+    def test_invalid_profile_dir_exits_nonzero_with_schema_message(
+        self, tmp_path: Path,
+    ):
+        """Plan's canonical Task 7 test: an empty profile dir
+        (no schema.json) must fail loudly, surfacing the missing-
+        schema message so the user knows what to fix."""
+        empty_profile = tmp_path / "profile"
+        empty_profile.mkdir()
+        result = runner.invoke(app, [
+            "rebuild",
+            "--profile", str(empty_profile),
+            "--domain-dir", str(tmp_path / "domain"),
+        ])
+        assert result.exit_code != 0
+        assert (
+            "schema.json" in result.output
+            or "schema" in result.output.lower()
+        )
+
+    def test_valid_profile_exits_zero_and_prints_plan(
+        self, tmp_path: Path,
+    ):
+        profile_dir = tmp_path / "profile"
+        _write_minimal_profile(profile_dir, {})
+        domain_dir = tmp_path / "domain"
+        result = runner.invoke(app, [
+            "rebuild",
+            "--profile", str(profile_dir),
+            "--domain-dir", str(domain_dir),
+        ])
+        assert result.exit_code == 0, result.output
+
+    def test_plan_names_each_existing_pipeline_command(
+        self, tmp_path: Path,
+    ):
+        """The rebuild plan must reference every existing pipeline
+        step the user is meant to run by hand: extract-a, fuse,
+        validate, lint, report. If a future commit drops one of
+        these from the printed plan, the user won't know to run
+        it."""
+        profile_dir = tmp_path / "profile"
+        _write_minimal_profile(profile_dir, {})
+        result = runner.invoke(app, [
+            "rebuild",
+            "--profile", str(profile_dir),
+            "--domain-dir", str(tmp_path / "domain"),
+        ])
+        assert result.exit_code == 0
+        for step in ("extract-a", "fuse", "validate", "lint", "report"):
+            assert step in result.output, (
+                f"rebuild plan does not mention {step!r}"
+            )
+
+    def test_plan_mentions_loaded_profile_name(self, tmp_path: Path):
+        """Surfacing the loaded profile name gives the user
+        immediate confirmation that ``--profile`` resolved to what
+        they expected (vs an old / wrong directory)."""
+        profile_dir = tmp_path / "profile"
+        _write_minimal_profile(profile_dir, {})
+        # _write_minimal_profile writes ``"profile_name": "test"``.
+        result = runner.invoke(app, [
+            "rebuild",
+            "--profile", str(profile_dir),
+            "--domain-dir", str(tmp_path / "domain"),
+        ])
+        assert result.exit_code == 0
+        assert "test" in result.output
+
+    def test_plan_flags_orchestration_as_deferred(
+        self, tmp_path: Path,
+    ):
+        """The plan body explicitly defers direct orchestration to
+        a follow-up task. The CLI surface must make that clear so
+        a user doesn't expect the command to actually run the
+        chain."""
+        profile_dir = tmp_path / "profile"
+        _write_minimal_profile(profile_dir, {})
+        result = runner.invoke(app, [
+            "rebuild",
+            "--profile", str(profile_dir),
+            "--domain-dir", str(tmp_path / "domain"),
+        ])
+        out = result.output.lower()
+        # Either phrasing is acceptable — the contract is that
+        # *something* signals "manual chain, not auto-orchestrated".
+        assert (
+            "deferred" in out
+            or "manual" in out
+            or "follow-up" in out
+            or "stub" in out
+        )
+
+    def test_nonexistent_profile_dir_surfaces_friendly_error(
+        self, tmp_path: Path,
+    ):
+        no_such = tmp_path / "no-such-profile"
+        result = runner.invoke(app, [
+            "rebuild",
+            "--profile", str(no_such),
+            "--domain-dir", str(tmp_path / "domain"),
+        ])
+        assert result.exit_code != 0
+        # The error must reference the bad path so the user can
+        # self-diagnose a typo.
+        assert "no-such-profile" in result.output
+
+    def test_source_flags_accepted_without_error(self, tmp_path: Path):
+        """Forward-compat: --source-a/b/c/d are in rebuild's
+        signature so the eventual orchestrator can consume them.
+        In the stub they're informational; they must at least not
+        cause a parse error."""
+        profile_dir = tmp_path / "profile"
+        _write_minimal_profile(profile_dir, {})
+        # Tee touch files so typer's Path-existence checks don't
+        # complain (rebuild doesn't validate file existence in
+        # stub mode, but typer's parser does for Path arguments).
+        a = tmp_path / "a.json"
+        a.write_text("{}", encoding="utf-8")
+        result = runner.invoke(app, [
+            "rebuild",
+            "--profile", str(profile_dir),
+            "--domain-dir", str(tmp_path / "domain"),
+            "--source-a", str(a),
+        ])
+        assert result.exit_code == 0, result.output
+
 
 class TestInduceProfileConsoleSummary:
     """A short summary printed after the run gives the user
