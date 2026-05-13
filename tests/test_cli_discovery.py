@@ -1372,6 +1372,147 @@ class TestRebuildPlanCorrectness:
                 break  # one command per line
 
 
+# ─── End-to-end workflow (Task 8) ──────────────────────────────────────────
+
+
+class TestDiscoveryWorkflowEndToEnd:
+    """Pin the full discovery workflow as a single user journey:
+    ``discover`` → ``induce-profile`` → ``load_profile``. Each
+    command was tested in isolation in Tasks 5/6/7; these tests
+    verify they actually wire together without contract drift at
+    the boundaries (candidate-graph.json shape, profile directory
+    shape, etc.)."""
+
+    def test_discover_then_induce_profile_round_trip(self, tmp_path: Path):
+        """Plan's canonical Task 8 test: ``discover`` writes a
+        candidate-graph.json, ``induce-profile`` reads it and
+        writes a draft profile directory. Both exit 0 and the
+        emitted ``schema.json`` exists."""
+        source_a = tmp_path / "source-a.json"
+        _write_source_a(source_a, [
+            {"name": "Customer", "definition": "A client."},
+        ])
+        domain_dir = tmp_path / "domain"
+
+        discover_result = runner.invoke(app, [
+            "discover",
+            "--source-a", str(source_a),
+            "--domain-dir", str(domain_dir),
+        ])
+        assert discover_result.exit_code == 0, discover_result.output
+
+        induce_result = runner.invoke(app, [
+            "induce-profile",
+            str(domain_dir / "discovery" / "candidate-graph.json"),
+            "--output-dir", str(domain_dir / "induced-profile"),
+            "--domain-name", "demo",
+        ])
+        assert induce_result.exit_code == 0, induce_result.output
+        assert (domain_dir / "induced-profile" / "schema.json").exists()
+
+    def test_full_chain_discover_induce_load_profile(
+        self, tmp_path: Path,
+    ):
+        """The architecture's end-to-end loop: the profile emitted
+        by ``induce-profile`` (fed from ``discover``'s output) must
+        round-trip through ``load_profile`` cleanly. This is AC1
+        for the whole workflow, not just the writer side."""
+        from ontozense.core.profile import load_profile
+
+        # Multi-source input (A + B) so the candidate graph
+        # exercises both ingestion paths.
+        source_a = tmp_path / "source-a.json"
+        source_b = tmp_path / "source-b.json"
+        _write_source_a(source_a, [
+            {"name": "Customer", "definition": "A client.",
+             "provenance": {"source_document": "docs/customer.md"}},
+            {"name": "Address", "definition": "A location."},
+        ])
+        _write_source_b(source_b, [
+            {"element_name": "customer", "definition": "Governed."},
+        ])
+
+        domain_dir = tmp_path / "domain"
+        # Step 1: discover.
+        runner.invoke(app, [
+            "discover",
+            "--source-a", str(source_a),
+            "--source-b", str(source_b),
+            "--domain-dir", str(domain_dir),
+        ])
+        assert (domain_dir / "discovery" / "candidate-graph.json").exists()
+
+        # Step 2: induce-profile.
+        induced_dir = domain_dir / "induced-profile"
+        runner.invoke(app, [
+            "induce-profile",
+            str(domain_dir / "discovery" / "candidate-graph.json"),
+            "--output-dir", str(induced_dir),
+            "--domain-name", "demo",
+        ])
+
+        # Step 3: load_profile must accept the emitted directory.
+        profile = load_profile(induced_dir)
+        assert profile.profile_name == "demo"
+        # The Source A "Customer" candidate is core-band-ish under
+        # default weights; it should land in the schema under
+        # Concept.subtypes (the canonical entity bucket).
+        assert "Concept" in profile.entity_types
+
+    def test_workflow_preserves_alias_map_into_induced_profile(
+        self, tmp_path: Path,
+    ):
+        """When ``discover --profile`` applies an alias_map, the
+        merged candidates land in a single ``Concept`` subtype.
+        ``induce-profile`` then writes a profile derived from those
+        merged candidates. The emitted profile is a different
+        artifact (it doesn't carry the original alias_map by
+        default — alias induction is a follow-up task), but the
+        *count* of distinct Concept subtypes reflects the alias-
+        driven merge."""
+        from ontozense.core.profile import load_profile
+
+        seed_profile = tmp_path / "seed-profile"
+        _write_minimal_profile(seed_profile, {"obligor": "Borrower"})
+
+        source_a = tmp_path / "source-a.json"
+        source_b = tmp_path / "source-b.json"
+        _write_source_a(source_a, [
+            {"name": "obligor", "definition": "From A."},
+        ])
+        _write_source_b(source_b, [
+            {"element_name": "Borrower", "definition": "From B."},
+        ])
+        domain_dir = tmp_path / "domain"
+        runner.invoke(app, [
+            "discover",
+            "--source-a", str(source_a),
+            "--source-b", str(source_b),
+            "--profile", str(seed_profile),
+            "--domain-dir", str(domain_dir),
+        ])
+
+        induced_dir = domain_dir / "induced-profile"
+        runner.invoke(app, [
+            "induce-profile",
+            str(domain_dir / "discovery" / "candidate-graph.json"),
+            "--output-dir", str(induced_dir),
+            "--domain-name", "demo",
+        ])
+
+        profile = load_profile(induced_dir)
+        # The two source spellings collapsed to one candidate via
+        # the alias_map. That candidate lands as exactly one
+        # subtype somewhere in the schema — which type bucket it
+        # ends up in (``Concept`` vs ``TechnicalArtifact``) depends
+        # on its scored band, but the pin is "exactly one" not
+        # "in this specific bucket".
+        total_subtypes = sum(
+            len(et.subtypes) for et in profile.entity_types.values()
+        )
+        assert total_subtypes == 1
+
+
 class TestInduceProfileConsoleSummary:
     """A short summary printed after the run gives the user
     immediate feedback without having to ``cat`` the report."""
