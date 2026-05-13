@@ -37,11 +37,12 @@ holes via graph analysis. Report produces a benchmark snapshot for
 run-vs-run comparison. Query + file-back lets experts review the
 draft and commit corrections back into the knowledge base.
 
-## Two operating modes
+## Three operating modes
 
 **Unconstrained mode** (no profile). Source A's LLM extracts whatever
 concepts it finds; fusion merges by normalised name. Use this when
-you don't yet know the target ontology shape.
+you don't yet know the target ontology shape and just want to see
+what the sources contain.
 
 **Profile mode** (with `--profile <dir>`). You hand Tycho a small
 profile package (`schema.json` + optional sidecars) declaring the
@@ -52,6 +53,16 @@ four sources align on those IDs so consolidation is a `dict[id]`
 group-by; Validate's six rules check the result against the profile.
 See `docs/PROFILE_SPEC.md` for the format and
 `docs/profile-examples/esg/` for a worked reference.
+
+**Discovery mode** (with `discover` / `induce-profile` / `rebuild`).
+Start from raw sources, build a candidate graph, score the candidates
+by relevance, and emit a *draft* profile automatically. Use this when
+you don't have a profile yet and want the sources themselves to
+suggest one — review the draft, edit to taste, then run profile mode
+with the reviewed result. See the
+[Discovery workflow](#discovery-workflow-no-profile-yet) section below
+for the command sequence and `docs/ontozense-npl-validation.md` for
+a full walkthrough on NPL data.
 
 ## What's in a rich data dictionary?
 
@@ -138,8 +149,17 @@ ontozense query "Default" --fused fused.json
 ontozense file-back my-review.md --domain-dir domains/mydomain
 ```
 
-For the full walkthrough with an NPL (Non-Performing Loans) example,
-see [docs/ontozense-npl-tutorial.md](docs/ontozense-npl-tutorial.md).
+Two NPL (Non-Performing Loans) walkthroughs are available:
+
+- [**docs/ontozense-npl-validation.md**](docs/ontozense-npl-validation.md)
+  — step-by-step tutorial for a brand-new user, starting from
+  `git clone`. Covers both the discovery workflow and the
+  profile-aware pipeline, with concrete `✓ Expected` checkpoints
+  for validating that the install is healthy on real NPL data.
+- [**docs/ontozense-npl-tutorial.md**](docs/ontozense-npl-tutorial.md)
+  — narrative walkthrough focused on the profile-aware pipeline
+  (Path 2). Slower-paced; assumes you already have Ontozense
+  installed.
 
 ## Discovery workflow (no profile yet)
 
