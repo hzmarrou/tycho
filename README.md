@@ -151,9 +151,21 @@ then run the normal profile-aware pipeline with the reviewed profile.
 
 ```bash
 # 1. Build a candidate graph from one or more source extractions.
-#    --source-a/b/c/d each accept any of the shapes the corresponding
-#    extractor consumes. --profile (optional) supplies an alias_map
-#    for light synonym normalisation — it does NOT filter candidates.
+#    --source-a  : JSON output of `ontozense extract-a --json` (the
+#                  wrapped {"concepts": [...], "relationships": [...]}
+#                  shape). Repeatable to merge multiple extractions.
+#    --source-b  : governance JSON in any of the shapes the
+#                  governance extractor accepts — a single
+#                  {"element_name": ...} object, an array of such
+#                  objects, or the wrapped {"records": [...]} form.
+#    --source-c  : (forward-compat) Source C schema JSON. The flag is
+#    --source-d    accepted today; the candidate-graph builder's
+#                  ingestion of C/D is a placeholder hook and will be
+#                  filled in by a follow-up commit.
+#    --profile   : (optional) supplies an alias_map for light synonym
+#                  normalisation. It does NOT filter candidates by
+#                  type or score — every concept the extractors
+#                  surfaced lands in the candidate graph.
 ontozense discover \
   --source-a source-a.json \
   --source-b governance.json \
