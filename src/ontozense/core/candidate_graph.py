@@ -52,11 +52,13 @@ concepts; that's drift the lint stage catches downstream).
 computed from the resolved relationships. It feeds the relevance-
 scoring stage in Phase 2.
 
-## Out of scope for Phase 1
+## What this module does not do
 
-Scoring, classification, profile emission. The relevance stage in
-Phase 2 reads :class:`CandidateConcept` and produces a scored
-version; this module only builds the graph.
+Scoring, classification, and profile emission live in
+:mod:`ontozense.core.relevance` and
+:mod:`ontozense.core.profile_induction`. This module only builds
+the graph; the scoring stage reads :class:`CandidateConcept` and
+produces a scored version.
 """
 
 from __future__ import annotations
@@ -146,8 +148,12 @@ def build_candidate_graph(
       - ``source_b`` — ``{"records": [...]}`` where each record has
         ``element_name`` and optionally ``entity_type``, ``id``,
         ``definition``.
-      - ``source_c`` / ``source_d`` — currently passed through as
-        empty contributions. Full ingestion lands in a follow-up.
+      - ``source_c`` / ``source_d`` — accepted in the signature
+        to match the architecture's four-source contract, but
+        this builder does not extract concepts or relationships
+        from those payloads. See the architecture's "Module
+        Layout" section for the design of Source C (schema) and
+        Source D (code) ingestion.
 
     Any source argument can be ``None`` or absent. Empty / missing
     labels are skipped silently.
@@ -202,11 +208,11 @@ def build_candidate_graph(
                 alias_map=aliases,
             )
 
-    # Source C / D ingestion is a follow-up task. The hooks below
-    # keep the public signature stable so a later commit can fill
-    # them in without changing callers.
-    # if source_c: ...
-    # if source_d: ...
+    # source_c and source_d are accepted in build_candidate_graph's
+    # signature to match the architecture's four-source contract.
+    # This builder does not consume their contents; the CLI's
+    # ``--source-c`` / ``--source-d`` flags route through here so
+    # command-line wiring is uniform across sources.
 
     # ─── Relationship ingestion ───────────────────────────────────────────
     relationships: list[CandidateRelationship] = []

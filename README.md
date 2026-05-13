@@ -158,10 +158,11 @@ then run the normal profile-aware pipeline with the reviewed profile.
 #                  governance extractor accepts — a single
 #                  {"element_name": ...} object, an array of such
 #                  objects, or the wrapped {"records": [...]} form.
-#    --source-c  : (forward-compat) Source C schema JSON. The flag is
-#    --source-d    accepted today; the candidate-graph builder's
-#                  ingestion of C/D is a placeholder hook and will be
-#                  filled in by a follow-up commit.
+#    --source-c  : Source C schema JSON. The flag is accepted; the
+#    --source-d    candidate-graph builder does not consume Source
+#                  C / D contents — their ingestion is described in
+#                  the architecture but not implemented in this
+#                  module.
 #    --profile   : (optional) supplies an alias_map for light synonym
 #                  normalisation. It does NOT filter candidates by
 #                  type or score — every concept the extractors
@@ -182,8 +183,9 @@ ontozense induce-profile \
 
 # 3. Review the induced profile by hand:
 #    - schema.json         : declared types and subtypes
-#    - alias_map.json      : initially empty (alias induction is a
-#                            follow-up task)
+#    - alias_map.json      : emitted empty (alias induction is
+#                            described in the architecture but not
+#                            implemented by induce-profile)
 #    - prompt_fragment.md  : draft guidance for the second pass
 #    - induction_report.json : top selected, rejected examples,
 #                              scoring weights/thresholds used,

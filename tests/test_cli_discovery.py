@@ -17,9 +17,10 @@ What ``discover`` does (per the plan):
       * ``candidate-provenance.json`` — per-candidate evidence
         breakdown (so a reviewer can trace any candidate back to
         the source row it came from).
-      * ``concept-mappings.json`` — placeholder for the induced
-        alias / merge mappings; populated by ``induce-profile``
-        in Task 6.
+      * ``concept-mappings.json`` — the architecture reserves this
+        artifact for induced alias / merge mappings. The file is
+        written empty by ``discover``; no command in this
+        implementation populates it.
 
 The architecture pins one constraint that's easy to miss: the
 ``--profile`` flag is *light normalisation only*. It must NOT
@@ -163,10 +164,11 @@ class TestDiscoverArtifacts:
     def test_concept_mappings_initially_empty_placeholder(
         self, tmp_path: Path,
     ):
-        """concept-mappings.json is written empty in discover —
-        induce-profile (Task 6) populates it. The file must exist
-        and be JSON-parseable so downstream tooling has a stable
-        shape to expect."""
+        """concept-mappings.json is written empty by discover. The
+        architecture reserves this artifact for induced alias /
+        merge mappings, but no command in this implementation
+        populates it. The file must exist and be JSON-parseable so
+        downstream tooling has a stable shape to expect."""
         source_a = tmp_path / "source-a.json"
         _write_source_a(source_a, [{"name": "Customer", "definition": "A."}])
         domain_dir = tmp_path / "domain"

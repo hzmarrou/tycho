@@ -2389,9 +2389,10 @@ def discover(
       - ``candidate-provenance.json`` — per-candidate evidence
         breakdown, so a reviewer can trace any candidate back to
         the source row it came from.
-      - ``concept-mappings.json`` — placeholder ``{"mappings": []}``;
-        ``induce-profile`` populates this in the next step of the
-        workflow.
+      - ``concept-mappings.json`` — empty placeholder
+        ``{"mappings": []}``. The architecture reserves this
+        artifact for induced alias / merge mappings; no command
+        in this implementation populates it.
 
     Discovery is intentionally permissive: it does not filter
     candidates by score or type. Run ``induce-profile`` afterwards
