@@ -132,3 +132,174 @@ class TestSerialisation:
         # Each concept is a JSON-friendly dict
         assert raw["concepts"][0]["label"] == "X"
         assert raw["concepts"][0]["source_presence"]["A"] is True
+
+
+# ─── Id-first merge contract (architecture §"Candidate merge rules") ───────
+
+
+class TestIdFirstMergeContract:
+    """The architecture requires merge-key priority:
+      1. existing profile-mode id
+      2. normalised canonical label
+      3. alias-expanded label
+      4. source-specific fallback
+    and: ambiguous cases must stay split.
+    These tests pin the four resulting cases."""
+
+    def test_same_id_different_labels_merge(self):
+        """Profile-mode same canonical entity from two sources via
+        identical deterministic ids — surface labels differ but the
+        candidates must collapse to one."""
+        source_a = {
+            "concepts": [
+                {"name": "Customer Identifier", "id": "concept_cust_111111",
+                 "entity_type": "Concept", "definition": "Source A wording."},
+            ],
+            "relationships": [],
+        }
+        source_b = {
+            "records": [
+                {"element_name": "customer-id", "id": "concept_cust_111111",
+                 "entity_type": "Concept", "definition": "Governance wording."},
+            ],
+        }
+        graph = build_candidate_graph(source_a=source_a, source_b=source_b)
+        assert len(graph.concepts) == 1
+        c = graph.concepts[0]
+        assert c.source_presence["A"] is True
+        assert c.source_presence["B"] is True
+        # Two surface forms tracked as aliases despite different labels
+        assert "Customer Identifier" in c.aliases
+        assert "customer-id" in c.aliases
+
+    def test_same_name_different_ids_stay_separate(self):
+        """Ambiguity: two profile-mode concepts that share a normalised
+        label but carry distinct ids must NOT merge — they're
+        genuinely different entities of the same surface name."""
+        source_a = {
+            "concepts": [
+                {"name": "Default", "id": "rule_default_aaaaaa",
+                 "entity_type": "Rule", "definition": "A code rule."},
+                {"name": "Default", "id": "concept_default_bbbbbb",
+                 "entity_type": "Concept", "definition": "A loan default state."},
+            ],
+            "relationships": [],
+        }
+        graph = build_candidate_graph(source_a=source_a)
+        assert len(graph.concepts) == 2
+        # Both ids surface in candidate ids
+        cand_ids = {c.candidate_id for c in graph.concepts}
+        assert "cand_id_rule_default_aaaaaa" in cand_ids
+        assert "cand_id_concept_default_bbbbbb" in cand_ids
+
+    def test_existing_has_no_id_incoming_has_id_promotes(self):
+        """When an existing candidate (from an earlier source) lacks
+        an id and a later source contributes the same normalised
+        label WITH an id, the existing is promoted to claim the id
+        — mixed-mode tolerance."""
+        source_a = {
+            "concepts": [
+                {"name": "Customer", "definition": "Unconstrained wording."},
+            ],
+            "relationships": [],
+        }
+        source_b = {
+            "records": [
+                {"element_name": "Customer", "id": "concept_cust_999999",
+                 "entity_type": "Concept", "definition": "Governance wording."},
+            ],
+        }
+        graph = build_candidate_graph(source_a=source_a, source_b=source_b)
+        assert len(graph.concepts) == 1
+        c = graph.concepts[0]
+        # The candidate now references the promoted id
+        assert c.candidate_id == "cand_id_concept_cust_999999"
+        assert c.source_presence["A"] is True
+        assert c.source_presence["B"] is True
+
+    def test_neither_has_id_falls_back_to_name(self):
+        """Plain unconstrained mode: no ids on either side, merge by
+        normalised label (the existing Phase 1 baseline)."""
+        source_a = {
+            "concepts": [{"name": "Customer", "definition": "A."}],
+            "relationships": [],
+        }
+        source_b = {
+            "records": [{"element_name": "customer", "definition": "B."}],
+        }
+        graph = build_candidate_graph(source_a=source_a, source_b=source_b)
+        assert len(graph.concepts) == 1
+
+
+# ─── Relationship ingestion + graph_degree (architecture §"Graph features") ─
+
+
+class TestRelationshipIngestion:
+    def test_source_a_relationships_become_candidate_relationships(self):
+        """Source A's subject-predicate-object triples are materialised
+        as CandidateRelationship objects referencing candidate IDs."""
+        source_a = {
+            "concepts": [
+                {"name": "Loan", "definition": "L."},
+                {"name": "Borrower", "definition": "B."},
+            ],
+            "relationships": [
+                {"subject": "Loan", "predicate": "HasBorrower", "object": "Borrower"},
+            ],
+        }
+        graph = build_candidate_graph(source_a=source_a)
+        assert len(graph.relationships) == 1
+        rel = graph.relationships[0]
+        assert rel.predicate == "HasBorrower"
+        # Endpoints are resolved to candidate IDs, not raw labels
+        cand_loan = next(c for c in graph.concepts if c.label == "Loan")
+        cand_borrower = next(c for c in graph.concepts if c.label == "Borrower")
+        assert rel.subject_candidate_id == cand_loan.candidate_id
+        assert rel.object_candidate_id == cand_borrower.candidate_id
+
+    def test_graph_degree_increments_from_relationships(self):
+        """graph_degree is the distinct-neighbour count per candidate."""
+        source_a = {
+            "concepts": [
+                {"name": "Loan", "definition": "L."},
+                {"name": "Borrower", "definition": "B."},
+                {"name": "Collateral", "definition": "C."},
+            ],
+            "relationships": [
+                {"subject": "Loan", "predicate": "HasBorrower", "object": "Borrower"},
+                {"subject": "Loan", "predicate": "SecuredBy", "object": "Collateral"},
+            ],
+        }
+        graph = build_candidate_graph(source_a=source_a)
+        loan = next(c for c in graph.concepts if c.label == "Loan")
+        borrower = next(c for c in graph.concepts if c.label == "Borrower")
+        collateral = next(c for c in graph.concepts if c.label == "Collateral")
+        # Loan has two distinct neighbours
+        assert loan.graph_degree == 2
+        # Borrower and Collateral each have one (Loan)
+        assert borrower.graph_degree == 1
+        assert collateral.graph_degree == 1
+
+    def test_relationships_with_unresolved_endpoints_are_skipped(self):
+        """If a relationship references an entity that wasn't
+        extracted as a concept, skip it. The lint stage downstream
+        catches dangling references."""
+        source_a = {
+            "concepts": [{"name": "Loan", "definition": "L."}],
+            "relationships": [
+                {"subject": "Loan", "predicate": "HasBorrower",
+                 "object": "NeverExtracted"},
+            ],
+        }
+        graph = build_candidate_graph(source_a=source_a)
+        assert len(graph.relationships) == 0
+        assert graph.concepts[0].graph_degree == 0
+
+    def test_zero_graph_degree_when_no_relationships(self):
+        """Sanity check the default."""
+        source_a = {
+            "concepts": [{"name": "X", "definition": "x"}],
+            "relationships": [],
+        }
+        graph = build_candidate_graph(source_a=source_a)
+        assert graph.concepts[0].graph_degree == 0
