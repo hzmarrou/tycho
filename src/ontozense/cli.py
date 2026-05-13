@@ -2505,12 +2505,28 @@ def _merge_source_a(paths: list[Path]) -> dict | None:
     """Concatenate ``concepts`` and ``relationships`` across one or
     more Source A JSON files. Returns ``None`` when no paths are
     given so :func:`build_candidate_graph` treats that as "no
-    Source A contribution" (rather than empty-but-present)."""
+    Source A contribution" (rather than empty-but-present).
+
+    Each file must be a JSON object — the ``extract-a --json``
+    output shape. A top-level array or scalar raises
+    :class:`_SourceLoadError` with a hint about the accepted shape,
+    matching the friendly exit-2 path the rest of the discover
+    workflow uses for malformed inputs.
+    """
     if not paths:
         return None
     merged: dict = {"concepts": [], "relationships": []}
     for path in paths:
         raw = _load_json(path)
+        if not isinstance(raw, dict):
+            raise _SourceLoadError(
+                path,
+                f"Source A file must be a JSON object "
+                f"(got top-level {type(raw).__name__}). "
+                f"Expected the shape produced by "
+                f"`ontozense extract-a --json`: "
+                f"{{'concepts': [...], 'relationships': [...]}}.",
+            )
         merged["concepts"].extend(raw.get("concepts", []))
         merged["relationships"].extend(raw.get("relationships", []))
     return merged

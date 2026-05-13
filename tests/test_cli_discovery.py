@@ -633,6 +633,52 @@ class TestDiscoverErrors:
         assert result.exit_code != 0
         assert "profile" in result.output.lower()
 
+    def test_source_a_top_level_array_surfaces_friendly_error(
+        self, tmp_path: Path,
+    ):
+        """Round-1 reviewer finding (PR review): ``_merge_source_a``
+        assumed the loaded payload has ``.get(...)``. A top-level
+        JSON list raised ``AttributeError`` from inside the merge
+        loop, escaping the friendly _SourceLoadError → exit-2 path
+        the rest of the workflow uses.
+
+        Pin: a top-level array fails cleanly with the path in the
+        message and a hint about the expected shape."""
+        bad = tmp_path / "array.json"
+        bad.write_text(
+            json.dumps([
+                {"name": "Customer", "definition": "A client."},
+            ]),
+            encoding="utf-8",
+        )
+        domain_dir = tmp_path / "domain"
+        result = runner.invoke(app, [
+            "discover",
+            "--source-a", str(bad),
+            "--domain-dir", str(domain_dir),
+        ])
+        assert result.exit_code != 0
+        assert "array.json" in result.output
+        assert "Source A" in result.output
+
+    def test_source_a_top_level_scalar_surfaces_friendly_error(
+        self, tmp_path: Path,
+    ):
+        """Same class of input bug: a JSON scalar (string / number /
+        null) at the top level. Must also fail cleanly, not leak
+        ``AttributeError``."""
+        bad = tmp_path / "scalar.json"
+        bad.write_text(json.dumps("just a string"), encoding="utf-8")
+        domain_dir = tmp_path / "domain"
+        result = runner.invoke(app, [
+            "discover",
+            "--source-a", str(bad),
+            "--domain-dir", str(domain_dir),
+        ])
+        assert result.exit_code != 0
+        assert "scalar.json" in result.output
+        assert "Source A" in result.output
+
 
 # ─── induce-profile (Task 6) ───────────────────────────────────────────────
 
