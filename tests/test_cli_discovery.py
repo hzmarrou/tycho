@@ -1,9 +1,9 @@
 """Tests for the discovery CLI commands (profile induction
-architecture, Phase 3 / Task 5+).
+architecture, Phase 3).
 
-Task 5 covers the ``discover`` subcommand. Tasks 6+7 add the
-``induce-profile`` and ``rebuild`` commands; their tests will land
-alongside those tasks but in this same file for symmetry.
+This file covers all three discovery-workflow subcommands —
+``discover``, ``induce-profile``, and ``rebuild`` — plus the
+end-to-end pinning of the workflow as a single user journey.
 
 What ``discover`` does (per the plan):
 
