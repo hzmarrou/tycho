@@ -2324,5 +2324,732 @@ def info(
         console.print(table)
 
 
+# ─── discover (profile induction workflow) ──────────────────────────────────
+
+
+@app.command(name="discover")
+def discover(
+    source_a: list[Path] = typer.Option(
+        None, "--source-a",
+        help=(
+            "Path to a Source A extraction JSON. Repeatable — every "
+            "occurrence's concepts and relationships lists are concatenated "
+            "before building the candidate graph."
+        ),
+    ),
+    source_b: list[Path] = typer.Option(
+        None, "--source-b",
+        help=(
+            "Path to a Source B governance JSON. Repeatable. Accepts the "
+            "same shapes the governance extractor does: a single object "
+            "({'element_name': ...}), a top-level array of such objects "
+            "(the shape of docs/governance_example.json), or a "
+            "{'records': [...]} wrapper."
+        ),
+    ),
+    source_c: list[Path] = typer.Option(
+        None, "--source-c",
+        help=(
+            "Path to a Source C schema JSON. Repeatable. The flag is "
+            "accepted and the payload is passed through unchanged; "
+            "Source C contents do not affect candidate generation in "
+            "this implementation."
+        ),
+    ),
+    source_d: list[Path] = typer.Option(
+        None, "--source-d",
+        help=(
+            "Path to a Source D code / rules JSON. Repeatable. The "
+            "flag is accepted and the payload is passed through "
+            "unchanged; Source D contents do not affect candidate "
+            "generation in this implementation."
+        ),
+    ),
+    profile: Path = typer.Option(
+        None, "--profile",
+        help=(
+            "Optional profile directory. Only its alias_map is consulted "
+            "(light label normalisation across sources). The profile's "
+            "type vocabulary, predicates, and validation rules are NOT "
+            "applied — discovery surfaces every candidate the extractors "
+            "found."
+        ),
+    ),
+    domain_dir: Path = typer.Option(
+        ..., "--domain-dir",
+        help=(
+            "Output directory. Discovery artifacts are written under "
+            "<domain_dir>/discovery/."
+        ),
+    ),
+) -> None:
+    """Build a candidate graph from raw source extractions.
+
+    Writes three artifacts under ``<DOMAIN_DIR>/discovery/``:
+
+      - ``candidate-graph.json`` — concepts + relationships.
+      - ``candidate-provenance.json`` — per-candidate evidence
+        breakdown, so a reviewer can trace any candidate back to
+        the source row it came from.
+      - ``concept-mappings.json`` — written as
+        ``{"mappings": []}``. No command in this implementation
+        populates it.
+
+    Discovery is intentionally permissive: it does not filter
+    candidates by score or type. Run ``induce-profile`` afterwards
+    to apply relevance scoring + classification.
+    """
+    import json
+
+    from .core.candidate_graph import build_candidate_graph
+    from .core.profile import ProfileError, load_profile
+
+    discovery_dir = domain_dir / "discovery"
+    discovery_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Load and merge source inputs ──
+    try:
+        merged_a = _merge_source_a(source_a or [])
+        merged_b = _merge_source_b(source_b or [])
+        merged_c = _load_source_passthrough(source_c or [])
+        merged_d = _load_source_passthrough(source_d or [])
+    except _SourceLoadError as err:
+        console.print(
+            f"[red]Failed to load source file {err.path}:[/] {err}"
+        )
+        raise typer.Exit(code=2)
+
+    # ── Resolve optional --profile to its alias_map (only) ──
+    alias_map: dict[str, str] | None = None
+    if profile is not None:
+        try:
+            loaded = load_profile(profile)
+        except ProfileError as err:
+            console.print(
+                f"[red]Failed to load --profile from {profile}:[/] {err}"
+            )
+            raise typer.Exit(code=2)
+        # Defensive copy — the loaded Profile is frozen but its
+        # alias_map dict is not, and we don't want a downstream
+        # mutation to leak back into a re-used profile instance.
+        alias_map = dict(loaded.alias_map)
+
+    # ── Build the candidate graph ──
+    graph = build_candidate_graph(
+        source_a=merged_a,
+        source_b=merged_b,
+        source_c=merged_c,
+        source_d=merged_d,
+        alias_map=alias_map,
+    )
+
+    # ── Write the three artifacts ──
+    (discovery_dir / "candidate-graph.json").write_text(
+        json.dumps(graph.to_dict(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    provenance = {
+        "concepts": [
+            {
+                "candidate_id": c.candidate_id,
+                "label": c.label,
+                "provenance": [p.to_dict() for p in c.provenance],
+            }
+            for c in graph.concepts
+        ],
+    }
+    (discovery_dir / "candidate-provenance.json").write_text(
+        json.dumps(provenance, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (discovery_dir / "concept-mappings.json").write_text(
+        json.dumps({"mappings": []}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    console.print(
+        f"[green]Discovery artifacts written to[/] {discovery_dir}"
+    )
+
+
+# ─── Source-loading helpers (discover) ──────────────────────────────────────
+
+
+class _SourceLoadError(Exception):
+    """Raised when a discovery source file can't be loaded. Carries
+    the path so the CLI can surface a clean error message without
+    showing a traceback to the user."""
+
+    def __init__(self, path: Path, message: str) -> None:
+        super().__init__(message)
+        self.path = path
+
+
+def _load_json(path: Path) -> dict:
+    """Load a single JSON source file, wrapping the typical I/O and
+    decode failure modes as :class:`_SourceLoadError` so the
+    discover command can surface a clean error.
+    """
+    import json
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as err:
+        raise _SourceLoadError(path, f"file not found: {path}") from err
+    except json.JSONDecodeError as err:
+        raise _SourceLoadError(path, f"invalid JSON: {err}") from err
+    except OSError as err:
+        raise _SourceLoadError(path, f"could not read: {err}") from err
+
+
+def _merge_source_a(paths: list[Path]) -> dict | None:
+    """Concatenate ``concepts`` and ``relationships`` across one or
+    more Source A JSON files. Returns ``None`` when no paths are
+    given so :func:`build_candidate_graph` treats that as "no
+    Source A contribution" (rather than empty-but-present).
+
+    Each file must be a JSON object — the ``extract-a --json``
+    output shape — and its ``concepts`` / ``relationships`` fields
+    (if present) must be lists of objects. Malformed payloads at
+    any of these levels raise :class:`_SourceLoadError` with a hint
+    about the accepted shape, matching the friendly exit-2 path the
+    rest of the discover workflow uses for malformed inputs.
+    """
+    if not paths:
+        return None
+    merged: dict = {"concepts": [], "relationships": []}
+    for path in paths:
+        raw = _load_json(path)
+        if not isinstance(raw, dict):
+            raise _SourceLoadError(
+                path,
+                f"Source A file must be a JSON object "
+                f"(got top-level {type(raw).__name__}). "
+                f"Expected the shape produced by "
+                f"`ontozense extract-a --json`: "
+                f"{{'concepts': [...], 'relationships': [...]}}.",
+            )
+        _validate_source_a_inner_shape(raw, path)
+        merged["concepts"].extend(raw.get("concepts", []))
+        merged["relationships"].extend(raw.get("relationships", []))
+    return merged
+
+
+def _validate_source_a_inner_shape(payload: dict, path: Path) -> None:
+    """Validate the inner shape of a Source A JSON payload: the
+    optional ``concepts`` and ``relationships`` fields, if present,
+    must each be a list of objects.
+
+    Without this guard, a payload like ``{"concepts": "oops"}``
+    would iterate over each character of the string, or
+    ``{"concepts": ["bad"]}`` would call ``.get()`` on a bare
+    string — either way leaking ``AttributeError`` instead of the
+    friendly exit-2 path. Mirrors the same defensive shape check
+    :func:`_normalise_source_b_payload` does for Source B.
+    """
+    for field, entry_label in (
+        ("concepts", "concept"),
+        ("relationships", "relationship"),
+    ):
+        if field not in payload:
+            continue
+        value = payload[field]
+        if not isinstance(value, list):
+            raise _SourceLoadError(
+                path,
+                f"Source A {field!r} field must be a list "
+                f"(got {type(value).__name__}).",
+            )
+        for idx, entry in enumerate(value):
+            if not isinstance(entry, dict):
+                raise _SourceLoadError(
+                    path,
+                    f"Source A {field}[{idx}] is not a JSON object "
+                    f"(got {type(entry).__name__}). Every "
+                    f"{entry_label} entry must be an object.",
+                )
+
+
+def _merge_source_b(paths: list[Path]) -> dict | None:
+    """Concatenate the governance records across one or more Source B
+    JSON files, normalising each file's shape on the way in.
+
+    Accepts the three shapes a real Source B file can have:
+
+      - **Single object** (e.g. one-record governance file) —
+        ``{"element_name": "...", ...}`` → wrapped as a length-1
+        records list.
+      - **Top-level array** — the shape of
+        ``docs/governance_example.json`` and the array form the
+        governance extractor accepts → used directly.
+      - **Wrapped form** — ``{"records": [...]}`` — the internal
+        shape :func:`build_candidate_graph` consumes natively;
+        accepted for round-trip with any pipeline that emits it.
+
+    Anything else raises :class:`_SourceLoadError` so the CLI can
+    surface a clean exit-2 message instead of a traceback. Same
+    ``None``-vs-empty semantics as :func:`_merge_source_a`.
+    """
+    if not paths:
+        return None
+    merged: dict = {"records": []}
+    for path in paths:
+        raw = _load_json(path)
+        merged["records"].extend(_normalise_source_b_payload(raw, path))
+    return merged
+
+
+def _normalise_source_b_payload(payload, path: Path) -> list:
+    """Map one raw Source B JSON payload to a list of record dicts.
+
+    See :func:`_merge_source_b` for the accepted input shapes.
+    Validates that array entries are objects so a mixed array
+    (``[{...}, "stray"]``) fails loudly with the offending index
+    rather than crashing inside the candidate-graph builder.
+    """
+    # Wrapped form: pass the records list through (still validate
+    # entries are dicts so a malformed wrapper doesn't crash later).
+    if isinstance(payload, dict) and isinstance(payload.get("records"), list):
+        _validate_record_entries(payload["records"], path, context="records")
+        return payload["records"]
+
+    # Single governance object: an object with an element_name field.
+    if isinstance(payload, dict) and isinstance(
+        payload.get("element_name"), str
+    ):
+        return [payload]
+
+    # Top-level array of governance objects.
+    if isinstance(payload, list):
+        _validate_record_entries(payload, path, context="array")
+        return payload
+
+    # Empty dict is ambiguous but harmless — no records, no error.
+    if isinstance(payload, dict) and not payload:
+        return []
+
+    # Anything else: the caller gave us a JSON shape we can't map
+    # to records. Surface a friendly error explaining what's
+    # accepted so they can self-diagnose.
+    type_name = type(payload).__name__
+    raise _SourceLoadError(
+        path,
+        f"Source B file shape not recognised (got top-level {type_name}). "
+        f"Accepted shapes: a single governance object "
+        f"{{'element_name': ...}}, an array of such objects "
+        f"(see docs/governance_example.json), or a "
+        f"{{'records': [...]}} wrapper.",
+    )
+
+
+def _validate_record_entries(
+    entries: list, path: Path, *, context: str,
+) -> None:
+    """Pin each Source B array / records entry to an object. A non-
+    object entry (string, number, null, nested list) is the
+    classic AttributeError-on-`.get()` trap; raising here surfaces
+    the entry index in the error message so the user can find the
+    bad row in their file."""
+    for idx, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise _SourceLoadError(
+                path,
+                f"Source B {context}[{idx}] is not an object "
+                f"(got {type(entry).__name__}). Every governance "
+                f"record must be a JSON object with at least an "
+                f"element_name field.",
+            )
+
+
+def _load_source_passthrough(paths: list[Path]) -> dict | None:
+    """Generic loader / merger for the Source C and Source D
+    ``--source-*`` flags on ``discover``.
+
+    Single-file inputs pass through unchanged. Multi-file inputs
+    are last-write-wins on the top-level dict. The merged dict is
+    returned to the caller; :func:`build_candidate_graph` does not
+    extract candidate concepts or relationships from these
+    payloads in this implementation.
+    """
+    if not paths:
+        return None
+    if len(paths) == 1:
+        return _load_json(paths[0])
+    merged: dict = {}
+    for path in paths:
+        merged.update(_load_json(path))
+    return merged
+
+
+# ─── induce-profile (profile induction workflow) ────────────────────────────
+
+
+@app.command(name="induce-profile")
+def induce_profile(
+    candidate_graph: Path = typer.Argument(
+        ...,
+        help=(
+            "Path to a candidate-graph.json file (typically produced by "
+            "``ontozense discover``)."
+        ),
+    ),
+    output_dir: Path = typer.Option(
+        ..., "--output-dir",
+        help="Directory to write the induced profile into. Created if missing.",
+    ),
+    domain_name: str = typer.Option(
+        ..., "--domain-name",
+        help="Becomes ``profile_name`` in the emitted schema.json.",
+    ),
+    weights: Path = typer.Option(
+        None, "--weights",
+        help=(
+            "Optional JSON file with per-signal weights. Must be a flat "
+            "object containing every key in DEFAULT_WEIGHTS (7 signals). "
+            "Defaults to DEFAULT_WEIGHTS when omitted."
+        ),
+    ),
+    thresholds: Path = typer.Option(
+        None, "--thresholds",
+        help=(
+            "Optional JSON file with classification thresholds. Must be a "
+            "flat object with ``core_business`` and "
+            "``supporting_technical`` keys. Defaults to "
+            "DEFAULT_THRESHOLDS when omitted."
+        ),
+    ),
+) -> None:
+    """Score a candidate graph and emit an induced draft profile.
+
+    Reads ``<CANDIDATE_GRAPH>``, applies the relevance scoring stage
+    (``core_business`` / ``supporting_technical`` / ``noise``), and
+    writes a loader-compatible profile directory under
+    ``<OUTPUT_DIR>``:
+
+      - schema.json
+      - alias_map.json
+      - prompt_fragment.md
+      - induction_report.json
+
+    The induction report records the exact weights and thresholds
+    used (defaults when no override is given), so a reviewer can
+    reproduce the band assignments end-to-end.
+    """
+    from .core.discovery_contracts import CandidateConcept
+    from .core.profile_induction import write_induced_profile
+    from .core.relevance import (
+        DEFAULT_THRESHOLDS, DEFAULT_WEIGHTS, score_candidates,
+    )
+
+    # ── Load the candidate graph ──
+    try:
+        raw = _load_json(candidate_graph)
+    except _SourceLoadError as err:
+        console.print(
+            f"[red]Failed to load candidate graph {err.path}:[/] {err}"
+        )
+        raise typer.Exit(code=2)
+
+    if not isinstance(raw, dict):
+        console.print(
+            f"[red]Candidate graph {candidate_graph} is not a JSON "
+            f"object[/] (got {type(raw).__name__})"
+        )
+        raise typer.Exit(code=2)
+
+    concepts_raw = raw.get("concepts", [])
+    if not isinstance(concepts_raw, list):
+        console.print(
+            f"[red]Candidate graph {candidate_graph} has non-list "
+            f"'concepts' field[/] (got {type(concepts_raw).__name__})."
+        )
+        raise typer.Exit(code=2)
+
+    # Reconstruct candidates one at a time so the error message can
+    # cite the offending entry's index. The catch covers the four
+    # exception types CandidateConcept.from_dict() can surface for
+    # malformed input — including ValueError from ``dict(raw)`` on
+    # a non-object concept entry (round-1 reviewer finding), which
+    # the previous narrower catch missed.
+    concepts: list = []
+    for i, c in enumerate(concepts_raw):
+        try:
+            if not isinstance(c, dict):
+                raise TypeError(
+                    f"expected a JSON object, got {type(c).__name__}"
+                )
+            concepts.append(CandidateConcept.from_dict(c))
+        except (TypeError, KeyError, ValueError, AttributeError) as err:
+            console.print(
+                f"[red]Candidate graph {candidate_graph} concept entry "
+                f"[{i}] is malformed:[/] {err}"
+            )
+            raise typer.Exit(code=2)
+
+    # ── Optional weights / thresholds overrides ──
+    weight_map: dict[str, float] | None = None
+    if weights is not None:
+        try:
+            weight_map = _load_scoring_config(
+                weights,
+                required_keys=set(DEFAULT_WEIGHTS.keys()),
+                label="--weights",
+            )
+        except _SourceLoadError as err:
+            console.print(
+                f"[red]Failed to load --weights {err.path}:[/] {err}"
+            )
+            raise typer.Exit(code=2)
+
+    threshold_map: dict[str, float] | None = None
+    if thresholds is not None:
+        try:
+            threshold_map = _load_scoring_config(
+                thresholds,
+                required_keys=set(DEFAULT_THRESHOLDS.keys()),
+                label="--thresholds",
+            )
+        except _SourceLoadError as err:
+            console.print(
+                f"[red]Failed to load --thresholds {err.path}:[/] {err}"
+            )
+            raise typer.Exit(code=2)
+
+    # ── Score, then write ──
+    scored = score_candidates(
+        concepts, weights=weight_map, thresholds=threshold_map,
+    )
+    out_path = write_induced_profile(
+        domain_name=domain_name,
+        candidates=scored,
+        out_dir=output_dir,
+        weights=weight_map,
+        thresholds=threshold_map,
+    )
+
+    # ── Console summary ──
+    _print_induction_summary(scored, out_path)
+
+
+# ─── Scoring-config helpers (induce-profile) ────────────────────────────────
+
+
+def _load_scoring_config(
+    path: Path,
+    *,
+    required_keys: set[str],
+    label: str,
+) -> dict[str, float]:
+    """Load a JSON scoring-config file (``--weights`` or
+    ``--thresholds``) and validate it's a complete, flat,
+    numeric-valued dict.
+
+    Strict checks (any failure raises :class:`_SourceLoadError`
+    so the CLI surfaces a clean exit-2 message):
+
+      - top level must be a JSON object;
+      - every key in ``required_keys`` must be present (lists the
+        missing keys in the error so the user can patch the file);
+      - extra keys are flagged so typos don't silently get ignored;
+      - every value must be a number (``int`` or ``float``).
+
+    The completeness check mirrors :func:`score_candidates`' own
+    contract (missing keys → ``KeyError`` downstream). Validating
+    at the CLI boundary surfaces a friendly message instead.
+    """
+    raw = _load_json(path)
+    if not isinstance(raw, dict):
+        raise _SourceLoadError(
+            path,
+            f"{label} file must be a JSON object "
+            f"(got top-level {type(raw).__name__}).",
+        )
+
+    present = set(raw.keys())
+    missing = required_keys - present
+    if missing:
+        raise _SourceLoadError(
+            path,
+            f"{label} file is missing required keys: "
+            f"{sorted(missing)}. Expected exactly: "
+            f"{sorted(required_keys)}.",
+        )
+    extra = present - required_keys
+    if extra:
+        raise _SourceLoadError(
+            path,
+            f"{label} file has unexpected keys: {sorted(extra)}. "
+            f"Expected only: {sorted(required_keys)}.",
+        )
+
+    for key, value in raw.items():
+        # Reject bools explicitly — ``True`` is a subclass of
+        # ``int`` so otherwise it'd slip through and become 1.0,
+        # which is almost certainly a config mistake the user
+        # wants flagged.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise _SourceLoadError(
+                path,
+                f"{label}[{key!r}] must be a number "
+                f"(got {type(value).__name__}: {value!r}).",
+            )
+
+    return {k: float(v) for k, v in raw.items()}
+
+
+def _print_induction_summary(scored, out_path: Path) -> None:
+    """Print a short post-run summary so the user gets feedback
+    without having to immediately ``cat`` the induction report."""
+    core = sum(1 for c in scored if c.classification == "core_business")
+    supporting = sum(
+        1 for c in scored if c.classification == "supporting_technical"
+    )
+    rejected = sum(
+        1 for c in scored
+        if c.classification not in ("core_business", "supporting_technical")
+    )
+
+    console.print(f"[green]Induced profile written to[/] {out_path}")
+    console.print(
+        f"  [bold]Candidates:[/] {len(scored)} total — "
+        f"core_business={core}, "
+        f"supporting_technical={supporting}, "
+        f"rejected={rejected}"
+    )
+
+    selected = sorted(
+        [
+            c for c in scored
+            if c.classification in ("core_business", "supporting_technical")
+        ],
+        key=lambda c: c.relevance_score,
+        reverse=True,
+    )[:5]
+    if selected:
+        console.print("  [bold]Top selected (by score):[/]")
+        for c in selected:
+            console.print(
+                f"    - {c.label} "
+                f"(score={c.relevance_score:.3f}, "
+                f"classification={c.classification})"
+            )
+
+
+# ─── rebuild (profile induction workflow — stub orchestrator) ──────────────
+
+
+@app.command(name="rebuild")
+def rebuild(
+    profile: Path = typer.Option(
+        ..., "--profile",
+        help=(
+            "Directory containing the (reviewed and edited) induced "
+            "profile. The profile is loaded and validated; the printed "
+            "rebuild plan is parameterised by its profile_name."
+        ),
+    ),
+    domain_dir: Path = typer.Option(
+        ..., "--domain-dir",
+        help=(
+            "Per-domain workspace directory. Used in the printed plan as "
+            "the conventional location for intermediate / output files."
+        ),
+    ),
+    source_a: list[Path] = typer.Option(
+        None, "--source-a",
+        help=(
+            "Source A extraction inputs. Accepted for forward-compat "
+            "with the eventual orchestrator; informational only in the "
+            "v1 stub."
+        ),
+    ),
+    source_b: Path = typer.Option(
+        None, "--source-b",
+        help="Source B governance JSON. Same forward-compat note as --source-a.",
+    ),
+    source_c: Path = typer.Option(
+        None, "--source-c",
+        help="Source C schema JSON. Same forward-compat note as --source-a.",
+    ),
+    source_d: Path = typer.Option(
+        None, "--source-d",
+        help="Source D code / rules JSON. Same forward-compat note as --source-a.",
+    ),
+) -> None:
+    """Print the rebuild plan for an induced / reviewed profile.
+
+    Per the implementation plan, this command is a stub in v1: it
+    loads and validates the supplied profile, then prints the chain
+    of existing pipeline commands the user should run by hand to
+    rebuild the fused dictionary with the reviewed profile.
+
+    Direct orchestration of the chain (running ``extract-a``,
+    ``fuse``, ``validate``, ``lint``, ``report`` in sequence
+    in-process) is deferred to a follow-up task once the discovery
+    flow is stable. The flag surface here matches what the
+    orchestrator will eventually consume, so the CLI contract is
+    stable across that change.
+    """
+    from .core.profile import ProfileError, load_profile
+
+    try:
+        loaded = load_profile(profile)
+    except ProfileError as err:
+        console.print(f"[red]Failed to load --profile {profile}:[/] {err}")
+        raise typer.Exit(code=2)
+
+    console.print(
+        f"[bold]Rebuild plan for profile[/] '[cyan]{loaded.profile_name}[/]':"
+    )
+    print()
+    print(
+        "Run the following commands in order to rebuild the fused "
+        "dictionary using the reviewed profile:"
+    )
+    print()
+    # Command lines emitted via plain ``print`` so Rich's terminal-
+    # width wrapping never breaks a step across visual lines (which
+    # would also break copy-paste). Flags below match the exact
+    # signatures of the corresponding commands in this file —
+    # round-1 reviewer finding pinned ``ontozense fuse`` and
+    # ``ontozense report`` against their actual flag sets.
+    print(
+        f"  1. ontozense extract-a <docs> "
+        f"--profile {profile} "
+        f"--json {domain_dir}/extract/source-a.json "
+        f"--domain-dir {domain_dir}"
+    )
+    print(
+        f"  2. ontozense fuse "
+        f"--source-a {domain_dir}/extract/source-a.json "
+        f"[--source-b {domain_dir}/source-b.json] "
+        f"[--source-c {domain_dir}/source-c.json] "
+        f"[--source-d {domain_dir}/source-d.json] "
+        f"--output {domain_dir}/fused.json "
+        f"--domain-dir {domain_dir}"
+    )
+    print(
+        f"  3. ontozense validate {domain_dir}/fused.json "
+        f"--profile {profile} "
+        f"--domain-dir {domain_dir}"
+    )
+    print(
+        f"  4. ontozense lint {domain_dir}/fused.json "
+        f"--domain-dir {domain_dir}"
+    )
+    print(
+        f"  5. ontozense report {domain_dir}/fused.json "
+        f"--profile {profile} "
+        f"--markdown {domain_dir}/report.md"
+    )
+    print()
+    console.print(
+        "[yellow]Note:[/] direct orchestration of this chain is "
+        "deferred to a follow-up task. Run the commands manually "
+        "for now and review the output between steps. The "
+        "--source-a/-b/-c/-d flags are accepted for forward-compat "
+        "but are informational only in this stub."
+    )
+
+
 if __name__ == "__main__":
     app()

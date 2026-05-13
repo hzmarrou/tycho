@@ -141,6 +141,67 @@ ontozense file-back my-review.md --domain-dir domains/mydomain
 For the full walkthrough with an NPL (Non-Performing Loans) example,
 see [docs/ontozense-npl-tutorial.md](docs/ontozense-npl-tutorial.md).
 
+## Discovery workflow (no profile yet)
+
+Use this when you don't already have a domain profile and want the
+sources themselves to suggest one. The discovery workflow is *path 1*
+of the architecture: build a candidate graph from raw extractions,
+score the candidates by relevance, emit a draft profile, review it,
+then run the normal profile-aware pipeline with the reviewed profile.
+
+```bash
+# 1. Build a candidate graph from one or more source extractions.
+#    --source-a  : JSON output of `ontozense extract-a --json` (the
+#                  wrapped {"concepts": [...], "relationships": [...]}
+#                  shape). Repeatable to merge multiple extractions.
+#    --source-b  : governance JSON in any of the shapes the
+#                  governance extractor accepts — a single
+#                  {"element_name": ...} object, an array of such
+#                  objects, or the wrapped {"records": [...]} form.
+#    --source-c  : Source C schema JSON. The flag is accepted and
+#    --source-d    the payload is passed through unchanged. The
+#                  candidate-graph builder does not extract from
+#                  Source C or D in this implementation.
+#    --profile   : (optional) supplies an alias_map for light synonym
+#                  normalisation. It does NOT filter candidates by
+#                  type or score — every concept the extractors
+#                  surfaced lands in the candidate graph.
+ontozense discover \
+  --source-a source-a.json \
+  --source-b governance.json \
+  --domain-dir domains/mydomain
+
+# 2. Score candidates and emit a draft induced profile.
+#    --weights and --thresholds (optional) point to JSON overrides for
+#    the documented defaults; both are recorded in the induction
+#    report so a reviewer can reproduce the band assignments.
+ontozense induce-profile \
+  domains/mydomain/discovery/candidate-graph.json \
+  --domain-name mydomain \
+  --output-dir domains/mydomain/induced-profile
+
+# 3. Review the induced profile by hand:
+#    - schema.json         : declared types and subtypes
+#    - alias_map.json      : emitted as an empty JSON object (the
+#                            emitted profile does not include
+#                            derived alias mappings)
+#    - prompt_fragment.md  : draft guidance for the second pass
+#    - induction_report.json : top selected, rejected examples,
+#                              scoring weights/thresholds used,
+#                              review notes for anything dropped
+
+# 4. Once the induced profile is reviewed and edited, print the
+#    rebuild plan — the sequence of normal pipeline commands to run
+#    with the reviewed profile.
+ontozense rebuild \
+  --profile domains/mydomain/induced-profile \
+  --domain-dir domains/mydomain
+```
+
+The induced profile is a **draft**, not a final source of truth.
+The plan's review step is non-optional — the architecture is explicit
+that human review must happen between induction and rebuild.
+
 ## Design principles
 
 - **Domain-agnostic core, profile-driven specialisation.** The core
