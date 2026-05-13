@@ -17,15 +17,23 @@ Merge key priority is enforced explicitly:
      id (or has the *same* id), merge. When an incoming concept
      carries an id and the existing entry doesn't, the existing is
      promoted (claims the id).
-  3. **Source-specific fallback** — concepts with no id or matching
-     entry fall through to plain normalised-label keying. (Aliases
-     are tracked in ``CandidateConcept.aliases`` and surface in the
-     dedup logic above.)
+  3. **Alias-expanded label** — if no id-match and no direct
+     normalised-label match, but an optional ``alias_map`` resolves
+     the incoming label to a canonical form whose normalised version
+     already exists in the bucket, merge there. The original surface
+     form is preserved in ``aliases``.
+  4. **Source-specific fallback** — brand-new candidate (create).
+
+Implementation note: alias-expansion happens up-front, *before* the
+normalised-label lookup. That collapses steps 2 and 3 into a single
+lookup against the alias-expanded normalised label — same observable
+behaviour, simpler code path. Without an alias_map, the resolver is
+the identity function and behaviour reduces to the Phase 1 baseline.
 
 **Ambiguity preservation**: when two concepts share a normalised
-label but carry *different* profile-mode ids, they stay as separate
-candidates. The architecture is explicit that ambiguous cases must
-not be silently collapsed.
+label (after alias expansion) but carry *different* profile-mode ids,
+they stay as separate candidates. The architecture is explicit that
+ambiguous cases must not be silently collapsed.
 
 ## Relationship ingestion (per architecture §"Candidate graph builder")
 
@@ -118,6 +126,7 @@ def build_candidate_graph(
     source_b: dict[str, Any] | None = None,
     source_c: dict[str, Any] | None = None,
     source_d: dict[str, Any] | None = None,
+    alias_map: dict[str, str] | None = None,
 ) -> CandidateGraph:
     """Build a merged candidate graph from raw source outputs.
 
@@ -139,8 +148,19 @@ def build_candidate_graph(
 
     Any source argument can be ``None`` or absent. Empty / missing
     labels are skipped silently.
+
+    ``alias_map`` (optional) — lowercased synonym → canonical-label
+    map, identical in shape to ``Profile.alias_map``. Drives the
+    architecture's step-3 alias-expanded merge: synonyms in different
+    sources converge on the canonical label even if their normalised
+    forms differ. Per the architecture, the ``discover`` CLI accepts
+    an optional ``--profile`` whose alias_map is passed in here (for
+    light normalisation only — *not* for filtering or type
+    constraints). Without an alias_map, behaviour reduces to the
+    id-first / name-only Phase 1 baseline.
     """
     index = _CandidateIndex()
+    aliases = alias_map or {}
 
     # ─── Concept ingestion ────────────────────────────────────────────────
     if source_a:
@@ -160,6 +180,7 @@ def build_candidate_graph(
                 source_artifact=artifact,
                 raw_type=concept.get("entity_type", "") or "",
                 eid=concept.get("id", "") or "",
+                alias_map=aliases,
             )
 
     if source_b:
@@ -175,6 +196,7 @@ def build_candidate_graph(
                 source_artifact=record.get("source_file", "") or "",
                 raw_type=record.get("entity_type", "") or "",
                 eid=record.get("id", "") or "",
+                alias_map=aliases,
             )
 
     # Source C / D ingestion is a follow-up task. The hooks below
@@ -251,6 +273,7 @@ def _upsert(
     source_artifact: str = "",
     raw_type: str = "",
     eid: str = "",
+    alias_map: dict[str, str] | None = None,
 ) -> None:
     """Insert or merge a candidate for ``label`` following the
     architecture's merge-key priority.
@@ -260,11 +283,26 @@ def _upsert(
       1. **Same id seen before** → merge into the existing entry by id.
       2. **Same normalised label, existing has no id** → merge.
          If incoming carries an id, promote it onto the existing.
-      3. **Same normalised label, existing has a different id** →
+      3. **Alias-expanded label** — the incoming label is resolved via
+         the optional ``alias_map`` before normalisation. So
+         ``"car"`` with alias_map ``{"car": "Automobile"}``
+         normalises to ``"automobile"`` and merges with any existing
+         ``"Automobile"`` candidate. The original surface form is
+         tracked in ``aliases``.
+      4. **Same normalised label, existing has a different id** →
          ambiguity preserved as a separate candidate (composite key).
-      4. **Brand-new candidate** → create.
+      5. **Brand-new candidate** → create.
+
+    The architecture lists alias-expansion as step 3 in the merge
+    priority. Implementing it as up-front normalisation (rather than
+    a separate post-name-miss lookup) collapses steps 2 and 3 into
+    one lookup with identical observable behaviour.
     """
-    norm = normalize_label(label)
+    # Step 3: alias-expand the label up-front. With no alias_map the
+    # resolver is the identity function and behaviour matches the
+    # pre-alias baseline.
+    canonical_label = _resolve_alias(label, alias_map or {})
+    norm = normalize_label(canonical_label)
     if not norm:
         return
 
@@ -280,16 +318,19 @@ def _upsert(
     # 1. Direct id hit — same canonical entity seen before.
     if eid and eid in index.by_id:
         key = index.by_id[eid]
-        _merge_into(index, key, evidence, label, definition, source_type, raw_type)
+        _merge_into(
+            index, key, evidence, label, definition, source_type,
+            raw_type, canonical_label=canonical_label,
+        )
         return
 
-    # 2. Normalised-label hit — disambiguation cases:
+    # 2. Normalised-label hit (already alias-expanded) — disambiguation cases:
     if norm in index.by_name:
         existing_key = index.by_name[norm]
         existing = index.by_key[existing_key]
         existing_id = _candidate_id_of(existing)
         if eid and existing_id and existing_id != eid:
-            # Case 3: ambiguity — same name, different ids. Keep
+            # Case 4: ambiguity — same name, different ids. Keep
             # them separate via a composite key. Future scoring /
             # human review can surface the ambiguity.
             collision_key = f"name:{norm}#id:{eid}"
@@ -302,12 +343,13 @@ def _upsert(
                     source_type=source_type,
                     eid=eid,
                     evidence=evidence,
+                    canonical_label=canonical_label,
                 )
                 index.by_id[eid] = collision_key
             else:
                 _merge_into(
                     index, collision_key, evidence, label, definition,
-                    source_type, raw_type,
+                    source_type, raw_type, canonical_label=canonical_label,
                 )
             return
         if eid and not existing_id:
@@ -323,19 +365,23 @@ def _upsert(
             _merge_into(
                 index, existing_key, evidence, label, definition,
                 source_type, raw_type, promote_id=eid,
+                canonical_label=canonical_label,
             )
             return
-        # Case 2b: both have no id, or both have the same id — plain merge.
+        # Case 2b / 3: both have no id (or matching id), or alias-expansion
+        # collapsed to this entry — plain merge.
         _merge_into(
-            index, existing_key, evidence, label, definition, source_type, raw_type,
+            index, existing_key, evidence, label, definition,
+            source_type, raw_type, canonical_label=canonical_label,
         )
         return
 
-    # 4. Brand-new candidate.
+    # 5. Brand-new candidate.
     new = _new_candidate(
         norm=norm, label=label, definition=definition,
         raw_type=raw_type, source_type=source_type,
         eid=eid, evidence=evidence,
+        canonical_label=canonical_label,
     )
     if eid:
         key = f"id:{eid}"
@@ -355,13 +401,26 @@ def _new_candidate(
     source_type: str,
     eid: str,
     evidence: EvidenceEntry,
+    canonical_label: str = "",
 ) -> CandidateConcept:
     """Construct a fresh :class:`CandidateConcept` for a never-seen-before
-    normalised label."""
+    normalised label.
+
+    ``label`` is the original surface form (preserved on the candidate's
+    ``label`` field). ``canonical_label`` is the alias-resolved form —
+    when it differs from the surface form, both are tracked in the
+    initial ``aliases`` list so future merges can find the candidate
+    via either spelling.
+    """
     candidate_id = (
         f"cand_id_{eid}"
         if eid
         else f"cand_{norm.replace(' ', '_')}"
+    )
+    initial_aliases = (
+        sorted({label, canonical_label})
+        if canonical_label and canonical_label != label
+        else [label]
     )
     return CandidateConcept(
         candidate_id=candidate_id,
@@ -384,7 +443,7 @@ def _new_candidate(
         },
         authoritative_evidence_count=1 if source_type == "A" else 0,
         provenance=[evidence],
-        aliases=[label],
+        aliases=initial_aliases,
     )
 
 
@@ -398,8 +457,14 @@ def _merge_into(
     raw_type: str,
     *,
     promote_id: str = "",
+    canonical_label: str = "",
 ) -> None:
-    """Merge incoming evidence into the candidate stored at ``key``."""
+    """Merge incoming evidence into the candidate stored at ``key``.
+
+    Both the original surface ``label`` and the alias-resolved
+    ``canonical_label`` (when different) are added to the candidate's
+    ``aliases`` list so the merge is observable from either spelling.
+    """
     existing = index.by_key[key]
 
     updated_presence = dict(existing.source_presence)
@@ -407,7 +472,10 @@ def _merge_into(
     updated_counts = dict(existing.source_counts)
     updated_counts[source_type] = updated_counts.get(source_type, 0) + 1
     merged_definition = existing.summary_definition or definition
-    merged_aliases = sorted({*existing.aliases, label})
+    new_aliases = {*existing.aliases, label}
+    if canonical_label:
+        new_aliases.add(canonical_label)
+    merged_aliases = sorted(new_aliases)
     suggested_type = existing.suggested_entity_type
     if (not suggested_type or suggested_type == "Concept") and raw_type:
         suggested_type = raw_type
@@ -424,6 +492,21 @@ def _merge_into(
         provenance=[*existing.provenance, evidence],
         aliases=merged_aliases,
     )
+
+
+def _resolve_alias(label: str, alias_map: dict[str, str]) -> str:
+    """Resolve a surface label through the alias map.
+
+    Lookup is case-insensitive on the key (mirroring how
+    :class:`~ontozense.core.profile.Profile.resolve_alias` works for
+    the profile-mode pipeline). Returns the canonical label if a
+    matching alias entry exists, otherwise returns the original label
+    unchanged. With an empty / ``None`` alias_map this is the
+    identity function — Phase 1 baseline behaviour.
+    """
+    if not alias_map:
+        return label
+    return alias_map.get(label.strip().lower(), label)
 
 
 def _candidate_id_of(candidate: CandidateConcept) -> str:

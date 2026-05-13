@@ -231,6 +231,106 @@ class TestIdFirstMergeContract:
         assert len(graph.concepts) == 1
 
 
+# ─── Alias-expanded merge (architecture step 3) ────────────────────────────
+
+
+class TestAliasExpandedMerge:
+    """Step 3 of the architecture's merge contract: when neither id
+    nor literal normalised label matches, an optional alias_map is
+    consulted to resolve incoming labels to their canonical form
+    before lookup. Synonyms that share an alias-resolved canonical
+    label converge into one candidate."""
+
+    def test_different_labels_alias_resolved_canonical_merge(self):
+        """The reviewer's repro: two candidates with different surface
+        labels and no shared id, but the alias_map resolves them to
+        the same canonical label → MERGE."""
+        source_a = {
+            "concepts": [
+                {"name": "obligor", "definition": "Source A wording."},
+            ],
+            "relationships": [],
+        }
+        source_b = {
+            "records": [
+                {"element_name": "Borrower", "definition": "Governance wording."},
+            ],
+        }
+        alias_map = {"obligor": "Borrower"}
+        graph = build_candidate_graph(
+            source_a=source_a, source_b=source_b, alias_map=alias_map,
+        )
+        # Single canonical candidate
+        assert len(graph.concepts) == 1
+        c = graph.concepts[0]
+        # Both spellings tracked as aliases
+        assert "obligor" in c.aliases
+        assert "Borrower" in c.aliases
+        # Cross-source presence confirms both contributions landed here
+        assert c.source_presence["A"] is True
+        assert c.source_presence["B"] is True
+
+    def test_alias_merge_order_independent(self):
+        """Whether the canonical-named entry arrives first or the
+        synonym does, the result is the same single candidate."""
+        # Borrower first, then obligor
+        source_a = {
+            "concepts": [{"name": "Borrower", "definition": "first"}],
+            "relationships": [],
+        }
+        source_b = {
+            "records": [{"element_name": "obligor", "definition": "second"}],
+        }
+        g1 = build_candidate_graph(
+            source_a=source_a, source_b=source_b,
+            alias_map={"obligor": "Borrower"},
+        )
+        # obligor first, then Borrower
+        source_a2 = {
+            "concepts": [{"name": "obligor", "definition": "first"}],
+            "relationships": [],
+        }
+        source_b2 = {
+            "records": [{"element_name": "Borrower", "definition": "second"}],
+        }
+        g2 = build_candidate_graph(
+            source_a=source_a2, source_b=source_b2,
+            alias_map={"obligor": "Borrower"},
+        )
+        assert len(g1.concepts) == 1
+        assert len(g2.concepts) == 1
+
+    def test_no_alias_map_means_no_alias_resolution(self):
+        """Sanity: without an alias_map, two different surface labels
+        remain separate even when a human would say they're synonyms."""
+        source_a = {
+            "concepts": [
+                {"name": "obligor", "definition": "A."},
+                {"name": "Borrower", "definition": "B."},
+            ],
+            "relationships": [],
+        }
+        graph = build_candidate_graph(source_a=source_a)
+        assert len(graph.concepts) == 2
+
+    def test_alias_lookup_is_case_insensitive_on_key(self):
+        """The alias_map convention (mirroring Profile.alias_map):
+        keys are case-insensitive on lookup, values are kept verbatim."""
+        source_a = {
+            "concepts": [{"name": "OBLIGOR", "definition": "A."}],
+            "relationships": [],
+        }
+        source_b = {
+            "records": [{"element_name": "Borrower", "definition": "B."}],
+        }
+        # Alias map has a lowercase key; incoming is uppercase
+        graph = build_candidate_graph(
+            source_a=source_a, source_b=source_b,
+            alias_map={"obligor": "Borrower"},
+        )
+        assert len(graph.concepts) == 1
+
+
 # ─── Relationship ingestion + graph_degree (architecture §"Graph features") ─
 
 
