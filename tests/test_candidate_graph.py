@@ -330,6 +330,101 @@ class TestAliasExpandedMerge:
         )
         assert len(graph.concepts) == 1
 
+    def test_relationship_endpoint_uses_alias_map_to_resolve(self):
+        """The reviewer's repro: concept ``Borrower`` exists, the
+        relationship endpoint is the synonym spelling ``obligor``, and
+        the alias_map maps ``obligor`` → ``Borrower``. The endpoint
+        must alias-resolve, find the Borrower candidate, and the
+        relationship must land — incrementing graph_degree.
+
+        Without alias resolution on the endpoint side, this
+        relationship would silently disappear because
+        ``normalize_label("obligor")`` doesn't match any entry in
+        ``index.by_name`` (the canonical store is keyed at
+        ``normalize_label("Borrower") == "borrower"``)."""
+        source_a = {
+            "concepts": [
+                {"name": "Loan", "definition": "L."},
+                {"name": "Borrower", "definition": "B."},
+            ],
+            "relationships": [
+                # Endpoint deliberately spelled with the synonym
+                {"subject": "Loan", "predicate": "HasBorrower",
+                 "object": "obligor"},
+            ],
+        }
+        graph = build_candidate_graph(
+            source_a=source_a, alias_map={"obligor": "Borrower"},
+        )
+        # Relationship landed
+        assert len(graph.relationships) == 1
+        rel = graph.relationships[0]
+        # Endpoint resolved to the Borrower candidate, not a stub
+        cand_loan = next(c for c in graph.concepts if c.label == "Loan")
+        cand_borrower = next(c for c in graph.concepts if c.label == "Borrower")
+        assert rel.subject_candidate_id == cand_loan.candidate_id
+        assert rel.object_candidate_id == cand_borrower.candidate_id
+        # graph_degree reflects the resolved edge
+        assert cand_loan.graph_degree == 1
+        assert cand_borrower.graph_degree == 1
+
+    def test_relationship_endpoint_canonical_after_synonym_concept_merge(self):
+        """Reverse direction: concept ingested via the synonym
+        (``obligor``, alias-resolved to ``Borrower``) plus a
+        relationship endpoint spelled with the canonical form
+        (``Borrower``) must still resolve.
+
+        This path doesn't strictly require alias-resolution on the
+        endpoint side (the canonical norm is the storage key), but
+        the test pins the bidirectionality so a future regression
+        that flips alias-resolution direction is caught."""
+        source_a = {
+            "concepts": [
+                {"name": "Loan", "definition": "L."},
+                {"name": "obligor", "definition": "B."},
+            ],
+            "relationships": [
+                {"subject": "Loan", "predicate": "HasBorrower",
+                 "object": "Borrower"},
+            ],
+        }
+        graph = build_candidate_graph(
+            source_a=source_a, alias_map={"obligor": "Borrower"},
+        )
+        assert len(graph.relationships) == 1
+        cand_loan = next(c for c in graph.concepts if c.label == "Loan")
+        # Concept's surface label is the original spelling ("obligor")
+        cand_borrower = next(
+            c for c in graph.concepts if "Borrower" in c.aliases
+        )
+        rel = graph.relationships[0]
+        assert rel.subject_candidate_id == cand_loan.candidate_id
+        assert rel.object_candidate_id == cand_borrower.candidate_id
+        assert cand_loan.graph_degree == 1
+        assert cand_borrower.graph_degree == 1
+
+    def test_relationship_endpoint_alias_lookup_is_case_insensitive(self):
+        """Same case-insensitivity contract as the concept-side
+        alias resolution. The endpoint label can be any casing of
+        a key in alias_map and still resolve."""
+        source_a = {
+            "concepts": [
+                {"name": "Loan", "definition": "L."},
+                {"name": "Borrower", "definition": "B."},
+            ],
+            "relationships": [
+                # Endpoint UPPERCASE; alias_map key is lowercase
+                {"subject": "Loan", "predicate": "HasBorrower",
+                 "object": "OBLIGOR"},
+            ],
+        }
+        graph = build_candidate_graph(
+            source_a=source_a, alias_map={"obligor": "Borrower"},
+        )
+        assert len(graph.relationships) == 1
+        cand_borrower = next(c for c in graph.concepts if c.label == "Borrower")
+        assert graph.relationships[0].object_candidate_id == cand_borrower.candidate_id
+
 
 # ─── Relationship ingestion + graph_degree (architecture §"Graph features") ─
 

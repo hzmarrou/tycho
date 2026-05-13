@@ -40,10 +40,13 @@ ambiguous cases must not be silently collapsed.
 Source A relationships (subject-predicate-object triples) are
 mapped to :class:`CandidateRelationship` objects whose endpoints
 reference candidate IDs (not raw labels) — so the relationship
-survives later alias resolution. Endpoints that don't resolve to
-any existing candidate are skipped (Source A occasionally produces
-relationships that reference entities it didn't extract as concepts;
-that's drift the lint stage catches downstream).
+survives later alias resolution. The endpoint resolver applies the
+same alias-expansion pass as concept ingestion, so a relationship
+endpoint spelled with a synonym surface form resolves to the
+candidate merged under the canonical label. Endpoints that don't
+resolve to any existing candidate are skipped (Source A occasionally
+produces relationships that reference entities it didn't extract as
+concepts; that's drift the lint stage catches downstream).
 
 ``graph_degree`` is the distinct-neighbour count for each candidate,
 computed from the resolved relationships. It feeds the relevance-
@@ -216,8 +219,12 @@ def build_candidate_graph(
             predicate = (rel.get("predicate") or "").strip()
             if not (subj_label and obj_label and predicate):
                 continue
-            subj_id = _resolve_endpoint_to_candidate_id(index, subj_label)
-            obj_id = _resolve_endpoint_to_candidate_id(index, obj_label)
+            subj_id = _resolve_endpoint_to_candidate_id(
+                index, subj_label, alias_map=aliases,
+            )
+            obj_id = _resolve_endpoint_to_candidate_id(
+                index, obj_label, alias_map=aliases,
+            )
             if subj_id is None or obj_id is None:
                 # Endpoint references a concept the extractor didn't
                 # surface — let lint catch the dangling reference
@@ -521,16 +528,30 @@ def _candidate_id_of(candidate: CandidateConcept) -> str:
 
 
 def _resolve_endpoint_to_candidate_id(
-    index: _CandidateIndex, endpoint_label: str,
+    index: _CandidateIndex,
+    endpoint_label: str,
+    *,
+    alias_map: dict[str, str] | None = None,
 ) -> str | None:
     """Map a relationship endpoint string to a candidate's
     ``candidate_id``, or ``None`` if no candidate exists.
 
-    Tries by normalised label only — endpoints typically come from
-    Source A's free-form text where the LLM uses element_name
-    strings, not deterministic ids.
+    Endpoints typically come from Source A's free-form text where
+    the LLM uses element_name strings, not deterministic ids — so
+    resolution is name-based. The lookup applies the same
+    alias-expansion pass that concept ingestion uses (see
+    :func:`_upsert`): the endpoint label is resolved through
+    ``alias_map`` *before* normalisation. That way a relationship
+    endpoint spelled with a synonym surface form (e.g. ``"car"``)
+    still resolves to the candidate that was merged under the
+    canonical label (e.g. ``"Automobile"``).
+
+    Without an alias_map, :func:`_resolve_alias` is the identity
+    function and behaviour reduces to the pre-alias baseline:
+    direct normalised-label lookup only.
     """
-    norm = normalize_label(endpoint_label)
+    canonical_label = _resolve_alias(endpoint_label, alias_map or {})
+    norm = normalize_label(canonical_label)
     if not norm:
         return None
     key = index.by_name.get(norm)
