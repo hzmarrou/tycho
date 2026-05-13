@@ -24,7 +24,11 @@ from __future__ import annotations
 import pytest
 
 from ontozense.core.discovery_contracts import CandidateConcept
-from ontozense.core.relevance import DEFAULT_WEIGHTS, score_candidates
+from ontozense.core.relevance import (
+    DEFAULT_THRESHOLDS,
+    DEFAULT_WEIGHTS,
+    score_candidates,
+)
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
@@ -211,10 +215,15 @@ class TestExplanationContract:
         )
 
     def test_breakdown_values_sum_to_relevance_score(self):
+        # The breakdown values are the exact same float
+        # contributions that were summed to form relevance_score —
+        # no intermediate rounding — so the invariant holds with a
+        # very tight absolute tolerance (handles only the typical
+        # ulp-level reordering noise of Python's ``sum``).
         c = _concept("Widget", a=2, b=1, degree=3, definition="A thing.")
         scored = score_candidates([c])[0]
         assert sum(scored.relevance_breakdown.values()) == \
-            pytest.approx(scored.relevance_score, rel=1e-3)
+            pytest.approx(scored.relevance_score, abs=1e-12)
 
 
 # ─── Custom weights and edge cases ─────────────────────────────────────────
@@ -322,3 +331,121 @@ class TestThresholdBoundaries:
         scored = score_candidates([c], weights=weights)[0]
         assert scored.relevance_score < 0.40
         assert scored.classification == "noise"
+
+
+# ─── Rounding-boundary precision (round-1 reviewer finding) ────────────────
+
+
+class TestRoundingBoundaryPrecision:
+    """The classifier must consult the un-rounded total, not a
+    coarsened display value. A previous implementation rounded the
+    score to 4 decimals *before* classification, so a true total of
+    ``0.69999`` rounded to ``0.7000`` and was mis-classified as
+    ``core_business``. Same risk at the ``0.40`` boundary.
+
+    These tests engineer the exact boundary cases that round up
+    across a threshold; with the un-rounded classifier the band
+    assignment tracks the true score."""
+
+    def test_score_just_below_070_classifies_as_supporting_technical(self):
+        # round(0.69999, 4) == 0.7 — would have flipped to
+        # core_business under the buggy implementation. The
+        # un-rounded total stays at 0.69999 < 0.70 → supporting.
+        weights = dict.fromkeys(DEFAULT_WEIGHTS.keys(), 0.0)
+        weights["authoritative_frequency"] = 0.69999
+        c = _concept("Widget", a=3)
+        scored = score_candidates([c], weights=weights)[0]
+        assert scored.relevance_score < 0.70
+        assert scored.classification == "supporting_technical"
+
+    def test_score_just_below_040_classifies_as_noise(self):
+        # round(0.39999, 4) == 0.4 — would have flipped to
+        # supporting_technical under the buggy implementation. The
+        # un-rounded total stays at 0.39999 < 0.40 → noise.
+        weights = dict.fromkeys(DEFAULT_WEIGHTS.keys(), 0.0)
+        weights["authoritative_frequency"] = 0.39999
+        c = _concept("Widget", a=3)
+        scored = score_candidates([c], weights=weights)[0]
+        assert scored.relevance_score < 0.40
+        assert scored.classification == "noise"
+
+    def test_relevance_score_is_stored_unrounded(self):
+        # Sanity: 0.69999 must survive into the stored field intact,
+        # not be coarsened to 4 decimal places.
+        weights = dict.fromkeys(DEFAULT_WEIGHTS.keys(), 0.0)
+        weights["authoritative_frequency"] = 0.69999
+        c = _concept("Widget", a=3)
+        scored = score_candidates([c], weights=weights)[0]
+        # If the implementation still rounded to 4 decimals, the
+        # stored value would equal 0.7 within float tolerance.
+        assert scored.relevance_score != pytest.approx(0.7, abs=1e-8)
+        assert scored.relevance_score == pytest.approx(0.69999, abs=1e-8)
+
+
+# ─── Configurable thresholds (round-1 reviewer finding) ────────────────────
+
+
+class TestConfigurableThresholds:
+    """Architecture §"Classification thresholds": "These thresholds
+    must be configurable." The CLI in Phase 3 reads an optional
+    override; tests pass a dict directly through ``thresholds=``."""
+
+    def test_default_thresholds_is_publicly_exposed(self):
+        # Phase 3 imports this for its YAML-merge step; the
+        # InductionReport writer in Task 4 may also need it.
+        assert DEFAULT_THRESHOLDS["core_business"] == 0.70
+        assert DEFAULT_THRESHOLDS["supporting_technical"] == 0.40
+
+    def test_custom_thresholds_can_tighten_to_demote_candidate(self):
+        # A candidate that lands in supporting_technical under
+        # defaults must drop to noise when supporting_technical's
+        # lower bound is raised above its score.
+        c = _concept("Widget", a=2, b=1, degree=1, definition="A thing.")
+        default_scored = score_candidates([c])[0]
+        assert default_scored.classification == "supporting_technical"
+
+        tighter = {
+            "core_business": 0.99,
+            "supporting_technical": default_scored.relevance_score + 0.01,
+        }
+        tighter_scored = score_candidates([c], thresholds=tighter)[0]
+        # Score is independent of thresholds; only the band changes.
+        assert tighter_scored.relevance_score == default_scored.relevance_score
+        assert tighter_scored.classification == "noise"
+
+    def test_custom_thresholds_can_relax_to_promote_candidate(self):
+        # Same candidate; lowering core_business's lower bound below
+        # the score promotes it to core_business.
+        c = _concept("Widget", a=2, b=1, degree=1, definition="A thing.")
+        default_scored = score_candidates([c])[0]
+        assert default_scored.classification == "supporting_technical"
+
+        relaxed = {
+            "core_business": default_scored.relevance_score - 0.01,
+            "supporting_technical": 0.10,
+        }
+        relaxed_scored = score_candidates([c], thresholds=relaxed)[0]
+        assert relaxed_scored.classification == "core_business"
+
+    def test_custom_weights_and_thresholds_compose_independently(self):
+        # Both knobs at once. Custom weights yield a known score;
+        # custom thresholds map it to a chosen band.
+        weights = dict.fromkeys(DEFAULT_WEIGHTS.keys(), 0.0)
+        weights["definition_richness"] = 1.0  # raw = 1.0 → score = 1.0
+        thresholds = {"core_business": 0.99, "supporting_technical": 0.50}
+        c = _concept("Widget", definition="A thing.")
+        scored = score_candidates(
+            [c], weights=weights, thresholds=thresholds,
+        )[0]
+        assert scored.relevance_score == pytest.approx(1.0)
+        assert scored.classification == "core_business"
+
+    def test_thresholds_none_uses_defaults(self):
+        # Sanity: explicit ``thresholds=None`` is equivalent to
+        # omitting the argument (the supported "use defaults" form).
+        c = _concept("Widget", a=3, b=1, c=1, d=1, degree=5,
+                     definition="A thing.")
+        with_none = score_candidates([c], thresholds=None)[0]
+        omitted = score_candidates([c])[0]
+        assert with_none.classification == omitted.classification
+        assert with_none.relevance_score == omitted.relevance_score

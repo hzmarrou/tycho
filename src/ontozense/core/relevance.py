@@ -6,16 +6,21 @@ The scoring stage consumes the :class:`CandidateConcept` list from
 with three fields populated:
 
   - ``relevance_score`` — the total in ``[0.0, 1.0]`` formed by
-    summing seven weighted signal contributions.
+    summing seven weighted signal contributions. Stored at full
+    float precision (no rounding) so the classification step
+    consults the true score, not a coarsened display value.
   - ``relevance_breakdown`` — per-signal weighted contribution. The
-    values sum to ``relevance_score`` (modulo float precision), so
-    reviewers can verify the score by eye and see which signal
-    pushed a candidate into ``core_business`` or down to ``noise``.
-  - ``classification`` — bucketed by two thresholds:
+    values sum to ``relevance_score`` exactly (same float math, no
+    intermediate rounding) so reviewers can verify the score by eye
+    and see which signal pushed a candidate into ``core_business``
+    or down to ``noise``.
+  - ``classification`` — bucketed by two thresholds (defaults
+    exposed as :data:`DEFAULT_THRESHOLDS`; configurable per-call):
 
-      * score ``≥ 0.70`` → ``"core_business"``
-      * score ``≥ 0.40`` and ``< 0.70`` → ``"supporting_technical"``
-      * score ``< 0.40`` → ``"noise"``
+      * score ``>= core_business`` (default ``0.70``) → ``"core_business"``
+      * score ``>= supporting_technical`` (default ``0.40``)
+        → ``"supporting_technical"``
+      * else → ``"noise"``
 
 ## The seven signals
 
@@ -72,9 +77,16 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "business_naming_signal": 0.10,
 }
 
-# Classification thresholds (inclusive on the high side).
-_CORE_BUSINESS_THRESHOLD = 0.70
-_SUPPORTING_TECHNICAL_THRESHOLD = 0.40
+# Classification thresholds (inclusive on the high side). Architecture
+# §"Classification thresholds" mandates that these be configurable —
+# the CLI in Phase 3 loads an optional override from YAML and passes
+# it through ``score_candidates(thresholds=...)``. The keys must
+# match the two upper bands; the third band ("noise") is implicit
+# below the supporting_technical threshold.
+DEFAULT_THRESHOLDS: dict[str, float] = {
+    "core_business": 0.70,
+    "supporting_technical": 0.40,
+}
 
 # Saturation denominators for the diminishing-returns signals.
 _AUTHORITATIVE_SATURATION = 3
@@ -109,13 +121,19 @@ def _business_naming_signal(label: str) -> float:
     return _NAMING_CLEAN
 
 
-def _classify(score: float) -> str:
+def _classify(score: float, thresholds: dict[str, float]) -> str:
     """Bucket a relevance score into the three documented bands.
     Both thresholds are inclusive on the high side, matching the
-    architecture's spec."""
-    if score >= _CORE_BUSINESS_THRESHOLD:
+    architecture's spec.
+
+    ``thresholds`` must be a complete dict with both ``core_business``
+    and ``supporting_technical`` keys (default values in
+    :data:`DEFAULT_THRESHOLDS`). Missing keys raise :class:`KeyError`
+    — the caller is expected to pass a complete override or rely on
+    the default."""
+    if score >= thresholds["core_business"]:
         return "core_business"
-    if score >= _SUPPORTING_TECHNICAL_THRESHOLD:
+    if score >= thresholds["supporting_technical"]:
         return "supporting_technical"
     return "noise"
 
@@ -123,6 +141,7 @@ def _classify(score: float) -> str:
 def score_candidates(
     candidates: list[CandidateConcept],
     weights: dict[str, float] | None = None,
+    thresholds: dict[str, float] | None = None,
 ) -> list[CandidateConcept]:
     """Score and classify a list of candidate concepts.
 
@@ -138,9 +157,24 @@ def score_candidates(
     Phase 3's CLI loads this from a YAML override and validates
     completeness before calling.
 
+    ``thresholds`` (optional) — full override of the classification
+    band cut-offs. Same contract as ``weights``: complete dict or
+    ``None``. Architecture §"Classification thresholds" mandates
+    these be configurable; defaults match the architecture's
+    starting values (``0.70`` / ``0.40``).
+
+    The total relevance score is the un-rounded ``sum`` of the
+    per-signal weighted contributions. Classification consults the
+    un-rounded score, so the band assignment is consistent with the
+    true total even when the score happens to sit a sub-ulp below
+    a threshold boundary. Downstream display layers can format the
+    score to whatever precision they like; the scoring stage does
+    not coarsen it.
+
     Returns an empty list for empty input. Order is preserved.
     """
     weight_map = DEFAULT_WEIGHTS if weights is None else weights
+    threshold_map = DEFAULT_THRESHOLDS if thresholds is None else thresholds
 
     scored: list[CandidateConcept] = []
     for candidate in candidates:
@@ -170,14 +204,17 @@ def score_candidates(
             "definition_richness": weight_map["definition_richness"] * raw_def,
             "business_naming_signal": weight_map["business_naming_signal"] * raw_naming,
         }
-        total = round(sum(breakdown.values()), 4)
+        # Un-rounded so the classifier sees the true total and so
+        # ``sum(breakdown.values()) == relevance_score`` holds exactly
+        # under the same float math.
+        total = sum(breakdown.values())
 
         scored.append(
             replace(
                 candidate,
                 relevance_score=total,
                 relevance_breakdown=breakdown,
-                classification=_classify(total),
+                classification=_classify(total, threshold_map),
             )
         )
     return scored
