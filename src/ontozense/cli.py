@@ -2324,5 +2324,227 @@ def info(
         console.print(table)
 
 
+# ─── discover (profile induction workflow) ──────────────────────────────────
+
+
+@app.command(name="discover")
+def discover(
+    source_a: list[Path] = typer.Option(
+        None, "--source-a",
+        help=(
+            "Path to a Source A extraction JSON. Repeatable — every "
+            "occurrence's concepts and relationships lists are concatenated "
+            "before building the candidate graph."
+        ),
+    ),
+    source_b: list[Path] = typer.Option(
+        None, "--source-b",
+        help=(
+            "Path to a Source B governance JSON. Repeatable — records "
+            "lists are concatenated."
+        ),
+    ),
+    source_c: list[Path] = typer.Option(
+        None, "--source-c",
+        help=(
+            "Path to a Source C schema JSON. Repeatable. Ingestion in "
+            "build_candidate_graph is a forward-compat placeholder today; "
+            "the flag is accepted so wiring is in place when ingestion "
+            "lands."
+        ),
+    ),
+    source_d: list[Path] = typer.Option(
+        None, "--source-d",
+        help=(
+            "Path to a Source D code/rules JSON. Repeatable. Same "
+            "forward-compat status as --source-c."
+        ),
+    ),
+    profile: Path = typer.Option(
+        None, "--profile",
+        help=(
+            "Optional profile directory. Only its alias_map is consulted "
+            "(light label normalisation across sources). The profile's "
+            "type vocabulary, predicates, and validation rules are NOT "
+            "applied — discovery surfaces every candidate the extractors "
+            "found."
+        ),
+    ),
+    domain_dir: Path = typer.Option(
+        ..., "--domain-dir",
+        help=(
+            "Output directory. Discovery artifacts are written under "
+            "<domain_dir>/discovery/."
+        ),
+    ),
+) -> None:
+    """Build a candidate graph from raw source extractions.
+
+    Writes three artifacts under ``<DOMAIN_DIR>/discovery/``:
+
+      - ``candidate-graph.json`` — concepts + relationships.
+      - ``candidate-provenance.json`` — per-candidate evidence
+        breakdown, so a reviewer can trace any candidate back to
+        the source row it came from.
+      - ``concept-mappings.json`` — placeholder ``{"mappings": []}``;
+        ``induce-profile`` populates this in the next step of the
+        workflow.
+
+    Discovery is intentionally permissive: it does not filter
+    candidates by score or type. Run ``induce-profile`` afterwards
+    to apply relevance scoring + classification.
+    """
+    import json
+
+    from .core.candidate_graph import build_candidate_graph
+    from .core.profile import ProfileError, load_profile
+
+    discovery_dir = domain_dir / "discovery"
+    discovery_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Load and merge source inputs ──
+    try:
+        merged_a = _merge_source_a(source_a or [])
+        merged_b = _merge_source_b(source_b or [])
+        merged_c = _load_source_passthrough(source_c or [])
+        merged_d = _load_source_passthrough(source_d or [])
+    except _SourceLoadError as err:
+        console.print(
+            f"[red]Failed to load source file {err.path}:[/] {err}"
+        )
+        raise typer.Exit(code=2)
+
+    # ── Resolve optional --profile to its alias_map (only) ──
+    alias_map: dict[str, str] | None = None
+    if profile is not None:
+        try:
+            loaded = load_profile(profile)
+        except ProfileError as err:
+            console.print(
+                f"[red]Failed to load --profile from {profile}:[/] {err}"
+            )
+            raise typer.Exit(code=2)
+        # Defensive copy — the loaded Profile is frozen but its
+        # alias_map dict is not, and we don't want a downstream
+        # mutation to leak back into a re-used profile instance.
+        alias_map = dict(loaded.alias_map)
+
+    # ── Build the candidate graph ──
+    graph = build_candidate_graph(
+        source_a=merged_a,
+        source_b=merged_b,
+        source_c=merged_c,
+        source_d=merged_d,
+        alias_map=alias_map,
+    )
+
+    # ── Write the three artifacts ──
+    (discovery_dir / "candidate-graph.json").write_text(
+        json.dumps(graph.to_dict(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    provenance = {
+        "concepts": [
+            {
+                "candidate_id": c.candidate_id,
+                "label": c.label,
+                "provenance": [p.to_dict() for p in c.provenance],
+            }
+            for c in graph.concepts
+        ],
+    }
+    (discovery_dir / "candidate-provenance.json").write_text(
+        json.dumps(provenance, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (discovery_dir / "concept-mappings.json").write_text(
+        json.dumps({"mappings": []}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    console.print(
+        f"[green]Discovery artifacts written to[/] {discovery_dir}"
+    )
+
+
+# ─── Source-loading helpers (discover) ──────────────────────────────────────
+
+
+class _SourceLoadError(Exception):
+    """Raised when a discovery source file can't be loaded. Carries
+    the path so the CLI can surface a clean error message without
+    showing a traceback to the user."""
+
+    def __init__(self, path: Path, message: str) -> None:
+        super().__init__(message)
+        self.path = path
+
+
+def _load_json(path: Path) -> dict:
+    """Load a single JSON source file, wrapping the typical I/O and
+    decode failure modes as :class:`_SourceLoadError` so the
+    discover command can surface a clean error.
+    """
+    import json
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as err:
+        raise _SourceLoadError(path, f"file not found: {path}") from err
+    except json.JSONDecodeError as err:
+        raise _SourceLoadError(path, f"invalid JSON: {err}") from err
+    except OSError as err:
+        raise _SourceLoadError(path, f"could not read: {err}") from err
+
+
+def _merge_source_a(paths: list[Path]) -> dict | None:
+    """Concatenate ``concepts`` and ``relationships`` across one or
+    more Source A JSON files. Returns ``None`` when no paths are
+    given so :func:`build_candidate_graph` treats that as "no
+    Source A contribution" (rather than empty-but-present)."""
+    if not paths:
+        return None
+    merged: dict = {"concepts": [], "relationships": []}
+    for path in paths:
+        raw = _load_json(path)
+        merged["concepts"].extend(raw.get("concepts", []))
+        merged["relationships"].extend(raw.get("relationships", []))
+    return merged
+
+
+def _merge_source_b(paths: list[Path]) -> dict | None:
+    """Concatenate ``records`` across one or more Source B governance
+    JSON files. Same None-vs-empty semantics as :func:`_merge_source_a`."""
+    if not paths:
+        return None
+    merged: dict = {"records": []}
+    for path in paths:
+        raw = _load_json(path)
+        merged["records"].extend(raw.get("records", []))
+    return merged
+
+
+def _load_source_passthrough(paths: list[Path]) -> dict | None:
+    """For sources whose ingestion isn't locked yet (Source C / D —
+    :func:`build_candidate_graph` has placeholder hooks for these).
+    The CLI surface is forward-compatible: it accepts the flag and
+    forwards a merged dict so wiring is in place when ingestion
+    lands. Until then, the merged dict is a no-op inside the
+    builder.
+
+    Single-file inputs pass through unchanged. Multi-file inputs
+    are last-write-wins on the top-level dict — callers should not
+    rely on specific merge semantics for C/D until those sources
+    ingest properly.
+    """
+    if not paths:
+        return None
+    if len(paths) == 1:
+        return _load_json(paths[0])
+    merged: dict = {}
+    for path in paths:
+        merged.update(_load_json(path))
+    return merged
+
+
 if __name__ == "__main__":
     app()
