@@ -376,7 +376,16 @@ class TestAliasExpandedMerge:
 
     def test_alias_merge_order_independent(self):
         """Whether the canonical-named entry arrives first or the
-        synonym does, the result is the same single candidate."""
+        synonym does, the result is the same single candidate
+        carrying the same canonical label.
+
+        Round-1 reviewer finding pinned here: previously this test
+        only checked candidate *count* (1 in both orderings), not
+        the candidate's primary ``label``. The label was derived
+        from whichever surface form arrived first, so reversing
+        source order flipped the emitted subtype name between
+        ``"obligor"`` and ``"Borrower"`` despite the same alias
+        map and the same evidence."""
         # Borrower first, then obligor
         source_a = {
             "concepts": [{"name": "Borrower", "definition": "first"}],
@@ -403,6 +412,16 @@ class TestAliasExpandedMerge:
         )
         assert len(g1.concepts) == 1
         assert len(g2.concepts) == 1
+        # Both orderings produce the same primary label — the
+        # alias-resolved canonical form, not the first surface
+        # form encountered.
+        assert g1.concepts[0].label == "Borrower"
+        assert g2.concepts[0].label == "Borrower"
+        # And both surface forms remain reachable as aliases so
+        # callers can find the candidate via either spelling.
+        for g in (g1, g2):
+            assert "Borrower" in g.concepts[0].aliases
+            assert "obligor" in g.concepts[0].aliases
 
     def test_no_alias_map_means_no_alias_resolution(self):
         """Sanity: without an alias_map, two different surface labels

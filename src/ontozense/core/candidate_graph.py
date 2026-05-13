@@ -456,16 +456,28 @@ def _new_candidate(
     """Construct a fresh :class:`CandidateConcept` for a never-seen-before
     normalised label.
 
-    ``label`` is the original surface form. ``canonical_label`` is
-    the alias-resolved form — when it differs from the surface form,
-    both are tracked in the initial ``aliases`` list so subsequent
-    merges find the candidate via either spelling.
+    ``label`` is the surface form the caller passed.
+    ``canonical_label`` is the alias-resolved form — when an
+    alias_map is in effect, this is the value the merge keyed on.
+
+    Round-1 reviewer finding pinned here: the candidate's primary
+    ``label`` is the *canonical* form (alias-resolved), not the
+    first surface form encountered. That makes the emitted label
+    order-independent — reversing source order with the same
+    alias_map and same evidence yields the same primary label
+    instead of flipping between synonym and canonical. The
+    original surface form is still preserved in ``aliases`` so
+    callers can locate the candidate via either spelling.
     """
     candidate_id = (
         f"cand_id_{eid}"
         if eid
         else f"cand_{norm.replace(' ', '_')}"
     )
+    # Prefer the canonical (alias-resolved) form for the primary
+    # label. Falls back to the surface ``label`` only when no
+    # canonical was supplied (callers that don't pass alias_map).
+    preferred_label = canonical_label if canonical_label else label
     initial_aliases = (
         sorted({label, canonical_label})
         if canonical_label and canonical_label != label
@@ -473,7 +485,7 @@ def _new_candidate(
     )
     return CandidateConcept(
         candidate_id=candidate_id,
-        label=label,
+        label=preferred_label,
         normalized_label=norm,
         suggested_entity_type=raw_type or "Concept",
         classification="unknown",

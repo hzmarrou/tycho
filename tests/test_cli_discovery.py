@@ -1510,12 +1510,18 @@ class TestDiscoveryWorkflowEndToEnd:
         # the alias_map. That candidate lands as exactly one
         # subtype somewhere in the schema — which type bucket it
         # ends up in (``Concept`` vs ``TechnicalArtifact``) depends
-        # on its scored band, but the pin is "exactly one" not
-        # "in this specific bucket".
-        total_subtypes = sum(
-            len(et.subtypes) for et in profile.entity_types.values()
-        )
-        assert total_subtypes == 1
+        # on its scored band, but the count is "exactly one".
+        all_subtypes = [
+            s for et in profile.entity_types.values() for s in et.subtypes
+        ]
+        assert len(all_subtypes) == 1
+        # The emitted subtype name is the alias-resolved canonical
+        # form, not the synonym. Round-1 reviewer finding pinned
+        # here: with input order [Source A: "obligor", Source B:
+        # "Borrower"] and alias_map ``{"obligor": "Borrower"}``,
+        # the emitted subtype must be ``"Borrower"`` regardless of
+        # which surface form arrived first in the source files.
+        assert all_subtypes[0] == "Borrower"
 
 
 class TestInduceProfileConsoleSummary:
