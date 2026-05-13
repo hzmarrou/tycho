@@ -162,18 +162,52 @@ def write_induced_profile(
         DEFAULT_THRESHOLDS if thresholds is None else thresholds
     )
 
-    # Bucket by classification. Anything not in one of the three
-    # documented bands (e.g. legacy "unknown") is treated as noise
-    # for schema purposes — the report still counts it via
-    # ``candidate_count``.
+    # Bucket by classification. Everything not selected lands in
+    # ``rejected`` so the report's counts reconcile exactly:
+    #
+    #   candidate_count
+    #     == selected_core_count + selected_supporting_count
+    #        + rejected_count
+    #
+    # That includes the documented "noise" band *and* any candidate
+    # whose classification is something else (e.g. the dataclass
+    # default ``"unknown"`` when ``score_candidates`` was skipped,
+    # or a hypothetical future band a caller invented). Without
+    # this catch-all, candidates with non-standard classifications
+    # would silently disappear from both ``top_candidates`` and
+    # ``rejected_examples`` and the report would no longer be a
+    # full audit trail.
     core = [c for c in candidates if c.classification == "core_business"]
     supporting = [
         c for c in candidates
         if c.classification == "supporting_technical"
     ]
-    noise = [c for c in candidates if c.classification == "noise"]
+    rejected = [
+        c for c in candidates
+        if c.classification not in (
+            "core_business", "supporting_technical",
+        )
+    ]
 
     review_notes: list[str] = []
+
+    # Surface non-"noise" rejected classifications so a reviewer
+    # notices upstream-pipeline drift (typically a forgotten
+    # ``score_candidates`` step). The aggregate per-classification
+    # form keeps the note compact even on large inputs; the
+    # individual candidates still appear in ``rejected_examples``.
+    non_standard = sorted({
+        c.classification for c in rejected
+        if c.classification != "noise"
+    })
+    if non_standard:
+        review_notes.append(
+            f"{len(rejected) - sum(1 for c in rejected if c.classification == 'noise')} "
+            f"candidate(s) carried non-standard classification(s) "
+            f"{non_standard!r}; counted as rejected. Run "
+            f"score_candidates() before write_induced_profile() to "
+            f"assign one of the documented bands."
+        )
 
     schema, emitted_types = _build_schema(
         domain_name, core, supporting, review_notes,
@@ -194,7 +228,7 @@ def write_induced_profile(
         reverse=True,
     )
     rejected_sorted = sorted(
-        noise, key=lambda c: c.relevance_score, reverse=True,
+        rejected, key=lambda c: c.relevance_score, reverse=True,
     )
 
     if not core and not supporting:
@@ -211,7 +245,7 @@ def write_induced_profile(
         candidate_count=len(candidates),
         selected_core_count=len(core),
         selected_supporting_count=len(supporting),
-        rejected_count=len(noise),
+        rejected_count=len(rejected),
         scoring_weights=weight_map,
         top_candidates=[
             _top_candidate_entry(c)
@@ -334,6 +368,12 @@ def _subtypes_from_candidates(
     for candidate in candidates:
         label = candidate.label.strip()
         if not label:
+            review_notes.append(
+                f"Candidate {candidate.candidate_id!r} has an empty / "
+                f"whitespace-only label; excluded from {parent_type} "
+                f"subtypes. Check the source ingestion stage for a "
+                f"missing or stripped name."
+            )
             continue
         lower = label.lower()
         if lower in _RESERVED_TYPE_NAMES:

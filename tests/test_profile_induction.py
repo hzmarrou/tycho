@@ -393,6 +393,209 @@ class TestInductionReportContents:
         assert "TechnicalArtifact" in raw["required_field_suggestions"]
 
 
+# ─── Audit-trail reconciliation (round-1 reviewer finding) ─────────────────
+
+
+class TestAuditTrailReconciliation:
+    """Every candidate must be accounted for: the report's bucket
+    counts must sum to candidate_count, and every candidate must
+    appear in either top_candidates or rejected_examples. A previous
+    implementation only counted explicit ``"noise"`` as rejected, so
+    legacy ``"unknown"``-classified or any non-standard-band
+    candidate would silently disappear from both the counts and the
+    audit lists. These tests pin the reconciliation property."""
+
+    def test_unknown_classification_candidate_appears_in_rejected_count(
+        self, tmp_path: Path,
+    ):
+        candidates = [
+            _candidate("Customer", classification="core_business"),
+            # Default classification on the dataclass is "unknown" —
+            # what a caller would see if they skipped score_candidates.
+            _candidate("Orphan", classification="unknown", score=0.0),
+        ]
+        out_dir = tmp_path / "induced-profile"
+        write_induced_profile("demo", candidates, out_dir)
+        raw = json.loads(
+            (out_dir / "induction_report.json").read_text(encoding="utf-8")
+        )
+        assert raw["rejected_count"] == 1
+
+    def test_unknown_classification_candidate_appears_in_rejected_examples(
+        self, tmp_path: Path,
+    ):
+        candidates = [
+            _candidate("Orphan", classification="unknown", score=0.0),
+        ]
+        out_dir = tmp_path / "induced-profile"
+        write_induced_profile("demo", candidates, out_dir)
+        raw = json.loads(
+            (out_dir / "induction_report.json").read_text(encoding="utf-8")
+        )
+        ids = [e["candidate_id"] for e in raw["rejected_examples"]]
+        assert "cand_orphan" in ids
+
+    def test_non_standard_classification_logged_in_review_notes(
+        self, tmp_path: Path,
+    ):
+        candidates = [
+            _candidate("Orphan", classification="unknown", score=0.0),
+        ]
+        out_dir = tmp_path / "induced-profile"
+        write_induced_profile("demo", candidates, out_dir)
+        raw = json.loads(
+            (out_dir / "induction_report.json").read_text(encoding="utf-8")
+        )
+        notes = " ".join(raw["review_notes"])
+        # The note must cite the actual non-standard classification
+        # value so the reviewer can trace it back to the upstream
+        # stage (typically a forgotten score_candidates() call).
+        assert "unknown" in notes
+
+    def test_only_noise_does_not_trigger_non_standard_review_note(
+        self, tmp_path: Path,
+    ):
+        """If every rejected candidate is in the documented ``noise``
+        band, the non-standard-classification note must *not* fire
+        — it would be noise itself."""
+        candidates = [
+            _candidate("Customer", classification="core_business"),
+            _candidate("garbage", classification="noise", score=0.1),
+        ]
+        out_dir = tmp_path / "induced-profile"
+        write_induced_profile("demo", candidates, out_dir)
+        raw = json.loads(
+            (out_dir / "induction_report.json").read_text(encoding="utf-8")
+        )
+        notes = " ".join(raw["review_notes"])
+        # The phrase "non-standard classification" must not appear.
+        assert "non-standard" not in notes
+
+    def test_arbitrary_classification_value_treated_as_rejected(
+        self, tmp_path: Path,
+    ):
+        """Forward-compat: a hypothetical future band a caller
+        invented (e.g. "experimental") must still be counted and
+        appear in rejected_examples — never silently dropped."""
+        candidates = [
+            _candidate(
+                "Maybe", classification="experimental", score=0.55,
+            ),
+        ]
+        out_dir = tmp_path / "induced-profile"
+        write_induced_profile("demo", candidates, out_dir)
+        raw = json.loads(
+            (out_dir / "induction_report.json").read_text(encoding="utf-8")
+        )
+        assert raw["rejected_count"] == 1
+        ids = [e["candidate_id"] for e in raw["rejected_examples"]]
+        assert "cand_maybe" in ids
+
+    def test_counts_reconcile_under_mixed_bands(self, tmp_path: Path):
+        """The full reconciliation invariant: counts sum to
+        candidate_count, and every candidate appears in either
+        top_candidates or rejected_examples."""
+        candidates = [
+            _candidate("A", classification="core_business"),
+            _candidate("B", classification="core_business"),
+            _candidate("C", classification="supporting_technical", score=0.5),
+            _candidate("D", classification="noise", score=0.1),
+            _candidate("E", classification="unknown", score=0.0),
+            _candidate("F", classification="experimental", score=0.3),
+        ]
+        out_dir = tmp_path / "induced-profile"
+        write_induced_profile("demo", candidates, out_dir)
+        raw = json.loads(
+            (out_dir / "induction_report.json").read_text(encoding="utf-8")
+        )
+        # The four counts reconcile.
+        assert raw["candidate_count"] == 6
+        total_buckets = (
+            raw["selected_core_count"]
+            + raw["selected_supporting_count"]
+            + raw["rejected_count"]
+        )
+        assert total_buckets == raw["candidate_count"]
+        # Every candidate appears in one of the two audit lists
+        # (top_candidates limit is well above 6, so no truncation).
+        in_top = {e["candidate_id"] for e in raw["top_candidates"]}
+        in_rejected = {e["candidate_id"] for e in raw["rejected_examples"]}
+        for candidate in candidates:
+            assert (
+                candidate.candidate_id in in_top
+                or candidate.candidate_id in in_rejected
+            ), (
+                f"Candidate {candidate.candidate_id!r} "
+                f"(classification={candidate.classification!r}) "
+                f"missing from both audit lists"
+            )
+
+
+# ─── Empty / whitespace label handling (round-1 reviewer finding) ──────────
+
+
+class TestEmptyLabelHandling:
+    """Selected candidates whose labels are empty / whitespace-only
+    are dropped from the schema (the loader rejects empty subtypes),
+    but the drop must be surfaced in ``review_notes`` so the
+    candidate doesn't disappear without explanation."""
+
+    def test_empty_label_logged_in_review_notes(self, tmp_path: Path):
+        candidates = [
+            _candidate("Customer", classification="core_business"),
+            # Construct directly so the helper's label-derived
+            # candidate_id doesn't collapse to the empty string.
+            CandidateConcept(
+                candidate_id="cand_empty",
+                label="",
+                normalized_label="",
+                suggested_entity_type="Concept",
+                classification="core_business",
+                summary_definition="",
+                source_presence={"A": True, "B": False, "C": False, "D": False},
+                source_counts={"A": 1, "B": 0, "C": 0, "D": 0},
+                authoritative_evidence_count=1,
+                graph_degree=0,
+                relevance_score=0.75,
+            ),
+        ]
+        out_dir = tmp_path / "induced-profile"
+        write_induced_profile("demo", candidates, out_dir)
+        raw = json.loads(
+            (out_dir / "induction_report.json").read_text(encoding="utf-8")
+        )
+        notes = " ".join(raw["review_notes"])
+        # The note must cite the candidate_id so the reviewer can
+        # trace it back to the source row.
+        assert "cand_empty" in notes
+
+    def test_whitespace_only_label_logged_in_review_notes(
+        self, tmp_path: Path,
+    ):
+        candidates = [
+            CandidateConcept(
+                candidate_id="cand_ws",
+                label="   \t  ",
+                normalized_label="",
+                suggested_entity_type="Concept",
+                classification="supporting_technical",
+                summary_definition="",
+                source_presence={"A": True, "B": False, "C": False, "D": False},
+                source_counts={"A": 1, "B": 0, "C": 0, "D": 0},
+                authoritative_evidence_count=1,
+                graph_degree=0,
+                relevance_score=0.55,
+            ),
+        ]
+        out_dir = tmp_path / "induced-profile"
+        write_induced_profile("demo", candidates, out_dir)
+        raw = json.loads(
+            (out_dir / "induction_report.json").read_text(encoding="utf-8")
+        )
+        notes = " ".join(raw["review_notes"])
+        assert "cand_ws" in notes
+
+
 # ─── Sidecar files ─────────────────────────────────────────────────────────
 
 
