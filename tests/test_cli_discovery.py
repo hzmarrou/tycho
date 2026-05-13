@@ -1036,6 +1036,85 @@ class TestInduceProfileErrors:
         assert result.exit_code != 0
         assert "bad.json" in result.output
 
+    def test_concept_entry_is_not_an_object_fails_cleanly(
+        self, tmp_path: Path,
+    ):
+        """Round-1 reviewer finding: a non-object concept entry (e.g.
+        a string slipped into the concepts list) used to crash with
+        ``ValueError: dictionary update sequence element #0 has
+        length 1; 2 is required`` from ``dict(raw)`` inside
+        ``CandidateConcept.from_dict``. The CLI's except-clause was
+        too narrow (TypeError + KeyError only). Must now surface a
+        clean exit-2 message with the offending entry index."""
+        graph = tmp_path / "candidate-graph.json"
+        graph.write_text(
+            json.dumps({
+                "concepts": [
+                    "not-an-object",  # <- breaks dict(raw)
+                ],
+                "relationships": [],
+            }),
+            encoding="utf-8",
+        )
+        out_dir = tmp_path / "induced"
+        result = runner.invoke(app, [
+            "induce-profile", str(graph),
+            "--output-dir", str(out_dir),
+            "--domain-name", "demo",
+        ])
+        assert result.exit_code != 0
+        assert "candidate-graph.json" in result.output
+        # Index should be cited so the user can locate the bad row.
+        assert "[0]" in result.output or "concept entry" in result.output.lower()
+
+    def test_concept_with_non_object_provenance_entry_fails_cleanly(
+        self, tmp_path: Path,
+    ):
+        """Round-1 reviewer finding: a non-object inside the nested
+        ``provenance`` list (e.g. a bare string) hits
+        ``EvidenceEntry.from_dict(p)`` and bubbles a friend-unfriendly
+        exception out of CandidateConcept.from_dict. Must surface as
+        a clean exit-2 message."""
+        bad_concept = _stub_candidate_dict("X", a=1, definition="d.")
+        bad_concept["provenance"] = ["not-an-evidence-dict"]
+        graph = tmp_path / "candidate-graph.json"
+        _write_candidate_graph(graph, [bad_concept])
+        out_dir = tmp_path / "induced"
+        result = runner.invoke(app, [
+            "induce-profile", str(graph),
+            "--output-dir", str(out_dir),
+            "--domain-name", "demo",
+        ])
+        assert result.exit_code != 0
+        assert "candidate-graph.json" in result.output
+
+    def test_concept_missing_required_dataclass_fields_fails_cleanly(
+        self, tmp_path: Path,
+    ):
+        """A concept dict missing required CandidateConcept fields
+        raises ``TypeError`` from ``cls(**data)``. Should also
+        surface clean — exercises the same code path."""
+        graph = tmp_path / "candidate-graph.json"
+        graph.write_text(
+            json.dumps({
+                "concepts": [
+                    # Has the candidate_id key but is otherwise empty —
+                    # CandidateConcept's __init__ rejects.
+                    {"candidate_id": "cand_x"},
+                ],
+                "relationships": [],
+            }),
+            encoding="utf-8",
+        )
+        out_dir = tmp_path / "induced"
+        result = runner.invoke(app, [
+            "induce-profile", str(graph),
+            "--output-dir", str(out_dir),
+            "--domain-name", "demo",
+        ])
+        assert result.exit_code != 0
+        assert "candidate-graph.json" in result.output
+
 
 class TestInduceProfileConsoleSummary:
     """A short summary printed after the run gives the user

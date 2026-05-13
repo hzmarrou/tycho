@@ -2704,17 +2704,34 @@ def induce_profile(
         )
         raise typer.Exit(code=2)
 
-    try:
-        concepts = [
-            CandidateConcept.from_dict(c)
-            for c in raw.get("concepts", [])
-        ]
-    except (TypeError, KeyError) as err:
+    concepts_raw = raw.get("concepts", [])
+    if not isinstance(concepts_raw, list):
         console.print(
-            f"[red]Candidate graph {candidate_graph} has malformed "
-            f"concept entries:[/] {err}"
+            f"[red]Candidate graph {candidate_graph} has non-list "
+            f"'concepts' field[/] (got {type(concepts_raw).__name__})."
         )
         raise typer.Exit(code=2)
+
+    # Reconstruct candidates one at a time so the error message can
+    # cite the offending entry's index. The catch covers the four
+    # exception types CandidateConcept.from_dict() can surface for
+    # malformed input — including ValueError from ``dict(raw)`` on
+    # a non-object concept entry (round-1 reviewer finding), which
+    # the previous narrower catch missed.
+    concepts: list = []
+    for i, c in enumerate(concepts_raw):
+        try:
+            if not isinstance(c, dict):
+                raise TypeError(
+                    f"expected a JSON object, got {type(c).__name__}"
+                )
+            concepts.append(CandidateConcept.from_dict(c))
+        except (TypeError, KeyError, ValueError, AttributeError) as err:
+            console.print(
+                f"[red]Candidate graph {candidate_graph} concept entry "
+                f"[{i}] is malformed:[/] {err}"
+            )
+            raise typer.Exit(code=2)
 
     # ── Optional weights / thresholds overrides ──
     weight_map: dict[str, float] | None = None
