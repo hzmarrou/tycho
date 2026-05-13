@@ -679,6 +679,110 @@ class TestDiscoverErrors:
         assert "scalar.json" in result.output
         assert "Source A" in result.output
 
+    def test_source_a_concepts_field_not_a_list_surfaces_friendly_error(
+        self, tmp_path: Path,
+    ):
+        """Round-2 PR-review finding: the top-level dict guard
+        is necessary but not sufficient. A payload like
+        ``{"concepts": "oops", "relationships": []}`` is a valid
+        JSON object but iterating ``"oops"`` and calling
+        ``.get()`` on each character raises ``AttributeError``.
+        Must fail cleanly with the path + offending field."""
+        bad = tmp_path / "wrong_concepts.json"
+        bad.write_text(
+            json.dumps({"concepts": "oops", "relationships": []}),
+            encoding="utf-8",
+        )
+        domain_dir = tmp_path / "domain"
+        result = runner.invoke(app, [
+            "discover",
+            "--source-a", str(bad),
+            "--domain-dir", str(domain_dir),
+        ])
+        assert result.exit_code != 0
+        assert "wrong_concepts.json" in result.output
+        assert "concepts" in result.output
+
+    def test_source_a_relationships_field_not_a_list_surfaces_friendly_error(
+        self, tmp_path: Path,
+    ):
+        """Symmetric to the concepts case: ``relationships`` value
+        must also be a list."""
+        bad = tmp_path / "wrong_rels.json"
+        bad.write_text(
+            json.dumps({
+                "concepts": [],
+                "relationships": "should-be-a-list",
+            }),
+            encoding="utf-8",
+        )
+        domain_dir = tmp_path / "domain"
+        result = runner.invoke(app, [
+            "discover",
+            "--source-a", str(bad),
+            "--domain-dir", str(domain_dir),
+        ])
+        assert result.exit_code != 0
+        assert "wrong_rels.json" in result.output
+        assert "relationships" in result.output
+
+    def test_source_a_concept_entry_not_an_object_surfaces_friendly_error(
+        self, tmp_path: Path,
+    ):
+        """Round-2 PR-review finding: ``{"concepts": [{}], "relationships":
+        ["bad"]}`` — the inner-list entries themselves must be
+        dicts. A bare string inside ``concepts`` would crash on
+        ``concept.get("name")``."""
+        bad = tmp_path / "bad_concept_entry.json"
+        bad.write_text(
+            json.dumps({
+                "concepts": [
+                    {"name": "Valid", "definition": "ok"},
+                    "stray-string",
+                ],
+                "relationships": [],
+            }),
+            encoding="utf-8",
+        )
+        domain_dir = tmp_path / "domain"
+        result = runner.invoke(app, [
+            "discover",
+            "--source-a", str(bad),
+            "--domain-dir", str(domain_dir),
+        ])
+        assert result.exit_code != 0
+        assert "bad_concept_entry.json" in result.output
+        # Error must cite the offending index so the user can find
+        # the bad row in their file.
+        assert "[1]" in result.output or "concepts" in result.output
+
+    def test_source_a_relationship_entry_not_an_object_surfaces_friendly_error(
+        self, tmp_path: Path,
+    ):
+        """Round-2 PR-review finding's other half: a non-dict
+        entry inside ``relationships`` would crash on
+        ``rel.get("subject")``."""
+        bad = tmp_path / "bad_rel_entry.json"
+        bad.write_text(
+            json.dumps({
+                "concepts": [],
+                "relationships": [
+                    {"subject": "A", "predicate": "B", "object": "C"},
+                    "stray-string",
+                ],
+            }),
+            encoding="utf-8",
+        )
+        domain_dir = tmp_path / "domain"
+        result = runner.invoke(app, [
+            "discover",
+            "--source-a", str(bad),
+            "--domain-dir", str(domain_dir),
+        ])
+        assert result.exit_code != 0
+        assert "bad_rel_entry.json" in result.output
+        assert "[1]" in result.output or "relationships" in result.output
+
 
 # ─── induce-profile (Task 6) ───────────────────────────────────────────────
 

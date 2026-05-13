@@ -2508,10 +2508,11 @@ def _merge_source_a(paths: list[Path]) -> dict | None:
     Source A contribution" (rather than empty-but-present).
 
     Each file must be a JSON object — the ``extract-a --json``
-    output shape. A top-level array or scalar raises
-    :class:`_SourceLoadError` with a hint about the accepted shape,
-    matching the friendly exit-2 path the rest of the discover
-    workflow uses for malformed inputs.
+    output shape — and its ``concepts`` / ``relationships`` fields
+    (if present) must be lists of objects. Malformed payloads at
+    any of these levels raise :class:`_SourceLoadError` with a hint
+    about the accepted shape, matching the friendly exit-2 path the
+    rest of the discover workflow uses for malformed inputs.
     """
     if not paths:
         return None
@@ -2527,9 +2528,45 @@ def _merge_source_a(paths: list[Path]) -> dict | None:
                 f"`ontozense extract-a --json`: "
                 f"{{'concepts': [...], 'relationships': [...]}}.",
             )
+        _validate_source_a_inner_shape(raw, path)
         merged["concepts"].extend(raw.get("concepts", []))
         merged["relationships"].extend(raw.get("relationships", []))
     return merged
+
+
+def _validate_source_a_inner_shape(payload: dict, path: Path) -> None:
+    """Validate the inner shape of a Source A JSON payload: the
+    optional ``concepts`` and ``relationships`` fields, if present,
+    must each be a list of objects.
+
+    Without this guard, a payload like ``{"concepts": "oops"}``
+    would iterate over each character of the string, or
+    ``{"concepts": ["bad"]}`` would call ``.get()`` on a bare
+    string — either way leaking ``AttributeError`` instead of the
+    friendly exit-2 path. Mirrors the same defensive shape check
+    :func:`_normalise_source_b_payload` does for Source B.
+    """
+    for field, entry_label in (
+        ("concepts", "concept"),
+        ("relationships", "relationship"),
+    ):
+        if field not in payload:
+            continue
+        value = payload[field]
+        if not isinstance(value, list):
+            raise _SourceLoadError(
+                path,
+                f"Source A {field!r} field must be a list "
+                f"(got {type(value).__name__}).",
+            )
+        for idx, entry in enumerate(value):
+            if not isinstance(entry, dict):
+                raise _SourceLoadError(
+                    path,
+                    f"Source A {field}[{idx}] is not a JSON object "
+                    f"(got {type(entry).__name__}). Every "
+                    f"{entry_label} entry must be an object.",
+                )
 
 
 def _merge_source_b(paths: list[Path]) -> dict | None:
