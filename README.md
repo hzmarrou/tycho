@@ -106,7 +106,11 @@ where to fill in.
 ## Quick start
 
 ```bash
-pip install -e ".[dev]"
+# Install (uv recommended — creates .venv and installs everything in one shot)
+uv sync
+# …or the manual pip equivalent:
+#   python -m venv .venv && source .venv/bin/activate
+#   pip install -e ".[dev]"
 
 # 1. Extract from one or more domain documents (needs Azure OpenAI key).
 #    Add --profile <dir> for ontology-constrained extraction with

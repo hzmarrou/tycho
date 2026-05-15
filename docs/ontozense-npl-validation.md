@@ -55,13 +55,17 @@ covering both paths, so you can validate both ends in one sitting.
 
 You need:
 
-- **Python 3.11 or 3.12** (Ontozense is tested on these).
+- **Python 3.11, 3.12, or 3.13** (Ontozense is tested on 3.11–3.13).
   Check with `python --version`.
 - **Git** (to clone the repo). Check with `git --version`.
 - **PowerShell 7+** (on Windows). Check with `$PSVersionTable.PSVersion`.
+- **[uv](https://github.com/astral-sh/uv)** — modern Python package
+  manager. Install via `winget install --id=astral-sh.uv` or follow
+  the [uv install docs](https://docs.astral.sh/uv/getting-started/installation/).
+  Check with `uv --version`.
 - **(Optional) Azure OpenAI access** — only needed if you want to
-  run Source A extraction from scratch. If you have an existing
-  `source-a.json` (Section B.4 Option B), you can skip this.
+  run Source A extraction from scratch (Section C.1 Option A). The
+  rest of the tutorial runs without it.
 
 If any of the above are missing, install them first.
 
@@ -71,25 +75,43 @@ Pick a folder for your workspace and clone:
 
 ```powershell
 cd C:\Users\$env:USERNAME\projects     # or wherever you keep code
-git clone https://github.com/hzmarrou/tycho.git ontozense
-cd ontozense
+git clone https://github.com/hzmarrou/tycho.git
+cd tycho
 ```
 
 ✓ **Expected:** the clone completes without errors and you're now
-inside the `ontozense` folder. Verify:
+inside the `tycho` folder. Verify:
 
 ```powershell
-Get-ChildItem | Select-Object -First 10
+Get-ChildItem
 # Expected: directories like docs/, src/, tests/, plus pyproject.toml, README.md
 ```
 
-### A.3 Create a Python virtual environment
+### A.3 Install Ontozense with `uv`
 
-A venv keeps Ontozense's dependencies isolated from any other
-Python projects on your machine.
+A single command creates an isolated `.venv`, installs Ontozense
+in editable mode, and pulls every development dependency
+(including `pytest`):
 
 ```powershell
-python -m venv .venv
+uv sync
+```
+
+✓ **Expected:** `uv` reports something like
+`Resolved N packages` → `Installed N packages`. A new `.venv\`
+directory exists at the repo root.
+
+> If you prefer `pip` over `uv`, the manual equivalent is:
+> ```powershell
+> python -m venv .venv
+> .\.venv\Scripts\Activate.ps1
+> pip install -e ".[dev]"
+> ```
+> The rest of the tutorial assumes you used `uv`.
+
+### A.4 Activate the venv
+
+```powershell
 .\.venv\Scripts\Activate.ps1
 ```
 
@@ -100,28 +122,20 @@ session and retry:
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
 ```
 
-✓ **Expected:** your prompt now starts with `(.venv)`, indicating
-the venv is active.
+✓ **Expected:** your prompt now starts with `(ontozense)` (or
+`(.venv)` depending on `uv`'s configuration) — the venv is active.
 
-### A.4 Install Ontozense
-
-```powershell
-pip install -e ".[dev]"
-```
-
-This installs Ontozense in editable mode plus the development
-dependencies (including `pytest`).
-
-✓ **Expected:** the install completes without errors and the
-`ontozense` command is available:
+Verify the CLI is reachable and lists the discovery commands:
 
 ```powershell
-ontozense --help | Select-Object -First 5
+ontozense --help
 ```
 
-The help banner should list commands including `discover`,
-`induce-profile`, `rebuild`, `extract-a`, `fuse`, `validate`,
-`lint`, and `report`.
+(No pipe — Rich-formatted output piped through `Select-Object`
+can crash on legacy Windows consoles. Just scroll the output.)
+
+✓ **Expected:** the help banner lists `discover`, `induce-profile`,
+`rebuild`, `extract-a`, `fuse`, `validate`, `lint`, and `report`.
 
 ### A.5 (Optional) Configure Azure OpenAI
 
@@ -154,25 +168,78 @@ validation until the regression suite is clean.
 
 ---
 
-## Part B — Tour the NPL inputs
+## Part B — Set up the NPL workspace
 
-Before running anything, take 60 seconds to look at what you'll
-be feeding in. All NPL inputs ship with the repo:
+Ontozense uses a per-domain workspace folder at
+`domains/<domain-name>/`. **The `domains/` directory is in
+`.gitignore`** — your fresh clone has none of these files yet. In
+this part you'll create the workspace and copy the NPL source
+files into it.
 
-| File | What it is | Fed into |
-|---|---|---|
-| `tests/fixtures/npl-basel-guidelines.md` | Basel D403 NPL guidance (1700+ lines of regulatory text) | Source A (Path 1 + Path 2) |
-| `domains/npl/sources/governance.json` | 18 NPL governance terms — Borrower, Collateral, Loan, etc. | Source B (Path 1 + Path 2) |
-| `tests/fixtures/synthetic_npl_code/` | Sample NPL business-rule code (classification, forbearance, …) | Source D |
-| `docs/profile-examples/npl/` | A hand-authored canonical NPL profile (7 entity types, 12 subtypes) | Path 2 reference profile |
-| `tests/fixtures/nplo-reference.owl` | Open Risk NPLO reference ontology (OWL) | Cross-reference for comparison |
+### B.1 Where source files come from
 
-Confirm the NPL workspace is in place:
+These files **do** ship with the repo (committed). You'll copy
+each one into your workspace:
+
+| Source-of-truth path (committed) | Purpose |
+|---|---|
+| `tests/fixtures/npl-basel-guidelines.md` | Basel D403 NPL guidance (~1700 lines of regulatory text) — Source A document |
+| `docs/governance_example.json` | 18 NPL governance terms (Borrower, Collateral, Loan, …) — Source B |
+| `tests/fixtures/synthetic_npl_code/` | NPL business-rule code (classification, forbearance, materiality, reporting, transitions) — Source D |
+| `docs/profile-examples/npl/` | Hand-authored canonical NPL profile (used as the Path 2 reference) — read in place, no copy needed |
+| `tests/fixtures/nplo-reference.owl` | Open Risk NPLO reference ontology — used for cross-reference, no copy needed |
+
+### B.2 Create the workspace folder
+
+```powershell
+New-Item -ItemType Directory -Path domains\npl\sources -Force | Out-Null
+```
+
+✓ **Expected:** the folder `domains\npl\sources\` now exists. Verify:
+
+```powershell
+Test-Path domains\npl\sources
+# Expected: True
+```
+
+### B.3 Copy the source files into the workspace
+
+```powershell
+# Source A document
+Copy-Item tests\fixtures\npl-basel-guidelines.md `
+  domains\npl\sources\npl-basel-guidelines.md
+
+# Source B governance JSON (renamed to a workspace-friendly name)
+Copy-Item docs\governance_example.json `
+  domains\npl\sources\governance.json
+
+# Source D code directory (recursive)
+Copy-Item -Recurse tests\fixtures\synthetic_npl_code `
+  domains\npl\sources\npl-code
+```
+
+### B.4 Verify the workspace
 
 ```powershell
 Get-ChildItem domains\npl\sources\
-# Expected: governance.json
 ```
+
+✓ **Expected:** three entries —
+
+```text
+governance.json
+npl-basel-guidelines.md
+npl-code  (directory)
+```
+
+And the Source D sub-areas:
+
+```powershell
+Get-ChildItem domains\npl\sources\npl-code\
+```
+
+✓ **Expected:** five subdirectories — `classification`,
+`forbearance`, `materiality`, `reporting`, `transitions`.
 
 ---
 
@@ -191,10 +258,12 @@ ways to get a Source A JSON:
 **Option A — fresh extraction (needs Azure OpenAI key, ~30-60s):**
 
 ```powershell
-ontozense extract-a tests/fixtures/npl-basel-guidelines.md `
+ontozense extract-a domains/npl/sources/npl-basel-guidelines.md `
   --json domains/npl/sources/source-a.json `
   --domain-dir domains/npl
 ```
+
+(Uses the copy you placed in the workspace in Section B.3.)
 
 **Option B — reuse a pre-extracted Source A (no keys needed):**
 
@@ -218,6 +287,13 @@ print(f"concepts={len(d['concepts'])} relationships={len(d['relationships'])}")
 The exact numbers vary by ±20% because Source A is LLM-based.
 
 ### C.2 Build the candidate graph
+
+> **Note on Source D:** the `discover` command also accepts
+> `--source-c` and `--source-d` flags, but the candidate-graph
+> builder doesn't extract from those payloads in the current
+> implementation. Source D's code-extractor runs in the
+> profile-aware pipeline (Section D.1's `fuse`), so we'll bring it
+> in there. For this discovery step, just feed Source A + B.
 
 ```powershell
 ontozense discover `
@@ -459,17 +535,28 @@ discovery workflow.
 
 ### D.1 Fuse with the canonical profile
 
+This is where **Source D enters the picture.** `fuse` accepts a
+`--source-d <directory>` pointing at a tree of Python / SQL files;
+the code-extractor walks it via AST analysis and contributes the
+discovered identifiers, type hints, and business-rule comments
+into the fused dictionary.
+
 ```powershell
 ontozense fuse `
   --source-a domains/npl/sources/source-a.json `
   --source-b domains/npl/sources/governance.json `
+  --source-d domains/npl/sources/npl-code `
   --output domains/npl/fused.json `
   --domain-dir domains/npl
 ```
 
 ✓ **Expected:** a fused dictionary at `domains/npl/fused.json`
-containing concepts and relationships, each carrying per-field
-provenance.
+containing elements from all three sources, each carrying
+per-field provenance. The fuse command prints a summary; look for
+non-zero counts on the "Source A" and "Source D" lines (Source B
+contributions are merged into existing elements rather than
+adding new ones, so its summary may show 0 *new* elements while
+still enriching the others).
 
 ### D.2 Validate against the canonical profile
 
@@ -572,7 +659,7 @@ profile-aware pipeline are working correctly on NPL data.
 |---|---|
 | `ontozense: command not found` | The venv isn't activated. Run `.\.venv\Scripts\Activate.ps1` from the repo root. |
 | `Set-ExecutionPolicy` error when activating venv | Once per session: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process`, then retry. |
-| `pip install` fails on a dependency | Make sure you're on Python 3.11 or 3.12. Older versions are not supported. |
+| `uv sync` or `pip install` fails on a dependency | Make sure you're on Python 3.11, 3.12, or 3.13. Older versions are not supported. |
 | `discover` exits 2 with "invalid JSON" | Bad input file. Re-run `extract-a` or fix the governance JSON. |
 | `induce-profile` exits 2 with "concept entry [N] is malformed" | The candidate-graph.json has a malformed concept entry. Check that index in the file. |
 | `load_profile('induced-profile')` raises `ProfileError` | The induced schema is malformed. File an issue against the repository. |
