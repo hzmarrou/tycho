@@ -10,6 +10,8 @@ typed per-field anchors back to the source, and structural validation
 against a domain profile — instead of starting from a blank
 spreadsheet.
 
+![Tycho architecture — many sources, one semantic layer: extract, discover, induce profile, rebuild → knowledge graph, domain ontology, provenance map, data dictionary, AI grounding](images/tycho.png)
+
 ## The four-source pipeline
 
 ```
