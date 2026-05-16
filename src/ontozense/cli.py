@@ -2992,6 +2992,12 @@ def rebuild(
     """
     from .core.profile import ProfileError, load_profile
 
+    console.print(
+        "[yellow]Deprecation note:[/] `ontozense rebuild` is deprecated "
+        "and will be removed in v2.0. Use `ontozense draft --plan` for "
+        "the same effect."
+    )
+
     try:
         loaded = load_profile(profile)
     except ProfileError as err:
@@ -3325,6 +3331,258 @@ def _run_extract_a_for_survey(
         "concepts": raw.get("concepts", []),
         "relationships": raw.get("relationships", []),
     }
+
+
+# ─── draft (Stage 2 orchestrator) ────────────────────────────────────────────
+
+
+@app.command(name="draft")
+def draft(
+    domain_dir: Path = typer.Option(
+        ..., "--domain-dir",
+        help="Per-domain workspace. Reads from <domain-dir>/discovery/.",
+    ),
+    output: Path = typer.Option(
+        ..., "--output", "-o",
+        help="Path for the draft OWL file.",
+    ),
+    profile: Path = typer.Option(
+        None, "--profile",
+        help=(
+            "Optional hand-authored profile directory. If given, "
+            "induction is skipped and this profile is used directly."
+        ),
+    ),
+    thresholds: Path = typer.Option(
+        None, "--thresholds",
+        help="Optional thresholds JSON (only used when inducing).",
+    ),
+    weights: Path = typer.Option(
+        None, "--weights",
+        help="Optional weights JSON (only used when inducing).",
+    ),
+    mode: str = typer.Option(
+        "flag", "--mode",
+        help='Validation mode: "flag" (annotate findings) or "filter".',
+    ),
+    format: str = typer.Option(
+        "turtle", "--format",
+        help='OWL serialisation: "turtle" | "json-ld" | "xml".',
+    ),
+    plan: bool = typer.Option(
+        False, "--plan",
+        help="Print what would run; don't execute.",
+    ),
+) -> None:
+    """Stage 2 of the semantic-layer journey.
+
+    Score the candidate graph (or use your profile), fuse the
+    sources, validate and lint, and emit a draft OWL ontology. The
+    resulting ``draft.owl`` is the handoff artifact for an expert
+    curator working in Ontology Playground, Protégé, or any OWL
+    editor.
+    """
+    from .core.profile import ProfileError, load_profile
+
+    if plan:
+        _print_draft_plan(domain_dir, profile, output)
+        return
+
+    discovery_dir = domain_dir / "discovery"
+    candidate_graph_path = discovery_dir / "candidate-graph.json"
+    if not candidate_graph_path.exists():
+        console.print(
+            f"[red]No candidate-graph.json under {discovery_dir}.[/]\n"
+            "Run `ontozense survey` first."
+        )
+        raise typer.Exit(code=2)
+
+    # ── Resolve profile ──
+    induced_dir = domain_dir / "induced-profile"
+    if profile is not None:
+        try:
+            loaded_profile_path = profile
+            loaded_profile = load_profile(profile)
+        except ProfileError as err:
+            console.print(f"[red]Failed to load --profile {profile}:[/] {err}")
+            raise typer.Exit(code=2)
+    else:
+        # Run induce-profile to produce one.
+        from .core.discovery_contracts import CandidateConcept
+        from .core.profile_induction import write_induced_profile
+        from .core.relevance import (
+            DEFAULT_THRESHOLDS, DEFAULT_WEIGHTS, score_candidates,
+        )
+
+        try:
+            graph_raw = _load_json(candidate_graph_path)
+        except _SourceLoadError as err:
+            console.print(
+                f"[red]Failed to load candidate graph {err.path}:[/] {err}"
+            )
+            raise typer.Exit(code=2)
+
+        try:
+            concepts = [
+                CandidateConcept.from_dict(c)
+                for c in graph_raw.get("concepts", [])
+            ]
+        except (TypeError, KeyError, ValueError, AttributeError) as err:
+            console.print(
+                f"[red]Malformed candidate graph {candidate_graph_path}:[/] "
+                f"{err}"
+            )
+            raise typer.Exit(code=2)
+
+        wmap: dict[str, float] | None = None
+        tmap: dict[str, float] | None = None
+        if weights is not None:
+            try:
+                wmap = _load_scoring_config(
+                    weights,
+                    required_keys=set(DEFAULT_WEIGHTS.keys()),
+                    label="--weights",
+                )
+            except _SourceLoadError as err:
+                console.print(
+                    f"[red]Failed to load --weights {err.path}:[/] {err}"
+                )
+                raise typer.Exit(code=2)
+        if thresholds is not None:
+            try:
+                tmap = _load_scoring_config(
+                    thresholds,
+                    required_keys=set(DEFAULT_THRESHOLDS.keys()),
+                    label="--thresholds",
+                )
+            except _SourceLoadError as err:
+                console.print(
+                    f"[red]Failed to load --thresholds {err.path}:[/] {err}"
+                )
+                raise typer.Exit(code=2)
+
+        scored = score_candidates(concepts, weights=wmap, thresholds=tmap)
+        write_induced_profile(
+            domain_name=domain_dir.name,
+            candidates=scored,
+            out_dir=induced_dir,
+            weights=wmap,
+            thresholds=tmap,
+        )
+        loaded_profile_path = induced_dir
+        try:
+            loaded_profile = load_profile(induced_dir)
+        except ProfileError as err:
+            console.print(
+                f"[red]Failed to load induced profile {induced_dir}:[/] {err}"
+            )
+            raise typer.Exit(code=2)
+
+    # ── Fuse → validate → lint → OWL ──
+    from .core.lint import lint as run_lint
+    from .core.owl_export import fused_to_owl
+    from .core.validation import VALID_MODES, validate as run_validate
+
+    if mode not in VALID_MODES:
+        console.print(
+            f"[red]Invalid --mode value:[/] {mode!r}. "
+            f"Must be one of {sorted(VALID_MODES)}."
+        )
+        raise typer.Exit(code=2)
+
+    source_a_path = discovery_dir / "source-a.json"
+    fused = _run_fuse_for_draft(
+        source_a_path, domain_dir / "fused.json",
+    )
+
+    validation_report = run_validate(fused, loaded_profile, mode=mode)
+    lint_report = run_lint(fused)
+
+    owl_text = fused_to_owl(fused, profile=loaded_profile, format=format)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(owl_text, encoding="utf-8")
+
+    summary_path = domain_dir / "draft-summary.md"
+    summary_path.write_text(
+        _build_draft_summary(
+            fused, validation_report, lint_report, loaded_profile_path,
+        ),
+        encoding="utf-8",
+    )
+
+    console.print(
+        f"[green]Draft written to[/] {output}\n"
+        f"  Summary: {summary_path}\n"
+        f"Open in Ontology Playground or Protégé."
+    )
+
+
+def _run_fuse_for_draft(source_a_path: Path, output_path: Path):
+    """Run fusion programmatically and persist ``fused.json``.
+
+    Mirrors the existing ``fuse`` CLI command's call pattern:
+    ``FusionEngine().fuse(source_a=[result])`` where ``result`` is a
+    ``DomainDocumentExtractionResult`` reconstructed from the
+    ``extract-a --json`` output shape. Source A is sufficient for
+    the Stage 2 draft handoff — Sources B/C/D fold in later, once
+    survey can stage them under ``discovery/``.
+    """
+    import json as _json
+    from dataclasses import asdict
+
+    from .core.fusion import FusionEngine
+
+    sa_result = _load_source_a_json(source_a_path)
+    engine = FusionEngine()
+    result = engine.fuse(source_a=[sa_result])
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        _json.dumps(asdict(result), indent=2, default=str),
+        encoding="utf-8",
+    )
+    return result
+
+
+def _build_draft_summary(fused, validation, lint, profile_path) -> str:
+    """Compose the human-facing ``draft-summary.md``."""
+    lines = [
+        "# Draft summary",
+        "",
+        f"- Profile used: `{profile_path}`",
+        f"- Elements: {len(fused.elements)}",
+        f"- Relationships: {len(fused.relationships)}",
+        f"- Validation: {validation.error_count} errors, "
+        f"{validation.warning_count} warnings",
+        f"- Lint findings: {len(lint.findings)} total "
+        f"({lint.error_count} errors, {lint.warning_count} warnings)",
+        "",
+        "## What the curator should review first",
+        "",
+        "- Validation errors flagged above",
+        "- Elements with low confidence (see fused.json)",
+        "- Bridge concepts and orphan terms in the lint output",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _print_draft_plan(domain_dir: Path, profile: Path | None, output: Path) -> None:
+    """Print the draft plan without executing.
+
+    Uses ``print`` (not ``console.print``) so the output is stable
+    across terminal widths — same approach as the legacy ``rebuild``
+    command.
+    """
+    print(f"Plan for `ontozense draft` against {domain_dir}:")
+    print()
+    if profile is None:
+        print("  1. induce-profile from discovery/candidate-graph.json")
+    else:
+        print(f"  1. use supplied profile: {profile}")
+    print("  2. fuse discovery/source-a.json against the profile")
+    print("  3. validate the fused dictionary (mode=flag)")
+    print("  4. lint the fused dictionary")
+    print(f"  5. export OWL to {output}")
+    print("  6. write draft-summary.md alongside")
 
 
 if __name__ == "__main__":
