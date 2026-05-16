@@ -132,6 +132,22 @@ class TestDraftFormat:
         # JSON-LD content must parse as JSON.
         json.loads(out.read_text(encoding="utf-8"))
 
+    def test_owl_xml_format(self, tmp_path: Path):
+        """Spec §5.2: the third --format option is owl-xml (not the
+        rdflib-internal name 'xml')."""
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        out = tmp_path / "draft.owl"
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(out),
+            "--format", "owl-xml",
+        ])
+        assert result.exit_code == 0, result.output
+        text = out.read_text(encoding="utf-8")
+        assert "<?xml" in text  # RDF/XML always starts with the XML prolog
+
 
 class TestDraftPlan:
     def test_plan_flag_prints_without_writing(self, tmp_path: Path):
@@ -176,3 +192,67 @@ class TestRebuildDeprecation:
         assert "deprecated" in result.output.lower()
         # Should point at the replacement.
         assert "draft" in result.output
+
+
+class TestDraftMultiSource:
+    """Spec §5.2 Stage 2 contract: draft must fuse the resolved
+    profile with ALL source inputs, not just Source A. The round-1
+    review caught that the original draft implementation ignored
+    --source-b/-c/-d."""
+
+    def test_draft_with_source_b_includes_governance(self, tmp_path: Path):
+        """Source B governance contributions should appear in
+        fused.json alongside Source A's content."""
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+
+        # Write a minimal governance JSON with one record.
+        governance = tmp_path / "governance.json"
+        governance.write_text(
+            json.dumps([
+                {
+                    "element_name": "Borrower",
+                    "definition": "Governance-side definition.",
+                    "is_critical": True,
+                },
+            ]),
+            encoding="utf-8",
+        )
+
+        out = tmp_path / "draft.owl"
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(out),
+            "--source-b", str(governance),
+        ])
+        assert result.exit_code == 0, result.output
+
+        # fused.json should mark the Borrower element with Source B
+        # provenance (the governance record contributed to it).
+        fused_path = domain_dir / "fused.json"
+        assert fused_path.exists()
+        fused = json.loads(fused_path.read_text(encoding="utf-8"))
+
+        # Find an element whose name matches "Borrower" (case-insensitive)
+        # and confirm Source B is in its sources list.
+        borrower_elements = [
+            e for e in fused["elements"]
+            if e["element_name"].lower() == "borrower"
+        ]
+        assert borrower_elements, (
+            "Borrower element missing from fused output"
+        )
+
+        # The element's per-field provenance should reference Source B
+        # somewhere. After asdict() each FieldProvenance is a dict with
+        # a "source" key ("A", "B", "C", or "D").
+        borrower = borrower_elements[0]
+        sources_seen = set()
+        for prov_entry in borrower.get("field_provenance", {}).values():
+            if isinstance(prov_entry, dict) and "source" in prov_entry:
+                sources_seen.add(prov_entry["source"])
+        assert "B" in sources_seen, (
+            f"Source B not contributing to Borrower; saw "
+            f"sources: {sources_seen}"
+        )

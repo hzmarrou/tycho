@@ -3353,6 +3353,18 @@ def draft(
             "induction is skipped and this profile is used directly."
         ),
     ),
+    source_b: Path = typer.Option(
+        None, "--source-b", "-b",
+        help="Optional Source B governance JSON (single file).",
+    ),
+    source_c: Path = typer.Option(
+        None, "--source-c", "-c",
+        help="Optional Source C schema input (single path).",
+    ),
+    source_d: Path = typer.Option(
+        None, "--source-d", "-d",
+        help="Optional Source D code input (single directory).",
+    ),
     thresholds: Path = typer.Option(
         None, "--thresholds",
         help="Optional thresholds JSON (only used when inducing).",
@@ -3367,7 +3379,7 @@ def draft(
     ),
     format: str = typer.Option(
         "turtle", "--format",
-        help='OWL serialisation: "turtle" | "json-ld" | "xml".',
+        help='OWL serialisation: "turtle" (default) | "json-ld" | "owl-xml".',
     ),
     plan: bool = typer.Option(
         False, "--plan",
@@ -3493,12 +3505,22 @@ def draft(
     source_a_path = discovery_dir / "source-a.json"
     fused = _run_fuse_for_draft(
         source_a_path, domain_dir / "fused.json",
+        source_b=source_b,
+        source_c=source_c,
+        source_d=source_d,
     )
 
     validation_report = run_validate(fused, loaded_profile, mode=mode)
     lint_report = run_lint(fused)
 
-    owl_text = fused_to_owl(fused, profile=loaded_profile, format=format)
+    # Translate the user-facing format name "owl-xml" to rdflib's
+    # internal name "xml" (RDF/XML serialisation). "turtle" and
+    # "json-ld" pass through unchanged.
+    rdflib_format = "xml" if format == "owl-xml" else format
+
+    owl_text = fused_to_owl(
+        fused, profile=loaded_profile, format=rdflib_format,
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(owl_text, encoding="utf-8")
 
@@ -3517,15 +3539,23 @@ def draft(
     )
 
 
-def _run_fuse_for_draft(source_a_path: Path, output_path: Path):
+def _run_fuse_for_draft(
+    source_a_path: Path,
+    output_path: Path,
+    *,
+    source_b: Path | None = None,
+    source_c: Path | None = None,
+    source_d: Path | None = None,
+):
     """Run fusion programmatically and persist ``fused.json``.
 
-    Mirrors the existing ``fuse`` CLI command's call pattern:
-    ``FusionEngine().fuse(source_a=[result])`` where ``result`` is a
-    ``DomainDocumentExtractionResult`` reconstructed from the
-    ``extract-a --json`` output shape. Source A is sufficient for
-    the Stage 2 draft handoff — Sources B/C/D fold in later, once
-    survey can stage them under ``discovery/``.
+    Mirrors the existing ``fuse`` CLI command's load + dispatch
+    pattern. Source A is loaded from the canonical
+    ``discovery/source-a.json``. Sources B / C / D are optional;
+    when provided, each is loaded via the same helper the existing
+    ``fuse`` command uses and passed to ``engine.fuse()`` so the
+    Stage 2 contract — "fuse the resolved profile + all source
+    inputs" — is satisfied.
     """
     import json as _json
     from dataclasses import asdict
@@ -3533,8 +3563,80 @@ def _run_fuse_for_draft(source_a_path: Path, output_path: Path):
     from .core.fusion import FusionEngine
 
     sa_result = _load_source_a_json(source_a_path)
+
+    sb_result = None
+    sc_result = None
+    sd_result = None
+
+    if source_b is not None:
+        from .extractors.governance_extractor import GovernanceExtractor
+        sb_result = GovernanceExtractor().extract_from_file(source_b)
+        console.print(
+            f"[bold blue]Source B:[/] {len(sb_result.records)} governance "
+            f"records from {source_b.name}"
+        )
+
+    if source_c is not None:
+        # Tycho 1.0+: Source C is a JSON file conforming to the
+        # SchemaResult contract in ontozense.core.source_c. Mirrors
+        # the loader used by the existing ``fuse`` CLI command.
+        from .core.source_c import (
+            SourceCContractError,
+            load_source_c_json,
+        )
+        if source_c.is_dir():
+            console.print(
+                f"[bold red][x] Source C is now a JSON file, "
+                f"not a directory:[/] {source_c}"
+            )
+            console.print(
+                "  In Tycho 1.0 the CLI consumes a SchemaResult JSON "
+                "produced by an adapter. See adapters/README.md."
+            )
+            raise typer.Exit(code=1)
+        try:
+            sc_result = load_source_c_json(source_c)
+        except OSError as e:
+            console.print(
+                f"[bold red][x] Source C file error:[/] {source_c}"
+            )
+            console.print(f"  [dim]{type(e).__name__}: {e}[/]")
+            raise typer.Exit(code=1)
+        except _json.JSONDecodeError as e:
+            console.print(
+                f"[bold red][x] Source C JSON parse error:[/] {source_c}"
+            )
+            console.print(
+                f"  [dim]Line {e.lineno}, col {e.colno}: {e.msg}[/]"
+            )
+            raise typer.Exit(code=1)
+        except SourceCContractError as e:
+            console.print(
+                f"[bold red][x] Source C JSON contract error:[/] "
+                f"{source_c}"
+            )
+            console.print(f"  [dim]{e}[/]")
+            raise typer.Exit(code=1)
+        console.print(
+            f"[bold blue]Source C:[/] {len(sc_result.models)} schema "
+            f"models from {source_c.name}"
+        )
+
+    if source_d is not None:
+        from .extractors.code_extractor import CodeExtractor
+        sd_result = CodeExtractor().extract_from_directory(source_d)
+        console.print(
+            f"[bold blue]Source D:[/] {len(sd_result.rules)} code rules "
+            f"from {source_d}"
+        )
+
     engine = FusionEngine()
-    result = engine.fuse(source_a=[sa_result])
+    result = engine.fuse(
+        source_a=[sa_result],
+        source_b=sb_result,
+        source_c=sc_result,
+        source_d=sd_result,
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
         _json.dumps(asdict(result), indent=2, default=str),
