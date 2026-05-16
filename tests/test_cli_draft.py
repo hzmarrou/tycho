@@ -256,3 +256,32 @@ class TestDraftMultiSource:
             f"Source B not contributing to Borrower; saw "
             f"sources: {sources_seen}"
         )
+
+
+class TestExistingCommandsPointAtNewOrchestrators:
+    """Help text on the underlying commands should hint that most
+    users will call `survey` or `draft` instead."""
+
+    def test_extract_a_help_mentions_survey(self):
+        result = runner.invoke(app, ["extract-a", "--help"])
+        assert "survey" in result.output.lower()
+
+    def test_discover_help_mentions_survey(self):
+        result = runner.invoke(app, ["discover", "--help"])
+        assert "survey" in result.output.lower()
+
+    def test_induce_profile_help_mentions_draft(self):
+        result = runner.invoke(app, ["induce-profile", "--help"])
+        assert "draft" in result.output.lower()
+
+    def test_fuse_help_mentions_draft(self):
+        result = runner.invoke(app, ["fuse", "--help"])
+        assert "draft" in result.output.lower()
+
+    def test_validate_help_mentions_draft(self):
+        result = runner.invoke(app, ["validate", "--help"])
+        assert "draft" in result.output.lower()
+
+    def test_lint_help_mentions_draft(self):
+        result = runner.invoke(app, ["lint", "--help"])
+        assert "draft" in result.output.lower()

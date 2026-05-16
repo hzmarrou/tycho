@@ -362,7 +362,9 @@ def extract_a(
         ),
     ),
 ) -> None:
-    """Extract concepts and relationships from authoritative domain documents (Source A).
+    """Stage 1 power-user command. Most users call `ontozense survey` instead, which runs this and the merge step in one go.
+
+    Extract concepts and relationships from authoritative domain documents (Source A).
 
     Source A handles any prose-shaped document the domain experts treat as
     canonical: regulations, internal policies, academic papers, vendor specs,
@@ -1166,7 +1168,9 @@ def validate(
         help="Per-domain knowledge base directory for audit log.",
     ),
 ) -> None:
-    """Validate a fused dictionary against a profile schema.
+    """Stage 2 power-user command. Most users call `ontozense draft` instead, which runs this and the rest of the pipeline.
+
+    Validate a fused dictionary against a profile schema.
 
     Runs 6 structural rules (entity uniqueness, type membership,
     required fields, predicate vocabulary, predicate domains,
@@ -1462,7 +1466,9 @@ def lint(
              "Extra bridges are summarised (default: 10).",
     ),
 ) -> None:
-    """Run consistency checks on a fused data dictionary.
+    """Stage 2 power-user command. Most users call `ontozense draft` instead, which runs this and the rest of the pipeline.
+
+    Run consistency checks on a fused data dictionary.
 
     Checks for contradictions between sources, orphan terms not
     referenced by any relationship, undefined relationship endpoints,
@@ -1762,7 +1768,9 @@ def fuse(
         help="Conflict resolution priority order (comma-separated).",
     ),
 ) -> None:
-    """Fuse Sources A, B, C, D into a rich data dictionary.
+    """Stage 2 power-user command. Most users call `ontozense draft` instead, which orchestrates fuse + validate + lint + OWL emission.
+
+    Fuse Sources A, B, C, D into a rich data dictionary.
 
     Takes extraction results from individual sources and combines them
     into a single fused output with per-field provenance, governance
@@ -2384,7 +2392,9 @@ def discover(
         ),
     ),
 ) -> None:
-    """Build a candidate graph from raw source extractions.
+    """Stage 1 power-user command. Most users call `ontozense survey` instead, which orchestrates extract-a + this in one go.
+
+    Build a candidate graph from raw source extractions.
 
     Writes three artifacts under ``<DOMAIN_DIR>/discovery/``:
 
@@ -2719,7 +2729,9 @@ def induce_profile(
         ),
     ),
 ) -> None:
-    """Score a candidate graph and emit an induced draft profile.
+    """Stage 2 power-user command. Most users call `ontozense draft` instead, which runs scoring + induction + the rest of the pipeline.
+
+    Score a candidate graph and emit an induced draft profile.
 
     Reads ``<CANDIDATE_GRAPH>``, applies the relevance scoring stage
     (``core_business`` / ``supporting_technical`` / ``noise``), and
