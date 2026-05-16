@@ -323,8 +323,18 @@ What the expert reviews:
 - **Coverage** — what's missing? (Tycho catches ~60-70%;
   you fill the rest.)
 
-The OWL preserves provenance: every class carries an
-`rdfs:comment` annotation pointing back to where it came from.
+The OWL preserves several layers of context for the curator:
+
+- **Definitions** live in `rdfs:comment` on each class — the concept's
+  human-readable description, drawn from whichever source contributed
+  it during fusion.
+- **Source citations** live in `dc:source` annotations — references
+  back to where the concept came from (e.g. a Basel doc section,
+  a governance record).
+- **Full per-field provenance** (which source contributed which
+  field, confidence scores, multi-source conflicts) stays in
+  `domains/<name>/fused.json` rather than the OWL. Power users
+  inspect that file; curators usually don't need to.
 
 Tycho's working file `domains/npl/fused.json` carries data that
 doesn't fit cleanly in OWL — confidence scores, multi-source
