@@ -130,3 +130,83 @@ class TestSurveyErrors:
         ])
         assert result.exit_code != 0
         assert "missing.json" in result.output
+
+
+class TestSurveyUniformInputShapes:
+    """Spec §5.4: every --source-* flag accepts file, glob, OR
+    directory uniformly. Codex round-1 review on Task 5 caught that
+    glob expansion wasn't implemented and that Source C/D bypassed
+    the expansion entirely. These tests pin both behaviours."""
+
+    def test_survey_source_a_glob_pattern_expands(self, tmp_path: Path):
+        """A quoted glob like 'docs/*.json' must be expanded internally
+        by the CLI (the shell may not pre-expand it, especially on
+        PowerShell). Each match should flow through to Source A."""
+        sa_dir = tmp_path / "docs"
+        sa_dir.mkdir()
+        _write_source_a_json(
+            sa_dir / "doc1.json",
+            [{"name": "Borrower", "definition": "B"}],
+        )
+        _write_source_a_json(
+            sa_dir / "doc2.json",
+            [{"name": "Loan", "definition": "L"}],
+        )
+        # Pass a literal glob string (Path("docs/*.json") would not
+        # exist as a file but the CLI should expand it).
+        glob_pattern = str(sa_dir / "*.json")
+        domain_dir = tmp_path / "domain"
+        result = runner.invoke(app, [
+            "survey",
+            "--source-a", glob_pattern,
+            "--domain-dir", str(domain_dir),
+        ])
+        assert result.exit_code == 0, result.output
+        g = json.loads(
+            (domain_dir / "discovery" / "candidate-graph.json")
+            .read_text(encoding="utf-8")
+        )
+        labels = {c["label"] for c in g["concepts"]}
+        assert {"Borrower", "Loan"}.issubset(labels)
+
+    def test_survey_source_c_directory_expands(self, tmp_path: Path):
+        """--source-c accepts a directory and walks for .json files."""
+        sa = tmp_path / "source-a.json"
+        _write_source_a_json(sa, [{"name": "Borrower", "definition": "B"}])
+        c_dir = tmp_path / "schemas"
+        c_dir.mkdir()
+        # _load_source_passthrough expects JSON object payloads.
+        (c_dir / "schema1.json").write_text(
+            json.dumps({"opaque_payload": []}),
+            encoding="utf-8",
+        )
+        domain_dir = tmp_path / "domain"
+        result = runner.invoke(app, [
+            "survey",
+            "--source-a", str(sa),
+            "--source-c", str(c_dir),
+            "--domain-dir", str(domain_dir),
+        ])
+        # The command must succeed — Source C contents are accepted
+        # without affecting candidate generation (forward-compat).
+        assert result.exit_code == 0, result.output
+
+    def test_survey_source_d_directory_expands(self, tmp_path: Path):
+        """--source-d accepts a directory and walks for .json files
+        (broader Source D extension support is a future task)."""
+        sa = tmp_path / "source-a.json"
+        _write_source_a_json(sa, [{"name": "Borrower", "definition": "B"}])
+        d_dir = tmp_path / "code"
+        d_dir.mkdir()
+        (d_dir / "rules.json").write_text(
+            json.dumps({"opaque_payload": []}),
+            encoding="utf-8",
+        )
+        domain_dir = tmp_path / "domain"
+        result = runner.invoke(app, [
+            "survey",
+            "--source-a", str(sa),
+            "--source-d", str(d_dir),
+            "--domain-dir", str(domain_dir),
+        ])
+        assert result.exit_code == 0, result.output

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob as _glob
 import sys
 from pathlib import Path
 
@@ -3169,9 +3170,21 @@ def survey(
         console.print(f"[red]Failed to load --source-b:[/] {err}")
         raise typer.Exit(code=2)
 
-    # ─── Source C/D: expand and pass through ──
-    merged_c = _load_source_passthrough(source_c or [])
-    merged_d = _load_source_passthrough(source_d or [])
+    # ─── Source C/D: expand + pass through ──
+    try:
+        c_files = _expand_source_paths(
+            source_c or [], file_extensions={".json"},
+        )
+        d_files = _expand_source_paths(
+            source_d or [], file_extensions={".json"},
+        )
+    except _SourceLoadError as err:
+        console.print(
+            f"[red]Failed to enumerate Source C/D paths:[/] {err}"
+        )
+        raise typer.Exit(code=2)
+    merged_c = _load_source_passthrough(c_files) if c_files else None
+    merged_d = _load_source_passthrough(d_files) if d_files else None
 
     # ─── Profile alias_map (light normalisation only) ──
     alias_map: dict[str, str] | None = None
@@ -3230,10 +3243,37 @@ def _expand_source_paths(
     file_extensions: set[str],
 ) -> list[Path]:
     """Expand a list of file / glob / directory paths into a flat list
-    of files matching the given extensions. Recurses into directories.
+    of files matching the given extensions. Recurses into directories;
+    expands glob patterns via :func:`glob.glob`.
+
+    Glob detection looks for any of ``*``, ``?``, ``[`` in the path
+    string — when the shell hasn't already expanded the pattern (e.g.
+    the user passed it quoted, or they're on PowerShell which does
+    not glob-expand most native-command arguments), the CLI does the
+    expansion itself. An empty glob (no matches) is treated as a
+    silent no-op, the same way an empty directory is treated.
     """
     out: list[Path] = []
     for p in paths:
+        p_str = str(p)
+        if any(ch in p_str for ch in "*?["):
+            # Glob pattern — expand and walk results.
+            matches = sorted(_glob.glob(p_str, recursive=True))
+            for match in matches:
+                m = Path(match)
+                if m.is_file():
+                    if m.suffix.lower() in file_extensions:
+                        out.append(m)
+                elif m.is_dir():
+                    for child in sorted(m.rglob("*")):
+                        if (
+                            child.is_file()
+                            and child.suffix.lower() in file_extensions
+                        ):
+                            out.append(child)
+            # Empty glob → no-op (matches the "empty directory" rule).
+            continue
+        # Literal path (file or directory).
         if not p.exists():
             raise _SourceLoadError(p, f"path not found: {p}")
         if p.is_file():
