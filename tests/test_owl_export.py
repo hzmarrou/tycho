@@ -179,3 +179,15 @@ class TestEmptyAnnotations:
         g.parse(data=ttl, format="turtle")
         comments = list(g.objects(predicate=RDFS.comment))
         assert len(comments) == 0
+
+    def test_element_with_no_citation_emits_no_dc_source(self):
+        # Symmetric negative pin for citation: an element with no
+        # citation in field_provenance must not emit a dc:source
+        # triple. Closes the test-coverage gap flagged in Task 3
+        # round-1 code review.
+        result = _result(elements=[_el("Borrower")])  # no citation
+        ttl = fused_to_owl(result, format="turtle")
+        g = Graph()
+        g.parse(data=ttl, format="turtle")
+        sources = list(g.objects(predicate=DC.source))
+        assert len(sources) == 0
