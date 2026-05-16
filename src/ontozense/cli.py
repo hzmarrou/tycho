@@ -3170,21 +3170,38 @@ def survey(
         console.print(f"[red]Failed to load --source-b:[/] {err}")
         raise typer.Exit(code=2)
 
-    # ─── Source C/D: expand + pass through ──
+    # ─── Source C: expand + load JSON ──
     try:
         c_files = _expand_source_paths(
             source_c or [], file_extensions={".json"},
         )
-        d_files = _expand_source_paths(
-            source_d or [], file_extensions={".json"},
-        )
     except _SourceLoadError as err:
         console.print(
-            f"[red]Failed to enumerate Source C/D paths:[/] {err}"
+            f"[red]Failed to enumerate --source-c paths:[/] {err}"
         )
         raise typer.Exit(code=2)
     merged_c = _load_source_passthrough(c_files) if c_files else None
-    merged_d = _load_source_passthrough(d_files) if d_files else None
+
+    # ─── Source D: expand to file list (manifest) ──
+    # The spec recognises .py / .sql / .js / .ts as Source D code
+    # files (plus .json for pre-built manifests). The candidate-graph
+    # builder's Source D hook is forward-compat — it does not consume
+    # file contents in the current implementation. So we just expand
+    # the paths and bundle them into a manifest dict; a future AST-
+    # based ingestion can read each file when wired in.
+    try:
+        d_files = _expand_source_paths(
+            source_d or [],
+            file_extensions={".py", ".sql", ".js", ".ts", ".json"},
+        )
+    except _SourceLoadError as err:
+        console.print(
+            f"[red]Failed to enumerate --source-d paths:[/] {err}"
+        )
+        raise typer.Exit(code=2)
+    merged_d = (
+        {"files": [str(p) for p in d_files]} if d_files else None
+    )
 
     # ─── Profile alias_map (light normalisation only) ──
     alias_map: dict[str, str] | None = None

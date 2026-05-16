@@ -191,16 +191,28 @@ class TestSurveyUniformInputShapes:
         # without affecting candidate generation (forward-compat).
         assert result.exit_code == 0, result.output
 
-    def test_survey_source_d_directory_expands(self, tmp_path: Path):
-        """--source-d accepts a directory and walks for .json files
-        (broader Source D extension support is a future task)."""
+    def test_survey_source_d_accepts_code_files(self, tmp_path: Path):
+        """Spec §5.4: --source-d recognises .py / .sql / .js / .ts
+        code files under the uniform file/glob/directory rule.
+
+        Codex round-2 review on Task 5 caught that an earlier round
+        narrowed Source D to .json only, which silently dropped
+        actual code directories. This pins the broader extension
+        set so a regression to .json-only is caught."""
         sa = tmp_path / "source-a.json"
         _write_source_a_json(sa, [{"name": "Borrower", "definition": "B"}])
         d_dir = tmp_path / "code"
         d_dir.mkdir()
-        (d_dir / "rules.json").write_text(
-            json.dumps({"opaque_payload": []}),
+        # A mix of supported Source D extensions.
+        (d_dir / "classifier.py").write_text(
+            "def classify(loan):\n    pass\n", encoding="utf-8",
+        )
+        (d_dir / "forbearance.sql").write_text(
+            "SELECT * FROM loans WHERE status = 'forborne';\n",
             encoding="utf-8",
+        )
+        (d_dir / "rules.js").write_text(
+            "function applyRule(loan) {}\n", encoding="utf-8",
         )
         domain_dir = tmp_path / "domain"
         result = runner.invoke(app, [
@@ -209,4 +221,13 @@ class TestSurveyUniformInputShapes:
             "--source-d", str(d_dir),
             "--domain-dir", str(domain_dir),
         ])
+        # Survey must succeed — the contents are accepted without
+        # affecting candidate generation (forward-compat).
         assert result.exit_code == 0, result.output
+        # Source A's "Borrower" still surfaces normally.
+        g = json.loads(
+            (domain_dir / "discovery" / "candidate-graph.json")
+            .read_text(encoding="utf-8")
+        )
+        labels = {c["label"] for c in g["concepts"]}
+        assert "Borrower" in labels
