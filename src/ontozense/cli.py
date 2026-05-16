@@ -3202,11 +3202,10 @@ def survey(
 
     # ─── Source D: expand to file list (manifest) ──
     # The spec recognises .py / .sql / .js / .ts as Source D code
-    # files (plus .json for pre-built manifests). The candidate-graph
-    # builder's Source D hook is forward-compat — it does not consume
-    # file contents in the current implementation. So we just expand
-    # the paths and bundle them into a manifest dict; a future AST-
-    # based ingestion can read each file when wired in.
+    # files (plus .json for pre-built manifests). Source D paths are
+    # bundled as a manifest; the candidate-graph builder accepts the
+    # manifest without extracting from the file contents in this
+    # implementation.
     try:
         d_files = _expand_source_paths(
             source_d or [],

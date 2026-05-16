@@ -32,7 +32,7 @@ Two commands take you to a draft you can hand off:
 ontozense survey --source-a docs/*.md --source-b governance.json --domain-dir domains/mydomain
 
 # Stage 2 — Draft: build the semantic layer and emit OWL
-ontozense draft --domain-dir domains/mydomain --output domains/mydomain/draft.owl
+ontozense draft --domain-dir domains/mydomain --source-b governance.json --output domains/mydomain/draft.owl
 ```
 
 Then open `draft.owl` in your curation tool of choice. Tycho's job ends there; the expert finishes.
@@ -144,6 +144,7 @@ ontozense survey \
 # Stage 2 — Draft: build the semantic layer
 ontozense draft \
   --domain-dir domains/mydomain \
+  --source-b governance.json \
   --output domains/mydomain/draft.owl
 
 # Stage 3 — Hand off: open in Ontology Playground / Protégé
@@ -180,11 +181,13 @@ ontozense ingest domains/mydomain/sources/ --dry-run
 # 3. Fuse everything into a rich data dictionary. --source-a is
 #    repeatable: each document gets consolidated by deterministic
 #    id (profile mode) or normalised name (unconstrained), with
-#    multi-doc corroboration tracked.
+#    multi-doc corroboration tracked. --source-c takes a
+#    SchemaResult JSON produced by an adapter (see adapters/django/
+#    or adapters/postgres/).
 ontozense fuse \
   --source-a source-a.json \
   --source-b governance.json \
-  --source-c path/to/django/models/ \
+  --source-c path/to/schema-result.json \
   --source-d path/to/code/ \
   --output fused.json
 ```

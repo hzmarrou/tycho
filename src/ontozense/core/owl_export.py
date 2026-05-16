@@ -48,10 +48,9 @@ def fused_to_owl(
         ``rdflib`` serialisation format. Defaults to ``turtle``.
     """
     g = Graph()
-    # Prefer the profile's name for the URI namespace; fall back to
-    # the fusion result's domain_name attribute (if a future task
-    # adds one) or the first element's domain_name, finally
-    # defaulting to "default".
+    # Prefer the profile's name for the URI namespace. FusionResult
+    # does not currently carry a domain_name field; fall back to the
+    # first element's domain_name, then "default".
     if profile is not None:
         domain = profile.profile_name.lower().replace(" ", "_")
     else:
