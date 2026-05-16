@@ -3051,5 +3051,224 @@ def rebuild(
     )
 
 
+# ─── survey (Stage 1 orchestrator) ───────────────────────────────────────────
+
+
+@app.command(name="survey")
+def survey(
+    source_a: list[Path] = typer.Option(
+        None, "--source-a",
+        help=(
+            "Source A input: a .md/.txt file (LLM-extracted), a "
+            ".json file (pre-extracted source-a.json — reused as-is), "
+            "a glob, or a directory (walked recursively). Repeatable."
+        ),
+    ),
+    source_b: list[Path] = typer.Option(
+        None, "--source-b",
+        help=(
+            "Source B governance JSON. File, glob, or directory. "
+            "Repeatable."
+        ),
+    ),
+    source_c: list[Path] = typer.Option(
+        None, "--source-c",
+        help="Source C schema input (forward-compat; not consumed today).",
+    ),
+    source_d: list[Path] = typer.Option(
+        None, "--source-d",
+        help="Source D code input (forward-compat; not consumed today).",
+    ),
+    profile: Path = typer.Option(
+        None, "--profile",
+        help=(
+            "Optional profile directory. Only its alias_map is "
+            "consulted for light synonym normalisation."
+        ),
+    ),
+    domain_dir: Path = typer.Option(
+        ..., "--domain-dir",
+        help=(
+            "Per-domain workspace directory. Discovery artifacts are "
+            "written under <domain_dir>/discovery/."
+        ),
+    ),
+    model: str = typer.Option(
+        "azure/gpt-5.4", "--model", "-m",
+        help="LLM model identifier for the underlying extract-a step.",
+    ),
+) -> None:
+    """Stage 1 of the semantic-layer journey.
+
+    Survey your raw sources: extract from documents, merge in
+    governance / schema / code, and produce a candidate graph for
+    inspection. Writes three artifacts under <DOMAIN_DIR>/discovery/:
+
+      - source-a.json      — concatenated extract-a output
+      - candidate-graph.json
+      - candidate-provenance.json
+
+    Next step: ``ontozense draft`` (Stage 2).
+    """
+    import json as _json
+
+    from .core.candidate_graph import build_candidate_graph
+
+    discovery_dir = domain_dir / "discovery"
+    discovery_dir.mkdir(parents=True, exist_ok=True)
+
+    # ─── Source A: expand + partition ──
+    try:
+        a_files = _expand_source_paths(
+            source_a or [],
+            file_extensions={".md", ".txt", ".markdown", ".json"},
+        )
+    except _SourceLoadError as err:
+        console.print(f"[red]Failed to enumerate --source-a paths:[/] {err}")
+        raise typer.Exit(code=2)
+
+    merged_a_concepts: list[dict] = []
+    merged_a_rels: list[dict] = []
+    for path in a_files:
+        if path.suffix.lower() == ".json":
+            # Pre-extracted source-a.json — load as-is.
+            try:
+                raw = _load_json(path)
+            except _SourceLoadError as err:
+                console.print(
+                    f"[red]Failed to load --source-a {err.path}:[/] {err}"
+                )
+                raise typer.Exit(code=2)
+            if not isinstance(raw, dict):
+                console.print(
+                    f"[red]--source-a {path}: must be a JSON object[/]"
+                )
+                raise typer.Exit(code=2)
+            merged_a_concepts.extend(raw.get("concepts", []) or [])
+            merged_a_rels.extend(raw.get("relationships", []) or [])
+        else:
+            # Doc — run extract-a and read its JSON output.
+            extracted = _run_extract_a_for_survey(path, domain_dir, model)
+            merged_a_concepts.extend(extracted.get("concepts", []) or [])
+            merged_a_rels.extend(extracted.get("relationships", []) or [])
+
+    merged_a: dict | None = None
+    if merged_a_concepts or merged_a_rels:
+        merged_a = {"concepts": merged_a_concepts, "relationships": merged_a_rels}
+        (discovery_dir / "source-a.json").write_text(
+            _json.dumps(merged_a, indent=2), encoding="utf-8",
+        )
+
+    # ─── Source B: expand + load ──
+    try:
+        b_files = _expand_source_paths(
+            source_b or [], file_extensions={".json"},
+        )
+        merged_b = _merge_source_b(b_files) if b_files else None
+    except _SourceLoadError as err:
+        console.print(f"[red]Failed to load --source-b:[/] {err}")
+        raise typer.Exit(code=2)
+
+    # ─── Source C/D: expand and pass through ──
+    merged_c = _load_source_passthrough(source_c or [])
+    merged_d = _load_source_passthrough(source_d or [])
+
+    # ─── Profile alias_map (light normalisation only) ──
+    alias_map: dict[str, str] | None = None
+    if profile is not None:
+        from .core.profile import ProfileError, load_profile
+        try:
+            loaded = load_profile(profile)
+            alias_map = dict(loaded.alias_map)
+        except ProfileError as err:
+            console.print(
+                f"[red]Failed to load --profile {profile}:[/] {err}"
+            )
+            raise typer.Exit(code=2)
+
+    # ─── Run discover ──
+    graph = build_candidate_graph(
+        source_a=merged_a,
+        source_b=merged_b,
+        source_c=merged_c,
+        source_d=merged_d,
+        alias_map=alias_map,
+    )
+
+    (discovery_dir / "candidate-graph.json").write_text(
+        _json.dumps(graph.to_dict(), indent=2) + "\n", encoding="utf-8",
+    )
+    (discovery_dir / "candidate-provenance.json").write_text(
+        _json.dumps({
+            "concepts": [
+                {
+                    "candidate_id": c.candidate_id,
+                    "label": c.label,
+                    "provenance": [p.to_dict() for p in c.provenance],
+                }
+                for c in graph.concepts
+            ],
+        }, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    cross = sum(
+        1 for c in graph.concepts
+        if c.source_presence.get("A") and c.source_presence.get("B")
+    )
+    console.print(
+        f"[green]Survey:[/] {len(graph.concepts)} candidates, "
+        f"{len(graph.relationships)} relationships, "
+        f"{cross} cross-source matches. "
+        f"See {discovery_dir}."
+    )
+
+
+def _expand_source_paths(
+    paths: list[Path],
+    *,
+    file_extensions: set[str],
+) -> list[Path]:
+    """Expand a list of file / glob / directory paths into a flat list
+    of files matching the given extensions. Recurses into directories.
+    """
+    out: list[Path] = []
+    for p in paths:
+        if not p.exists():
+            raise _SourceLoadError(p, f"path not found: {p}")
+        if p.is_file():
+            if p.suffix.lower() in file_extensions:
+                out.append(p)
+        elif p.is_dir():
+            for child in sorted(p.rglob("*")):
+                if child.is_file() and child.suffix.lower() in file_extensions:
+                    out.append(child)
+    return out
+
+
+def _run_extract_a_for_survey(
+    doc_path: Path, domain_dir: Path, model: str,
+) -> dict:
+    """Invoke the existing extract-a pipeline programmatically and
+    return its JSON output as a dict. Used by `survey` to extract
+    from Source A documents on the fly.
+
+    Implementation note: uses the existing DomainDocumentExtractor
+    so behaviour matches `ontozense extract-a`.
+    """
+    from dataclasses import asdict
+
+    from .extractors.domain_doc_extractor import DomainDocumentExtractor
+
+    extractor = DomainDocumentExtractor(model=model)
+    result = extractor.extract_from_file(doc_path)
+    raw = asdict(result)
+    # Reshape into the discovery-compatible {concepts, relationships}.
+    return {
+        "concepts": raw.get("concepts", []),
+        "relationships": raw.get("relationships", []),
+    }
+
+
 if __name__ == "__main__":
     app()
