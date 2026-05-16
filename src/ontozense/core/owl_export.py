@@ -65,6 +65,27 @@ def fused_to_owl(
         g.add((uri, RDF.type, OWL.Class))
         g.add((uri, RDFS.label, Literal(element.element_name)))
 
+    # One ObjectProperty per distinct predicate. Predicates often
+    # repeat across relationships (e.g. "HasLoan" used by many
+    # borrowers); we deduplicate by predicate name and let the
+    # subject/object endpoints contribute to the domain / range.
+    predicates: dict[str, dict[str, set]] = {}
+    for rel in fused.relationships:
+        entry = predicates.setdefault(
+            rel.predicate, {"domains": set(), "ranges": set()},
+        )
+        entry["domains"].add(_id_fragment(rel.subject))
+        entry["ranges"].add(_id_fragment(rel.object))
+
+    for predicate_name, endpoints in predicates.items():
+        uri = ns[_id_fragment(predicate_name)]
+        g.add((uri, RDF.type, OWL.ObjectProperty))
+        g.add((uri, RDFS.label, Literal(predicate_name)))
+        for domain in endpoints["domains"]:
+            g.add((uri, RDFS.domain, ns[domain]))
+        for rng in endpoints["ranges"]:
+            g.add((uri, RDFS.range, ns[rng]))
+
     return g.serialize(format=format)
 
 
