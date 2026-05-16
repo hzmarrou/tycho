@@ -182,7 +182,6 @@ B governance, and writes a candidate graph for inspection.
 ontozense survey `
   --source-a domains/npl/sources/source-a.json `
   --source-b domains/npl/sources/governance.json `
-  --source-d domains/npl/sources/npl-code `
   --domain-dir domains/npl
 ```
 
@@ -190,6 +189,14 @@ ontozense survey `
 `--source-a domains/npl/sources/source-a.json` with
 `--source-a domains/npl/sources/npl-basel-guidelines.md` to run
 fresh LLM extraction.)
+
+> **Note on `--source-d`:** `survey` accepts a `--source-d` flag, but
+> Source D's code contents don't affect the candidate graph at this
+> stage — the builder stages them as a manifest only. Source D's real
+> contribution to the semantic layer happens inside `draft` (Part D),
+> where the code extractor walks the directory and feeds the fused
+> dictionary. You can pass `--source-d` to survey for forward-compat,
+> but you'll see no difference in the Part C.3 inspection output.
 
 ✓ **Expected output:**
 
@@ -253,10 +260,14 @@ ontozense draft `
   --output domains/npl/draft.owl
 ```
 
-(The `--source-b` / `--source-d` flags pass the same sources to
-the fusion engine that survey already used for the candidate
-graph. Source A is read automatically from
-`domains/npl/discovery/source-a.json`.)
+> The `--source-b` flag passes the same governance JSON to the
+> fusion engine that survey used for the candidate-graph merge.
+> The `--source-d` flag, by contrast, is **first consumed here** —
+> survey only stages Source D as a manifest; `draft` is the stage
+> where the code extractor actually walks `npl-code/` and
+> contributes Source-D-derived elements to the fused dictionary.
+> Source A is read automatically from
+> `domains/npl/discovery/source-a.json`.
 
 ✓ **Expected console output:**
 
