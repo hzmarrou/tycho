@@ -48,13 +48,17 @@ def fused_to_owl(
         ``rdflib`` serialisation format. Defaults to ``turtle``.
     """
     g = Graph()
-    # ``FusionResult`` itself doesn't carry a ``domain_name`` field today;
-    # the domain lives on each ``FusedElement``. We pick the first
-    # populated value and fall back to ``"default"`` for empty results.
-    raw_domain = getattr(fused, "domain_name", "") or _first_element_domain(
-        fused.elements
-    ) or "default"
-    domain = raw_domain.lower().replace(" ", "_")
+    # Prefer the profile's name for the URI namespace; fall back to
+    # the fusion result's domain_name attribute (if a future task
+    # adds one) or the first element's domain_name, finally
+    # defaulting to "default".
+    if profile is not None:
+        domain = profile.profile_name.lower().replace(" ", "_")
+    else:
+        raw_domain = getattr(fused, "domain_name", "") or _first_element_domain(
+            fused.elements
+        ) or "default"
+        domain = raw_domain.lower().replace(" ", "_")
     base_iri = f"{domain_namespace}/{domain}/"
     ns = Namespace(base_iri)
     g.bind("", ns)

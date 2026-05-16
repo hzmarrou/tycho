@@ -191,3 +191,44 @@ class TestEmptyAnnotations:
         g.parse(data=ttl, format="turtle")
         sources = list(g.objects(predicate=DC.source))
         assert len(sources) == 0
+
+
+from ontozense.core.profile import Profile, EntityType, IdFormat
+
+
+def _profile_with_npl_types() -> Profile:
+    return Profile(
+        profile_name="npl",
+        profile_version="1.0.0",
+        description="Test NPL profile.",
+        entity_types={
+            "Counterparty": EntityType(name="Counterparty"),
+            "Loan": EntityType(name="Loan"),
+        },
+        predicates={},
+        id_format=IdFormat(),
+    )
+
+
+class TestProfileAwareURIs:
+    def test_uri_includes_profile_name_when_profile_given(self):
+        result = _result(elements=[_el("Borrower")])
+        ttl = fused_to_owl(
+            result, profile=_profile_with_npl_types(), format="turtle",
+        )
+        # Class URI should live under /npl/ namespace
+        assert "/npl/" in ttl
+
+    def test_missing_profile_uses_generic_class(self):
+        """No profile → element renders as plain owl:Class with no
+        rdfs:subClassOf. The 'generic Concept' fallback the spec
+        describes."""
+        result = _result(elements=[_el("Borrower")])
+        ttl = fused_to_owl(result, profile=None, format="turtle")
+        g = Graph()
+        g.parse(data=ttl, format="turtle")
+        # Class exists, no subclass-of relationships.
+        classes = list(g.subjects(RDF.type, OWL.Class))
+        assert len(classes) == 1
+        subclasses = list(g.triples((None, RDFS.subClassOf, None)))
+        assert len(subclasses) == 0
