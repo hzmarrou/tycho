@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from rdflib import Graph, RDF, RDFS, OWL
+from rdflib.namespace import DC
 
 from ontozense.core.fusion import (
     FieldProvenance,
@@ -118,3 +119,63 @@ class TestRelationshipToProperty:
         g.parse(data=ttl, format="turtle")
         props = list(g.subjects(RDF.type, OWL.ObjectProperty))
         assert len(props) == 1  # one "Has" property
+
+
+class TestAnnotations:
+    def test_definition_becomes_rdfs_comment(self):
+        # _el() helper already wires definition into field_provenance.
+        result = _result(elements=[
+            _el("Borrower", definition="A party that receives a service."),
+        ])
+        ttl = fused_to_owl(result, format="turtle")
+        g = Graph()
+        g.parse(data=ttl, format="turtle")
+        comments = {str(o) for o in g.objects(predicate=RDFS.comment)}
+        assert "A party that receives a service." in comments
+
+    def test_citation_becomes_dc_source(self):
+        el = _el("Borrower")
+        # Mutate the field_provenance dict to add a citation. The plan's
+        # draft used el.provenance["citation"] = FieldProvenance(value=...),
+        # adapted here to the real FusedElement.field_provenance + the real
+        # FieldProvenance(source, confidence, original_value) signature.
+        el.field_provenance["citation"] = FieldProvenance(
+            source="A", confidence=0.9, original_value="Basel D403, section 3.2",
+        )
+        result = _result(elements=[el])
+        ttl = fused_to_owl(result, format="turtle")
+        g = Graph()
+        g.parse(data=ttl, format="turtle")
+        sources = {str(o) for o in g.objects(predicate=DC.source)}
+        assert "Basel D403, section 3.2" in sources
+
+
+class TestSerialisationFormats:
+    def test_turtle_default(self):
+        result = _result(elements=[_el("Borrower")])
+        out = fused_to_owl(result)  # default format
+        assert "Borrower" in out
+        # Turtle starts with "@prefix" or a triple
+        assert "@prefix" in out or "Borrower" in out
+
+    def test_jsonld_format(self):
+        result = _result(elements=[_el("Borrower")])
+        out = fused_to_owl(result, format="json-ld")
+        # JSON-LD is JSON; should parse
+        import json
+        json.loads(out)  # raises if not valid JSON
+
+    def test_owl_xml_format(self):
+        result = _result(elements=[_el("Borrower")])
+        out = fused_to_owl(result, format="xml")  # rdflib's "xml" == RDF/XML
+        assert "<?xml" in out
+
+
+class TestEmptyAnnotations:
+    def test_element_with_no_definition_emits_no_comment(self):
+        result = _result(elements=[_el("Borrower")])  # no definition
+        ttl = fused_to_owl(result, format="turtle")
+        g = Graph()
+        g.parse(data=ttl, format="turtle")
+        comments = list(g.objects(predicate=RDFS.comment))
+        assert len(comments) == 0

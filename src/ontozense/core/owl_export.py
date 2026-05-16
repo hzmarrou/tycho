@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from rdflib import Graph, Literal, Namespace, RDF, RDFS, OWL
+from rdflib.namespace import DC
 
 if TYPE_CHECKING:
     from .fusion import FusionResult
@@ -59,11 +60,22 @@ def fused_to_owl(
     g.bind("", ns)
     g.bind("owl", OWL)
     g.bind("rdfs", RDFS)
+    g.bind("dc", DC)
 
     for element in fused.elements:
         uri = ns[_id_fragment(element.element_name)]
         g.add((uri, RDF.type, OWL.Class))
         g.add((uri, RDFS.label, Literal(element.element_name)))
+        # Annotations from per-field provenance.
+        # Note: the dataclass field is `field_provenance` (dict of
+        # str -> FieldProvenance) and each FieldProvenance carries
+        # the value in `original_value`, not `value`.
+        definition = element.field_provenance.get("definition")
+        if definition and definition.original_value:
+            g.add((uri, RDFS.comment, Literal(definition.original_value)))
+        citation = element.field_provenance.get("citation")
+        if citation and citation.original_value:
+            g.add((uri, DC.source, Literal(citation.original_value)))
 
     # One ObjectProperty per distinct predicate. Predicates often
     # repeat across relationships (e.g. "HasLoan" used by many
