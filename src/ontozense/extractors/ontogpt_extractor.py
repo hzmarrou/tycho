@@ -233,10 +233,12 @@ class OntoGPTExtractor:
         """Run OntoGPT CLI extraction.
 
         Azure OpenAI auth is passed via explicit --api-base / --api-version
-        CLI flags plus the AZURE_API_KEY env var. This avoids the unreliable
-        runoak/oaklib keyring path and works with both the legacy
-        '<resource>.openai.azure.com' and the new Foundry-style
-        '<resource>.cognitiveservices.azure.com' endpoints.
+        CLI flags plus the AZURE_API_KEY env var when the target model is
+        Azure. For non-Azure providers (e.g. ``openrouter/...``,
+        ``openai/...``, ``deepseek/...``), credentials are inherited via
+        ``os.environ.copy()`` so LiteLLM can route them itself; injecting
+        the Azure endpoint as ``--api-base`` would otherwise override the
+        provider's base URL and cause a 404 / wrong-endpoint failure.
         """
         ontogpt_exe = self._resolve_ontogpt_executable()
         cmd = [
@@ -248,33 +250,40 @@ class OntoGPTExtractor:
         ]
 
         env = os.environ.copy()
-        # If the user provided AZURE_OPENAI_* env vars (the newer naming),
-        # alias them to the legacy AZURE_API_* names that litellm reads,
-        # and pass --api-base / --api-version explicitly to OntoGPT.
-        api_key = (
-            os.environ.get("AZURE_API_KEY")
-            or os.environ.get("AZURE_OPENAI_API_KEY")
-        )
-        api_base = (
-            os.environ.get("AZURE_API_BASE")
-            or os.environ.get("AZURE_OPENAI_ENDPOINT", "").rstrip("/") or None
-        )
-        api_version = (
-            os.environ.get("AZURE_API_VERSION")
-            or os.environ.get("AZURE_OPENAI_API_VERSION")
-        )
+        is_azure_model = self.model.startswith("azure/")
 
-        if api_key:
-            env["AZURE_API_KEY"] = api_key
-            # litellm fallback — some code paths read OPENAI_API_KEY when
-            # routing through Azure with explicit api_base
-            env["OPENAI_API_KEY"] = api_key
-        if api_base:
-            env["AZURE_API_BASE"] = api_base
-            cmd.extend(["--api-base", api_base])
-        if api_version:
-            env["AZURE_API_VERSION"] = api_version
-            cmd.extend(["--api-version", api_version])
+        if is_azure_model:
+            # Azure auth: aliases AZURE_OPENAI_* (the newer SDK naming) to
+            # AZURE_API_* (the names litellm reads) and passes --api-base /
+            # --api-version explicitly so we don't depend on the unreliable
+            # runoak/oaklib keyring path. Works with both legacy
+            # '<resource>.openai.azure.com' and Foundry-style
+            # '<resource>.cognitiveservices.azure.com' endpoints.
+            api_key = (
+                os.environ.get("AZURE_API_KEY")
+                or os.environ.get("AZURE_OPENAI_API_KEY")
+            )
+            api_base = (
+                os.environ.get("AZURE_API_BASE")
+                or os.environ.get("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
+                or None
+            )
+            api_version = (
+                os.environ.get("AZURE_API_VERSION")
+                or os.environ.get("AZURE_OPENAI_API_VERSION")
+            )
+
+            if api_key:
+                env["AZURE_API_KEY"] = api_key
+                # litellm fallback — some code paths read OPENAI_API_KEY when
+                # routing through Azure with explicit api_base.
+                env["OPENAI_API_KEY"] = api_key
+            if api_base:
+                env["AZURE_API_BASE"] = api_base
+                cmd.extend(["--api-base", api_base])
+            if api_version:
+                env["AZURE_API_VERSION"] = api_version
+                cmd.extend(["--api-version", api_version])
 
         try:
             result = subprocess.run(
