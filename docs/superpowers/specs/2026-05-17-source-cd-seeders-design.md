@@ -583,7 +583,9 @@ The implementation is complete when:
 1. ✅ **Record-only tier boost** — kept. Codex: *"useful instrumentation: you get real-domain data about whether the corroboration heuristic is sensible before making it load-bearing. Deferring it entirely just postpones the same calibration problem."*
 2. ✅ **Single `candidate-graph.json` with `audit` block** — kept (no split into `candidate-graph-audit.json`). Codex: *"simpler contract, less orchestration, easier debugging. If size becomes a problem later, split it in v1.2."*
 
-### Open for the next review round
+### Resolved (Codex review round 3 — 2026-05-17)
 
-3. Should `Source C config override` (§6.5) and `Source D config override` (§7.4) live in **one** `domains/<domain>/sources.yaml` file instead of two, given that the override semantics are identical?
-4. Is the **DTO ambiguity flag** (§7.3) the right resolution, or should DTOs be suppressed by default with explicit `include_classes` to opt them in?
+3. ✅ **Two config files (`source-c.yaml`, `source-d.yaml`), not merged.** Codex: *"source-specific heuristics will diverge quickly; separate schemas are simpler to validate; avoids one large nested `sources.yaml` accumulating unrelated knobs; easier for users to reason about ownership and review diffs."* If a real need for cross-source coordination emerges later, a unified `sources.yaml` can be revisited.
+4. ✅ **DTOs flagged, not suppressed by default.** Codex: *"in many modern Python stacks, DTOs / Pydantic models are real domain surface, not transport noise. Default suppression would create false negatives in code-led domains. The current `raw_type="dto_candidate"` approach preserves evidence while staying honest about ambiguity. Per-domain config already gives the opt-out path where DTOs are known to be noise."*
+
+All open questions resolved. The spec is ready for implementation planning.
