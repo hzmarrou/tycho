@@ -72,58 +72,56 @@ docs/
 
 ## Pre-flight setup (run once in the worktree before Task 1)
 
+**Environment:** All commands assume Windows PowerShell 7+ at the worktree root. Substitute the path syntax for your shell — `uv` itself is cross-platform. All Python invocations go through `uv run`, which transparently resolves the venv it created so we never reference `.venv/bin/python` vs `.venv/Scripts/python.exe` directly.
+
+**Package manager:** `uv` (https://docs.astral.sh/uv/). If `uv --version` isn't on the PATH, install per the upstream docs first.
+
 - [ ] **Setup step 1: Verify worktree state**
 
-Run:
-```bash
-cd /c/Users/hzmarrou/OneDrive/python/projects/ontozense/.worktrees/feat-source-cd-seeders
+From PowerShell at the worktree root:
+```powershell
+cd C:\Users\hzmarrou\OneDrive\python\projects\ontozense\.worktrees\feat-source-cd-seeders
 git rev-parse --show-toplevel
 git branch --show-current
 git status --short
 ```
-Expected: toplevel ends in `.worktrees/feat-source-cd-seeders`, branch is `feat/source-cd-seeders`, status is empty.
+Expected: toplevel ends in `.worktrees\feat-source-cd-seeders`, branch is `feat/source-cd-seeders`, status is empty.
 
-- [ ] **Setup step 2: Install dependencies in a worktree venv**
+- [ ] **Setup step 2: Create the worktree's local venv and sync dependencies**
 
-The main checkout's `.venv` is not in the worktree. Create a local venv and editable-install:
-```bash
-cd /c/Users/hzmarrou/OneDrive/python/projects/ontozense/.worktrees/feat-source-cd-seeders
-python -m venv .venv
-.venv/Scripts/python.exe -m pip install -e ".[dev]"
+```powershell
+uv sync
 ```
+This creates `.venv/` inside the worktree and installs the project + dev extras from the lockfile. No need to call `python -m venv` or invoke pip directly; `uv` handles both venv creation and resolution.
 
 - [ ] **Setup step 3: Run baseline tests**
 
-Run:
-```bash
-.venv/Scripts/python.exe -m pytest -q
+```powershell
+uv run pytest -q
 ```
 Expected: all existing tests pass (the baseline at the branch point of `feat/source-cd-seeders`).
 
-- [ ] **Setup step 4: Add new dependencies**
+- [ ] **Setup step 4: Add the new dependencies via uv**
 
-Edit `pyproject.toml` and add to the project's dependencies:
-```toml
-"sqlglot>=23.0.0",
-"inflect>=7.0.0",
+```powershell
+uv add sqlglot inflect
 ```
+`uv add` updates `pyproject.toml`, regenerates `uv.lock`, and installs the packages into the venv in one shot. No manual edits to `pyproject.toml` are needed.
 
-Then reinstall:
-```bash
-.venv/Scripts/python.exe -m pip install -e ".[dev]"
-```
-
-Verify:
-```bash
-.venv/Scripts/python.exe -c "import sqlglot; import inflect; print(sqlglot.__version__, inflect.__version__)"
+Verify the imports succeed:
+```powershell
+uv run python -c "import sqlglot, inflect; print(sqlglot.__version__, inflect.__version__)"
 ```
 Expected: prints two version strings, no errors.
 
-Commit:
-```bash
-git add pyproject.toml
+- [ ] **Setup step 5: Commit the dependency additions**
+
+```powershell
+git add pyproject.toml uv.lock
 git commit -m "build: add sqlglot and inflect dependencies for Source C/D ingestion"
 ```
+
+**Note for every later task:** all `pytest` invocations below are prefixed with `uv run` (e.g. `uv run pytest tests/path -v`). When the task text says `pytest tests/...`, prepend `uv run` if you're not in an already-activated shell.
 
 ---
 
@@ -250,13 +248,17 @@ Run:
 ```
 Expected: all three new tests PASS. Existing tests in that file still PASS.
 
-- [ ] **Step 5: Run the full suite to confirm no regression**
+- [ ] **Step 5: Run the full suite and triage**
 
-Run:
-```bash
-.venv/Scripts/python.exe -m pytest -q
+```powershell
+uv run pytest -q
 ```
-Expected: all existing tests pass. (Some tests that snapshot `CandidateConcept.to_dict()` output may fail; those are addressed in Task 15.)
+Expected outcomes:
+
+- **Field-targeted tests pass.** Any test that accesses specific `CandidateConcept` attributes (existing or new) continues to work — the dataclass defaults guarantee field-by-field stability.
+- **Whole-dict snapshot tests may fail** because `CandidateConcept.to_dict()` now emits five additional keys (`artifact_kind`, `strength`, `promotion_reason`, `suppression_reason`, `suppressed`) populated from defaults.
+
+If any whole-dict snapshot tests fail after Task 1: **do not refresh them here.** Leave the failures and proceed to Task 15, where the orchestrator landing makes the new fields visible end-to-end and the snapshot refresh is done holistically. Record the list of failing snapshot tests in the commit body if more than two fail, so Task 15 picks them up cleanly.
 
 - [ ] **Step 6: Commit**
 
@@ -2093,16 +2095,43 @@ Run:
 ```
 Expected: six new tests FAIL.
 
-- [ ] **Step 3: Add suppression + config-override logic**
+- [ ] **Step 3: Replace `_emit_for_table` with the suppression-aware version**
 
-Update `SourceCIngester._emit_for_table` to consult `self.config` and the filter primitives from `core.ingest.filters`. Insert this at the top of `_emit_for_table`:
+Replace the entire `_emit_for_table` method with the following. **Precedence rules** (applied in this order at the top of the method, before classification):
+
+| Stage | Decision | Sets |
+|---|---|---|
+| **Table suppression** | If `tname` matches `user_exclude_tables` → suppress with config-cited reason. Else if `tname` matches `user_include_tables` → keep (skip default suppression). Else if `tname` matches `DEFAULT_SOURCE_C_TABLE_SUPPRESSIONS` → suppress with default-cited reason. | `table_suppressed`, `table_suppression_reason` |
+| **Forced classification** | If `tname` in `user_force_vocab` → emit as vocabulary regardless of detector. Else if `tname` in `user_force_entity` → emit as entity regardless of detector. Else run detectors from Task 8. | `is_bridge`, `is_code_table` |
+| **Column suppression** | For each non-PK non-FK column, call `column_is_suppressed(col_name, user_exclude_columns, [])`. If True, emit the attribute candidate with `suppressed=True` and a cited reason. | `col_suppressed`, `col_suppression_reason` per column |
+
+**Emission order** (after the precedence rules):
+
+1. **Bridge** path (`is_bridge=True`): emit one relationship candidate between the two FK referents. **Do not** emit columns or FKs. Skip the entity emission entirely.
+2. **Code-table** path (`is_code_table=True`): emit one vocabulary candidate. **Do not** emit columns separately.
+3. **Regular entity** path (default): emit (a) the entity candidate, then (b) one attribute per non-PK non-FK column (each suppressed-or-not per its rule), then (c) one relationship per FK.
+
+**Suppression handling:** When `table_suppressed=True`, the path-1/path-2/path-3 emission still happens BUT every yielded candidate gets `suppressed=True` and `suppression_reason=table_suppression_reason`. (Column-level reasons override only for per-column suppression decisions.) This way the audit shows the full structure the schema implied, with a single root reason for the whole subtree.
+
+Full method:
 
 ```python
+    def _emit_for_table(
+        self,
+        tname: str,
+        tdata: dict,
+        fk_in_count: int,
+    ) -> Iterable[IntermediateCandidate]:
         from .filters import (
             DEFAULT_SOURCE_C_TABLE_SUPPRESSIONS,
-            glob_match,
             column_is_suppressed,
+            glob_match,
         )
+
+        columns = tdata["columns"]
+        pk = tdata["pk"]
+        fks = tdata["fks"]
+        source_path = tdata["source_path"]
 
         user_exclude_tables = self.config.get("exclude_tables", []) or []
         user_include_tables = self.config.get("include_tables", []) or []
@@ -2110,7 +2139,7 @@ Update `SourceCIngester._emit_for_table` to consult `self.config` and the filter
         user_force_entity = self.config.get("force_entity", []) or []
         user_exclude_columns = self.config.get("exclude_columns", []) or []
 
-        # Table-level suppression.
+        # ─── Table-level suppression decision ───────────────────────────
         table_suppressed = False
         table_suppression_reason: str | None = None
 
@@ -2119,8 +2148,8 @@ Update `SourceCIngester._emit_for_table` to consult `self.config` and the filter
             for p in user_exclude_tables:
                 if glob_match(tname, [p]):
                     table_suppression_reason = (
-                        f"Per-domain config: table matches "
-                        f"exclude_tables pattern '{p}'."
+                        f"Per-domain config: table matches exclude_tables "
+                        f"pattern '{p}'."
                     )
                     break
         elif not glob_match(tname, user_include_tables):
@@ -2133,29 +2162,111 @@ Update `SourceCIngester._emit_for_table` to consult `self.config` and the filter
                             f"matches pattern '{p}'."
                         )
                         break
-```
 
-Then modify each `yield` of an entity / vocabulary / bridge table to wrap with the suppressed state:
-```python
-        # For the entity/vocabulary/bridge yield, set suppressed=table_suppressed
-        # and suppression_reason=table_suppression_reason. If suppressed=True
-        # the candidate is still yielded (with suppressed=True) so it appears
-        # in the audit block.
-```
+        # ─── Classification (with user overrides) ───────────────────────
+        non_pk_non_fk_columns = [
+            (cn, ct) for cn, ct in columns
+            if cn not in pk and not any(fk["column"] == cn for fk in fks)
+        ]
+        is_bridge = (
+            len(fks) >= 2 and len(non_pk_non_fk_columns) == 0
+        )
 
-And for force_vocabulary / force_entity:
-```python
-        # Override classification based on user config (after detection).
+        code_table_triggers = 0
+        name_lower = tname.lower()
+        if (
+            name_lower.endswith("_codes") or name_lower.endswith("_lookup")
+            or name_lower.startswith("ref_") or name_lower.endswith("_code_master")
+            or name_lower.startswith("cd_")
+        ):
+            code_table_triggers += 1
+        col_names_lower = [c.lower() for c, _ in columns]
+        has_code_col = any(
+            cn in ("code", "code_value", "id") for cn in col_names_lower
+        )
+        has_desc_col = any(
+            cn in ("description", "name", "label") for cn in col_names_lower
+        )
+        if 2 <= len(columns) <= 3 and has_code_col and has_desc_col:
+            code_table_triggers += 1
+        if fk_in_count >= 2 and len(fks) == 0:
+            code_table_triggers += 1
+        is_code_table = code_table_triggers >= 2
+
+        # User override of classification.
         if tname in user_force_vocab:
             is_code_table = True
             is_bridge = False
-        if tname in user_force_entity:
+        elif tname in user_force_entity:
             is_code_table = False
             is_bridge = False
-```
 
-For column suppression, when emitting attribute candidates:
-```python
+        # ─── Bridge emission (no entity/columns/FKs separately) ────────
+        if is_bridge:
+            ref_a, ref_b = fks[0]["ref_table"], fks[1]["ref_table"]
+            yield IntermediateCandidate(
+                label=f"{ref_a}__{tname}__{ref_b}",
+                definition=f"Bridge table '{tname}' linking {ref_a} and {ref_b}.",
+                source_type="C",
+                source_artifact=str(source_path),
+                raw_type="bridge_table",
+                eid="",
+                artifact_kind=ArtifactKind.RELATIONSHIP,
+                strength=Strength.MEDIUM,
+                promotion_reason=(
+                    f"Source C: bridge table '{tname}' "
+                    f"(≥2 FKs, no other domain columns)."
+                ),
+                suppression_reason=table_suppression_reason,
+                suppressed=table_suppressed,
+            )
+            return
+
+        # ─── Code-table emission (vocabulary only) ─────────────────────
+        if is_code_table:
+            yield IntermediateCandidate(
+                label=tname,
+                definition="",
+                source_type="C",
+                source_artifact=str(source_path),
+                raw_type="table",
+                eid="",
+                artifact_kind=ArtifactKind.VOCABULARY,
+                strength=Strength.MEDIUM,
+                promotion_reason=(
+                    f"Source C: table '{tname}' classified as code-table / "
+                    f"vocabulary ({code_table_triggers} of 3 detection "
+                    f"triggers fired)."
+                    if tname not in user_force_vocab else
+                    f"Source C: table '{tname}' classified as vocabulary "
+                    f"by per-domain config force_vocabulary."
+                ),
+                suppression_reason=table_suppression_reason,
+                suppressed=table_suppressed,
+            )
+            return
+
+        # ─── Regular entity emission ────────────────────────────────────
+        yield IntermediateCandidate(
+            label=tname,
+            definition="",
+            source_type="C",
+            source_artifact=str(source_path),
+            raw_type="table",
+            eid="",
+            artifact_kind=ArtifactKind.ENTITY,
+            strength=Strength.STRONG,
+            promotion_reason=(
+                f"Source C: table '{tname}' (deterministic schema attestation)."
+                if tname not in user_force_entity else
+                f"Source C: table '{tname}' classified as entity by "
+                f"per-domain config force_entity."
+            ),
+            suppression_reason=table_suppression_reason,
+            suppressed=table_suppressed,
+        )
+
+        # Columns → attributes (each may be individually suppressed).
         for col_name, col_type in columns:
             if col_name in pk:
                 continue
@@ -2164,12 +2275,11 @@ For column suppression, when emitting attribute candidates:
             col_suppressed = column_is_suppressed(
                 col_name, user_exclude_columns, []
             )
-            col_suppression_reason = None
+            col_suppression_reason: str | None = None
             if col_suppressed:
-                # Determine which rule fired
                 if glob_match(col_name, user_exclude_columns):
                     col_suppression_reason = (
-                        f"Per-domain config: column matches "
+                        f"Per-domain config: column '{col_name}' matches "
                         f"exclude_columns pattern."
                     )
                 else:
@@ -2177,14 +2287,54 @@ For column suppression, when emitting attribute candidates:
                         f"Default Source C suppression: column "
                         f"'{col_name}' matches a noise filter pattern."
                     )
+            # If the parent table is suppressed, the column inherits its
+            # reason instead of any per-column reason (the audit shows
+            # the root cause, not the leaf).
+            final_suppressed = col_suppressed or table_suppressed
+            final_reason = (
+                table_suppression_reason if table_suppressed
+                else col_suppression_reason
+            )
             yield IntermediateCandidate(
-                # ... existing fields ...
-                suppression_reason=col_suppression_reason,
-                suppressed=col_suppressed,
+                label=col_name,
+                definition="",
+                source_type="C",
+                source_artifact=f"{source_path}#{tname}.{col_name}",
+                raw_type=col_type,
+                eid="",
+                artifact_kind=ArtifactKind.ATTRIBUTE,
+                strength=Strength.STRONG,
+                promotion_reason=(
+                    f"Source C: column '{tname}.{col_name}' (type {col_type})."
+                ),
+                suppression_reason=final_reason,
+                suppressed=final_suppressed,
+            )
+
+        # FKs → relationships.
+        for fk in fks:
+            yield IntermediateCandidate(
+                label=f"{tname}__{fk['column']}__{fk['ref_table']}",
+                definition=(
+                    f"Foreign key: {tname}.{fk['column']} -> "
+                    f"{fk['ref_table']}.{fk['ref_column']}"
+                ),
+                source_type="C",
+                source_artifact=f"{source_path}#{tname}.{fk['column']}",
+                raw_type="foreign_key",
+                eid="",
+                artifact_kind=ArtifactKind.RELATIONSHIP,
+                strength=Strength.MEDIUM,
+                promotion_reason=(
+                    f"Source C: FK from {tname}.{fk['column']} to "
+                    f"{fk['ref_table']}.{fk['ref_column']}."
+                ),
+                suppression_reason=table_suppression_reason,
+                suppressed=table_suppressed,
             )
 ```
 
-The full re-written `_emit_for_table` is too long to inline here; the implementer adapts the existing version per the patterns above. Tests above pin the contract.
+The tests in Step 1 pin the contract; the precedence table at the top of this step pins the order of decisions. No "implementer adapts" — paste the method as-is and the tests verify it.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -3115,35 +3265,24 @@ This task extends `_upsert` to (a) record the new fields from incoming `Intermed
 
 Create `tests/core/test_candidate_graph_cross_source.py`:
 ```python
-"""Cross-source corroboration: label normalisation + tier-boost merge logic."""
+"""Cross-source corroboration: label normalisation + tier-boost merge logic.
 
-from ontozense.core.candidate_graph import build_candidate_graph
-from ontozense.core.ingest.base import ArtifactKind
+These are unit-level tests for the two new helpers introduced in
+Task 14 (``_resolve_alias_with_normalisation`` and
+``_apply_corroboration_boost``) plus one ``_upsert``-level integration
+test that pins the singularize-and-merge behaviour without depending
+on the orchestrator landing in Task 15.
+"""
 
-
-def test_singularization_merges_customer_with_customers():
-    """Source A says 'customer'; Source C says 'customers' (table).
-    They should merge into a single candidate via singularization."""
-    source_a = {
-        "concepts": [
-            {"name": "customer", "definition": "A bank client."},
-        ],
-    }
-    # We pass Source C as already-parsed intermediate output for this test;
-    # the orchestrator integration test below uses the full pipeline.
-    # For now, simulate by passing a synthetic source_c dict that the
-    # orchestrator will route through SourceCIngester (in Task 15).
-    # For Task 14, we'll add the synthetic merge directly via _upsert.
-    # See test_candidate_graph_orchestrator.py (Task 15) for the
-    # end-to-end variant.
-
-    # Placeholder: the test as written assumes Task 15 has wired up the
-    # orchestrator. For Task 14, we test the helper functions directly.
-    pass  # filled in below
+from ontozense.core.candidate_graph import (
+    _CandidateIndex,
+    _apply_corroboration_boost,
+    _resolve_alias_with_normalisation,
+    _upsert,
+)
 
 
 def test_resolve_alias_with_singularization():
-    from ontozense.core.candidate_graph import _resolve_alias_with_normalisation
     # Plural → singular.
     assert _resolve_alias_with_normalisation("customers", {}) == "customer"
     # Already singular, no change.
@@ -3152,35 +3291,127 @@ def test_resolve_alias_with_singularization():
     assert _resolve_alias_with_normalisation("tbl_customers", {}) == "customer"
     assert _resolve_alias_with_normalisation("dim_customers", {}) == "customer"
     assert _resolve_alias_with_normalisation("fact_orders", {}) == "order"
-    # Existing alias_map still wins.
+    # Existing alias_map still wins (case-insensitive lookup).
     assert _resolve_alias_with_normalisation(
         "client", {"client": "Customer"}
     ) == "Customer"
 
 
-def test_tier_boost_on_two_axis_attestation():
-    """A candidate attested by A (semantic) and C (structural) gets
-    tier boost: MEDIUM → STRONG."""
-    from ontozense.core.candidate_graph import _apply_corroboration_boost
+def test_tier_boost_single_axis_returns_max_strength_no_boost():
+    """Single axis: no boost; the result is simply the max strength."""
+    assert _apply_corroboration_boost([("A", "medium")]) == "medium"
+    assert _apply_corroboration_boost([("A", "weak")]) == "weak"
+    assert _apply_corroboration_boost([("A", "strong")]) == "strong"
 
-    # Internal helper: given a list of (source_type, strength), return
-    # the boosted strength.
+
+def test_tier_boost_two_axes_promotes_one_tier():
+    """≥2 distinct axes → +1 tier from the max, capped at strong."""
     assert _apply_corroboration_boost(
         [("A", "medium"), ("C", "medium")]
     ) == "strong"
     assert _apply_corroboration_boost(
         [("A", "weak"), ("D", "weak")]
     ) == "medium"
-    # Single axis: no boost.
-    assert _apply_corroboration_boost([("A", "medium")]) == "medium"
-    # Already strong: cap at strong.
+
+
+def test_tier_boost_capped_at_strong():
+    """Cannot exceed strong, even with three axes or already-strong inputs."""
     assert _apply_corroboration_boost(
         [("A", "strong"), ("C", "strong")]
     ) == "strong"
-    # Three-axis attested: still strong (cap).
     assert _apply_corroboration_boost(
         [("A", "medium"), ("C", "medium"), ("D", "medium")]
     ) == "strong"
+
+
+def test_tier_boost_same_axis_twice_does_not_boost():
+    """Two attestations on the SAME axis (e.g. A + B, both semantic)
+    don't count as multi-axis corroboration."""
+    assert _apply_corroboration_boost(
+        [("A", "medium"), ("B", "medium")]
+    ) == "medium"
+
+
+def test_upsert_singularization_merges_plural_and_singular():
+    """End-to-end through _upsert: 'customer' and 'customers' from
+    different sources merge into a single candidate via the
+    singularization in _resolve_alias_with_normalisation."""
+    index = _CandidateIndex()
+    _upsert(
+        index,
+        label="customer",
+        definition="A bank client.",
+        source_type="A",
+        source_artifact="docs/policy.md",
+        raw_type="Entity",
+        eid="",
+        artifact_kind="entity",
+        strength="medium",
+        promotion_reason="Source A.",
+        suppression_reason=None,
+        suppressed=False,
+    )
+    _upsert(
+        index,
+        label="customers",   # plural — should singularize-and-merge
+        definition="The customers table.",
+        source_type="C",
+        source_artifact="schema.sql",
+        raw_type="table",
+        eid="",
+        artifact_kind="entity",
+        strength="strong",
+        promotion_reason="Source C: table customers.",
+        suppression_reason=None,
+        suppressed=False,
+    )
+    candidates = index.values()
+    assert len(candidates) == 1
+    c = candidates[0]
+    # Both source-presence bits set.
+    assert c.source_presence["A"] is True
+    assert c.source_presence["C"] is True
+    # Multi-axis attestation → boosted to strong (capped).
+    assert c.strength == "strong"
+    # The canonical (singularised) label survives.
+    assert c.normalized_label == "customer"
+
+
+def test_upsert_table_prefix_stripped_then_singularized_for_merge():
+    """A C-side 'tbl_customers' merges with an A-side 'customer'
+    through prefix-strip + singularize."""
+    index = _CandidateIndex()
+    _upsert(
+        index,
+        label="customer",
+        definition="A bank client.",
+        source_type="A",
+        source_artifact="",
+        raw_type="Entity",
+        eid="",
+        artifact_kind="entity",
+        strength="medium",
+        promotion_reason="",
+        suppression_reason=None,
+        suppressed=False,
+    )
+    _upsert(
+        index,
+        label="tbl_customers",
+        definition="",
+        source_type="C",
+        source_artifact="schema.sql",
+        raw_type="table",
+        eid="",
+        artifact_kind="entity",
+        strength="strong",
+        promotion_reason="",
+        suppression_reason=None,
+        suppressed=False,
+    )
+    candidates = index.values()
+    assert len(candidates) == 1
+    assert candidates[0].normalized_label == "customer"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
