@@ -1,16 +1,54 @@
 # Tycho
 
-Auto-generate rich data dictionaries and domain ontologies from four
-complementary sources: authoritative documents, governance references,
-database schemas, and production code.
+Build a **semantic layer** — a draft OWL ontology of your domain's entities, definitions, relationships, properties, and rules — from your existing documents, governance catalogs, database schemas, and code. Hand the draft to an expert in [Ontology Playground](https://github.com/hzmarrou/ontology-playground) or [Protégé](https://protege.stanford.edu) to finish the last 30%.
 
-Tycho does the mechanical 60–70% of the work, so domain experts
-review a draft with provenance, confidence scores, conflict detection,
-typed per-field anchors back to the source, and structural validation
-against a domain profile — instead of starting from a blank
-spreadsheet.
+Tycho does the mechanical 60–70% of the work — extraction, fusion, validation, lint, anchoring every claim back to the source — so a domain expert doesn't start from a blank slate.
 
-![Tycho architecture — many sources, one semantic layer: extract, discover, induce profile, rebuild → knowledge graph, domain ontology, provenance map, data dictionary, AI grounding](images/tycho.png)
+*(A "semantic layer" is what's sometimes called a domain ontology, a knowledge model, or a rich data dictionary. Same idea — a structured map of what concepts exist in your domain, how they relate, and what rules apply.)*
+
+![Tycho architecture — many sources, one semantic layer](images/tycho.png)
+
+## The journey
+
+```text
+  ┌─────────────┐         ┌──────────────┐         ┌──────────────┐
+  │   SOURCES   │   →     │   SURVEY     │   →     │    DRAFT     │   →    draft.owl
+  │             │         │   (Tycho)    │         │   (Tycho)    │              │
+  │ docs/*.md   │         │              │         │              │              ↓
+  │ governance  │         │ extract +    │         │ induce +     │   ┌────────────────┐
+  │   .json     │         │ merge into   │         │ fuse + check │   │  Ontology       │
+  │ schemas/    │         │ candidate    │         │ + emit OWL   │   │  Playground     │
+  │ code/       │         │ graph        │         │              │   │  (expert        │
+  └─────────────┘         └──────────────┘         └──────────────┘   │   curation)     │
+                                                                       └────────────────┘
+                                                                              ↓
+                                                                       Final ontology
+```
+
+Two commands take you to a draft you can hand off:
+
+```bash
+# Stage 1 — Survey: see what's in your sources
+ontozense survey --source-a docs/*.md --source-b governance.json --domain-dir domains/mydomain
+
+# Stage 2 — Draft: build the semantic layer and emit OWL
+ontozense draft --domain-dir domains/mydomain --source-b governance.json --output domains/mydomain/draft.owl
+```
+
+Then open `draft.owl` in your curation tool of choice. Tycho's job ends there; the expert finishes.
+
+## Vocabulary
+
+| Term | Definition |
+|---|---|
+| **Semantic layer** *(canonical noun)* | Structured map of a domain's entities, definitions, relationships, properties, and rules. Tycho produces a draft. |
+| **Draft ontology** / `draft.owl` | The handoff file. Standard OWL/Turtle. Open in Protégé, Ontology Playground, or any OWL editor. |
+| **Domain** | The area being modeled (NPL, ESG, customer data, …). Each domain has its own `domains/<name>/` workspace. |
+| **Profile** | A schema declaring allowed entity types, predicates, ID format. Either hand-authored or auto-**induced** by Tycho during Draft. |
+| **Survey** | Stage 1 — extract from sources, merge into a candidate graph. |
+| **Draft** | Stage 2 — turn the candidate graph into a constrained semantic layer; emit OWL. |
+| `fused.json` | Tycho's internal working file. `draft.owl` is the human-facing output; `fused.json` carries provenance and confidence details that don't fit cleanly in OWL. |
+| **Source A / B / C / D** | The four input kinds: A = authoritative documents, B = governance JSON, C = database schemas, D = production code. |
 
 ## The four-source pipeline
 
@@ -31,8 +69,8 @@ spreadsheet.
 *The diagram above shows the post-profile pipeline. For the
 **discovery workflow** (Path 1) that produces a draft profile
 from the same four sources via `discover` → `induce-profile` →
-`rebuild`, see [Discovery workflow](#discovery-workflow-no-profile-yet)
-below.*
+`rebuild`, see the Discovery bullet under
+[How Tycho works](#how-tycho-works) below.*
 
 Each source contributes only the fields it can defensibly produce.
 Fusion combines them with per-field provenance, conflict resolution,
@@ -45,32 +83,17 @@ holes via graph analysis. Report produces a benchmark snapshot for
 run-vs-run comparison. Query + file-back lets experts review the
 draft and commit corrections back into the knowledge base.
 
-## Three operating modes
+## How Tycho works
 
-**Unconstrained mode** (no profile). Source A's LLM extracts whatever
-concepts it finds; fusion merges by normalised name. Use this when
-you don't yet know the target ontology shape and just want to see
-what the sources contain.
+There are three ways to use the journey above, depending on what you bring to it.
 
-**Profile mode** (with `--profile <dir>`). You hand Tycho a small
-profile package (`schema.json` + optional sidecars) declaring the
-allowed entity types, predicates, alias map, ID format, and canonical
-verbs. The LLM is constrained to that vocabulary; concepts get
-deterministic IDs derived from `(entity_type, normalised_label)`; all
-four sources align on those IDs so consolidation is a `dict[id]`
-group-by; Validate's six rules check the result against the profile.
-See `docs/PROFILE_SPEC.md` for the format and
-`docs/profile-examples/esg/` for a worked reference.
+**Unconstrained.** No profile. Source A's LLM extracts whatever concepts it finds; fusion merges by normalised name. Use this when you don't yet know the target shape and just want to see what's in your sources.
 
-**Discovery mode** (with `discover` / `induce-profile` / `rebuild`).
-Start from raw sources, build a candidate graph, score the candidates
-by relevance, and emit a *draft* profile automatically. Use this when
-you don't have a profile yet and want the sources themselves to
-suggest one — review the draft, edit to taste, then run profile mode
-with the reviewed result. See the
-[Discovery workflow](#discovery-workflow-no-profile-yet) section below
-for the command sequence and `docs/ontozense-npl-validation.md` for
-a full walkthrough on NPL data.
+**Profile mode.** You hand Tycho a profile package (`schema.json` + sidecars) declaring allowed entity types, predicates, alias map, ID format, and canonical verbs. The LLM is constrained to that vocabulary; concepts get deterministic IDs; all four sources align on those IDs so consolidation is a `dict[id]` group-by. See `docs/PROFILE_SPEC.md` for the format and `docs/profile-examples/esg/` for a worked reference.
+
+**Discovery.** No profile yet, but want one. `survey` builds a candidate graph from raw sources; `draft` auto-induces a profile from it (or accepts a hand-authored one) and emits the OWL. The induced profile is a *draft* — the curator reviews and edits it during hand-off.
+
+All three paths end at the same place: a `draft.owl` you can open in an OWL editor.
 
 ## What's in a rich data dictionary?
 
@@ -112,40 +135,83 @@ uv sync
 #   python -m venv .venv && source .venv/bin/activate
 #   pip install -e ".[dev]"
 
+# Stage 1 — Survey: see what's in your sources
+ontozense survey \
+  --source-a path/to/regulations/*.md \
+  --source-b governance.json \
+  --domain-dir domains/mydomain
+
+# Stage 2 — Draft: build the semantic layer
+ontozense draft \
+  --domain-dir domains/mydomain \
+  --source-b governance.json \
+  --output domains/mydomain/draft.owl
+
+# Stage 3 — Hand off: open in Ontology Playground / Protégé
+```
+
+For the underlying pipeline commands (`extract-a`, `fuse`, `validate`, `lint`, etc.) run by hand — for CI pipelines or fine-grained control — see [Advanced — running the pipeline by hand](#advanced--running-the-pipeline-by-hand) below.
+
+Two NPL (Non-Performing Loans) walkthroughs are available:
+
+- [**docs/ontozense-npl-validation.md**](docs/ontozense-npl-validation.md) — step-by-step tutorial for a brand-new user, starting from `git clone`. Covers both the discovery workflow and the profile-aware pipeline, with concrete `✓ Expected` checkpoints.
+- [**docs/ontozense-npl-advanced.md**](docs/ontozense-npl-advanced.md) — power-user reference; runs each underlying command in isolation. Useful for CI pipelines or fine-grained control.
+
+## Advanced — running the pipeline by hand
+
+Most users should reach for the survey + draft orchestrators above. This section is for the cases where you want to run the underlying pipeline commands by hand — typically a CI pipeline that needs to gate on individual stages, or fine-grained debugging where you want to inspect intermediate artifacts.
+
+The pipeline as nine sequential commands:
+
+```bash
 # 1. Extract from one or more domain documents (needs Azure OpenAI key).
 #    Add --profile <dir> for ontology-constrained extraction with
 #    deterministic IDs and a fixed vocabulary.
 ontozense extract-a path/to/reg-part1.md path/to/reg-part2.md \
   --profile docs/profile-examples/esg \
   --json source-a.json --domain-dir domains/mydomain
+```
 
+```bash
 # 2. (Optional) Route a whole folder by content type
 ontozense ingest domains/mydomain/sources/ --dry-run
+```
 
+```bash
 # 3. Fuse everything into a rich data dictionary. --source-a is
 #    repeatable: each document gets consolidated by deterministic
 #    id (profile mode) or normalised name (unconstrained), with
-#    multi-doc corroboration tracked.
+#    multi-doc corroboration tracked. --source-c takes a
+#    SchemaResult JSON produced by an adapter (see adapters/django/
+#    or adapters/postgres/).
 ontozense fuse \
   --source-a source-a.json \
   --source-b governance.json \
-  --source-c path/to/django/models/ \
+  --source-c path/to/schema-result.json \
   --source-d path/to/code/ \
   --output fused.json
+```
 
+```bash
 # 4. Validate against the profile (profile mode only).
 #    --mode flag (default) annotates findings; --mode filter drops
 #    invalid entities and cascade-drops dangling relationships.
 ontozense validate fused.json \
   --profile docs/profile-examples/esg \
   --output validated.json
+```
 
+```bash
 # 5. Find contradictions, orphans, coverage gaps, structural holes
 ontozense lint fused.json
+```
 
+```bash
 # 6. Ask an LLM to suggest bridging concepts for structural gaps
 ontozense suggest-bridges fused.json -o bridges.md
+```
 
+```bash
 # 7. Generate a benchmark snapshot — element counts, confidence
 #    distribution, conflict stats, anchor coverage, multi-doc
 #    corroboration, profile-coverage of declared types/predicates.
@@ -153,86 +219,17 @@ ontozense suggest-bridges fused.json -o bridges.md
 ontozense report fused.json \
   --profile docs/profile-examples/esg \
   --output report.json --markdown report.md
+```
 
+```bash
 # 8. Look up any element across all sources
 ontozense query "Default" --fused fused.json
+```
 
+```bash
 # 9. File expert reviews back into the knowledge base
 ontozense file-back my-review.md --domain-dir domains/mydomain
 ```
-
-Two NPL (Non-Performing Loans) walkthroughs are available:
-
-- [**docs/ontozense-npl-validation.md**](docs/ontozense-npl-validation.md)
-  — step-by-step tutorial for a brand-new user, starting from
-  `git clone`. Covers both the discovery workflow and the
-  profile-aware pipeline, with concrete `✓ Expected` checkpoints
-  for validating that the install is healthy on real NPL data.
-- [**docs/ontozense-npl-tutorial.md**](docs/ontozense-npl-tutorial.md)
-  — narrative walkthrough focused on the profile-aware pipeline
-  (Path 2). Slower-paced; assumes you already have Ontozense
-  installed.
-
-## Discovery workflow (no profile yet)
-
-Use this when you don't already have a domain profile and want the
-sources themselves to suggest one. The discovery workflow is *path 1*
-of the architecture: build a candidate graph from raw extractions,
-score the candidates by relevance, emit a draft profile, review it,
-then run the normal profile-aware pipeline with the reviewed profile.
-
-```bash
-# 1. Build a candidate graph from one or more source extractions.
-#    --source-a  : JSON output of `ontozense extract-a --json` (the
-#                  wrapped {"concepts": [...], "relationships": [...]}
-#                  shape). Repeatable to merge multiple extractions.
-#    --source-b  : governance JSON in any of the shapes the
-#                  governance extractor accepts — a single
-#                  {"element_name": ...} object, an array of such
-#                  objects, or the wrapped {"records": [...]} form.
-#    --source-c  : Source C schema JSON. The flag is accepted and
-#    --source-d    the payload is passed through unchanged. The
-#                  candidate-graph builder does not extract from
-#                  Source C or D in this implementation.
-#    --profile   : (optional) supplies an alias_map for light synonym
-#                  normalisation. It does NOT filter candidates by
-#                  type or score — every concept the extractors
-#                  surfaced lands in the candidate graph.
-ontozense discover \
-  --source-a source-a.json \
-  --source-b governance.json \
-  --domain-dir domains/mydomain
-
-# 2. Score candidates and emit a draft induced profile.
-#    --weights and --thresholds (optional) point to JSON overrides for
-#    the documented defaults; both are recorded in the induction
-#    report so a reviewer can reproduce the band assignments.
-ontozense induce-profile \
-  domains/mydomain/discovery/candidate-graph.json \
-  --domain-name mydomain \
-  --output-dir domains/mydomain/induced-profile
-
-# 3. Review the induced profile by hand:
-#    - schema.json         : declared types and subtypes
-#    - alias_map.json      : emitted as an empty JSON object (the
-#                            emitted profile does not include
-#                            derived alias mappings)
-#    - prompt_fragment.md  : draft guidance for the second pass
-#    - induction_report.json : top selected, rejected examples,
-#                              scoring weights/thresholds used,
-#                              review notes for anything dropped
-
-# 4. Once the induced profile is reviewed and edited, print the
-#    rebuild plan — the sequence of normal pipeline commands to run
-#    with the reviewed profile.
-ontozense rebuild \
-  --profile domains/mydomain/induced-profile \
-  --domain-dir domains/mydomain
-```
-
-The induced profile is a **draft**, not a final source of truth.
-The plan's review step is non-optional — the architecture is explicit
-that human review must happen between induction and rebuild.
 
 ## Design principles
 

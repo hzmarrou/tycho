@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob as _glob
 import sys
 from pathlib import Path
 
@@ -361,7 +362,9 @@ def extract_a(
         ),
     ),
 ) -> None:
-    """Extract concepts and relationships from authoritative domain documents (Source A).
+    """Stage 1 power-user command. Most users call `ontozense survey` instead, which runs this and the merge step in one go.
+
+    Extract concepts and relationships from authoritative domain documents (Source A).
 
     Source A handles any prose-shaped document the domain experts treat as
     canonical: regulations, internal policies, academic papers, vendor specs,
@@ -1165,7 +1168,9 @@ def validate(
         help="Per-domain knowledge base directory for audit log.",
     ),
 ) -> None:
-    """Validate a fused dictionary against a profile schema.
+    """Stage 2 power-user command. Most users call `ontozense draft` instead, which runs this and the rest of the pipeline.
+
+    Validate a fused dictionary against a profile schema.
 
     Runs 6 structural rules (entity uniqueness, type membership,
     required fields, predicate vocabulary, predicate domains,
@@ -1461,7 +1466,9 @@ def lint(
              "Extra bridges are summarised (default: 10).",
     ),
 ) -> None:
-    """Run consistency checks on a fused data dictionary.
+    """Stage 2 power-user command. Most users call `ontozense draft` instead, which runs this and the rest of the pipeline.
+
+    Run consistency checks on a fused data dictionary.
 
     Checks for contradictions between sources, orphan terms not
     referenced by any relationship, undefined relationship endpoints,
@@ -1761,7 +1768,9 @@ def fuse(
         help="Conflict resolution priority order (comma-separated).",
     ),
 ) -> None:
-    """Fuse Sources A, B, C, D into a rich data dictionary.
+    """Stage 2 power-user command. Most users call `ontozense draft` instead, which orchestrates fuse + validate + lint + OWL emission.
+
+    Fuse Sources A, B, C, D into a rich data dictionary.
 
     Takes extraction results from individual sources and combines them
     into a single fused output with per-field provenance, governance
@@ -2383,7 +2392,9 @@ def discover(
         ),
     ),
 ) -> None:
-    """Build a candidate graph from raw source extractions.
+    """Stage 1 power-user command. Most users call `ontozense survey` instead, which orchestrates extract-a + this in one go.
+
+    Build a candidate graph from raw source extractions.
 
     Writes three artifacts under ``<DOMAIN_DIR>/discovery/``:
 
@@ -2718,7 +2729,9 @@ def induce_profile(
         ),
     ),
 ) -> None:
-    """Score a candidate graph and emit an induced draft profile.
+    """Stage 2 power-user command. Most users call `ontozense draft` instead, which runs scoring + induction + the rest of the pipeline.
+
+    Score a candidate graph and emit an induced draft profile.
 
     Reads ``<CANDIDATE_GRAPH>``, applies the relevance scoring stage
     (``core_business`` / ``supporting_technical`` / ``noise``), and
@@ -2991,6 +3004,12 @@ def rebuild(
     """
     from .core.profile import ProfileError, load_profile
 
+    console.print(
+        "[yellow]Deprecation note:[/] `ontozense rebuild` is deprecated "
+        "and will be removed in v2.0. Use `ontozense draft --plan` for "
+        "the same effect."
+    )
+
     try:
         loaded = load_profile(profile)
     except ProfileError as err:
@@ -3049,6 +3068,634 @@ def rebuild(
         "--source-a/-b/-c/-d flags are accepted for forward-compat "
         "but are informational only in this stub."
     )
+
+
+# ─── survey (Stage 1 orchestrator) ───────────────────────────────────────────
+
+
+@app.command(name="survey")
+def survey(
+    source_a: list[Path] = typer.Option(
+        None, "--source-a",
+        help=(
+            "Source A input: a .md/.txt file (LLM-extracted), a "
+            ".json file (pre-extracted source-a.json — reused as-is), "
+            "a glob, or a directory (walked recursively). Repeatable."
+        ),
+    ),
+    source_b: list[Path] = typer.Option(
+        None, "--source-b",
+        help=(
+            "Source B governance JSON. File, glob, or directory. "
+            "Repeatable."
+        ),
+    ),
+    source_c: list[Path] = typer.Option(
+        None, "--source-c",
+        help="Source C schema input (forward-compat; not consumed today).",
+    ),
+    source_d: list[Path] = typer.Option(
+        None, "--source-d",
+        help="Source D code input (forward-compat; not consumed today).",
+    ),
+    profile: Path = typer.Option(
+        None, "--profile",
+        help=(
+            "Optional profile directory. Only its alias_map is "
+            "consulted for light synonym normalisation."
+        ),
+    ),
+    domain_dir: Path = typer.Option(
+        ..., "--domain-dir",
+        help=(
+            "Per-domain workspace directory. Discovery artifacts are "
+            "written under <domain_dir>/discovery/."
+        ),
+    ),
+    model: str = typer.Option(
+        "azure/gpt-5.4", "--model", "-m",
+        help="LLM model identifier for the underlying extract-a step.",
+    ),
+) -> None:
+    """Stage 1 of the semantic-layer journey.
+
+    Survey your raw sources: extract from documents, merge in
+    governance / schema / code, and produce a candidate graph for
+    inspection. Writes three artifacts under <DOMAIN_DIR>/discovery/:
+
+      - source-a.json      — concatenated extract-a output
+      - candidate-graph.json
+      - candidate-provenance.json
+
+    Next step: ``ontozense draft`` (Stage 2).
+    """
+    import json as _json
+
+    from .core.candidate_graph import build_candidate_graph
+
+    discovery_dir = domain_dir / "discovery"
+    discovery_dir.mkdir(parents=True, exist_ok=True)
+
+    # ─── Source A: expand + partition ──
+    try:
+        a_files = _expand_source_paths(
+            source_a or [],
+            file_extensions={".md", ".txt", ".markdown", ".json"},
+        )
+    except _SourceLoadError as err:
+        console.print(f"[red]Failed to enumerate --source-a paths:[/] {err}")
+        raise typer.Exit(code=2)
+
+    merged_a_concepts: list[dict] = []
+    merged_a_rels: list[dict] = []
+    for path in a_files:
+        if path.suffix.lower() == ".json":
+            # Pre-extracted source-a.json — load as-is.
+            try:
+                raw = _load_json(path)
+            except _SourceLoadError as err:
+                console.print(
+                    f"[red]Failed to load --source-a {err.path}:[/] {err}"
+                )
+                raise typer.Exit(code=2)
+            if not isinstance(raw, dict):
+                console.print(
+                    f"[red]--source-a {path}: must be a JSON object[/]"
+                )
+                raise typer.Exit(code=2)
+            merged_a_concepts.extend(raw.get("concepts", []) or [])
+            merged_a_rels.extend(raw.get("relationships", []) or [])
+        else:
+            # Doc — run extract-a and read its JSON output.
+            extracted = _run_extract_a_for_survey(path, domain_dir, model)
+            merged_a_concepts.extend(extracted.get("concepts", []) or [])
+            merged_a_rels.extend(extracted.get("relationships", []) or [])
+
+    merged_a: dict | None = None
+    if merged_a_concepts or merged_a_rels:
+        merged_a = {"concepts": merged_a_concepts, "relationships": merged_a_rels}
+        (discovery_dir / "source-a.json").write_text(
+            _json.dumps(merged_a, indent=2), encoding="utf-8",
+        )
+
+    # ─── Source B: expand + load ──
+    try:
+        b_files = _expand_source_paths(
+            source_b or [], file_extensions={".json"},
+        )
+        merged_b = _merge_source_b(b_files) if b_files else None
+    except _SourceLoadError as err:
+        console.print(f"[red]Failed to load --source-b:[/] {err}")
+        raise typer.Exit(code=2)
+
+    # ─── Source C: expand + load JSON ──
+    try:
+        c_files = _expand_source_paths(
+            source_c or [], file_extensions={".json"},
+        )
+    except _SourceLoadError as err:
+        console.print(
+            f"[red]Failed to enumerate --source-c paths:[/] {err}"
+        )
+        raise typer.Exit(code=2)
+    merged_c = _load_source_passthrough(c_files) if c_files else None
+
+    # ─── Source D: expand to file list (manifest) ──
+    # The spec recognises .py / .sql / .js / .ts as Source D code
+    # files (plus .json for pre-built manifests). Source D paths are
+    # bundled as a manifest; the candidate-graph builder accepts the
+    # manifest without extracting from the file contents in this
+    # implementation.
+    try:
+        d_files = _expand_source_paths(
+            source_d or [],
+            file_extensions={".py", ".sql", ".js", ".ts", ".json"},
+        )
+    except _SourceLoadError as err:
+        console.print(
+            f"[red]Failed to enumerate --source-d paths:[/] {err}"
+        )
+        raise typer.Exit(code=2)
+    merged_d = (
+        {"files": [str(p) for p in d_files]} if d_files else None
+    )
+
+    # ─── Profile alias_map (light normalisation only) ──
+    alias_map: dict[str, str] | None = None
+    if profile is not None:
+        from .core.profile import ProfileError, load_profile
+        try:
+            loaded = load_profile(profile)
+            alias_map = dict(loaded.alias_map)
+        except ProfileError as err:
+            console.print(
+                f"[red]Failed to load --profile {profile}:[/] {err}"
+            )
+            raise typer.Exit(code=2)
+
+    # ─── Run discover ──
+    graph = build_candidate_graph(
+        source_a=merged_a,
+        source_b=merged_b,
+        source_c=merged_c,
+        source_d=merged_d,
+        alias_map=alias_map,
+    )
+
+    (discovery_dir / "candidate-graph.json").write_text(
+        _json.dumps(graph.to_dict(), indent=2) + "\n", encoding="utf-8",
+    )
+    (discovery_dir / "candidate-provenance.json").write_text(
+        _json.dumps({
+            "concepts": [
+                {
+                    "candidate_id": c.candidate_id,
+                    "label": c.label,
+                    "provenance": [p.to_dict() for p in c.provenance],
+                }
+                for c in graph.concepts
+            ],
+        }, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    cross = sum(
+        1 for c in graph.concepts
+        if c.source_presence.get("A") and c.source_presence.get("B")
+    )
+    console.print(
+        f"[green]Survey:[/] {len(graph.concepts)} candidates, "
+        f"{len(graph.relationships)} relationships, "
+        f"{cross} cross-source matches. "
+        f"See {discovery_dir}."
+    )
+
+
+def _expand_source_paths(
+    paths: list[Path],
+    *,
+    file_extensions: set[str],
+) -> list[Path]:
+    """Expand a list of file / glob / directory paths into a flat list
+    of files matching the given extensions. Recurses into directories;
+    expands glob patterns via :func:`glob.glob`.
+
+    Glob detection looks for any of ``*``, ``?``, ``[`` in the path
+    string — when the shell hasn't already expanded the pattern (e.g.
+    the user passed it quoted, or they're on PowerShell which does
+    not glob-expand most native-command arguments), the CLI does the
+    expansion itself. An empty glob (no matches) is treated as a
+    silent no-op, the same way an empty directory is treated.
+    """
+    out: list[Path] = []
+    for p in paths:
+        p_str = str(p)
+        if any(ch in p_str for ch in "*?["):
+            # Glob pattern — expand and walk results.
+            matches = sorted(_glob.glob(p_str, recursive=True))
+            for match in matches:
+                m = Path(match)
+                if m.is_file():
+                    if m.suffix.lower() in file_extensions:
+                        out.append(m)
+                elif m.is_dir():
+                    for child in sorted(m.rglob("*")):
+                        if (
+                            child.is_file()
+                            and child.suffix.lower() in file_extensions
+                        ):
+                            out.append(child)
+            # Empty glob → no-op (matches the "empty directory" rule).
+            continue
+        # Literal path (file or directory).
+        if not p.exists():
+            raise _SourceLoadError(p, f"path not found: {p}")
+        if p.is_file():
+            if p.suffix.lower() in file_extensions:
+                out.append(p)
+        elif p.is_dir():
+            for child in sorted(p.rglob("*")):
+                if child.is_file() and child.suffix.lower() in file_extensions:
+                    out.append(child)
+    return out
+
+
+def _run_extract_a_for_survey(
+    doc_path: Path, domain_dir: Path, model: str,
+) -> dict:
+    """Invoke the existing extract-a pipeline programmatically and
+    return its JSON output as a dict. Used by `survey` to extract
+    from Source A documents on the fly.
+
+    Implementation note: uses the existing DomainDocumentExtractor
+    so behaviour matches `ontozense extract-a`.
+    """
+    from dataclasses import asdict
+
+    from .extractors.domain_doc_extractor import DomainDocumentExtractor
+
+    extractor = DomainDocumentExtractor(model=model)
+    result = extractor.extract_from_file(doc_path)
+    raw = asdict(result)
+    # Reshape into the discovery-compatible {concepts, relationships}.
+    return {
+        "concepts": raw.get("concepts", []),
+        "relationships": raw.get("relationships", []),
+    }
+
+
+# ─── draft (Stage 2 orchestrator) ────────────────────────────────────────────
+
+
+@app.command(name="draft")
+def draft(
+    domain_dir: Path = typer.Option(
+        ..., "--domain-dir",
+        help="Per-domain workspace. Reads from <domain-dir>/discovery/.",
+    ),
+    output: Path = typer.Option(
+        ..., "--output", "-o",
+        help="Path for the draft OWL file.",
+    ),
+    profile: Path = typer.Option(
+        None, "--profile",
+        help=(
+            "Optional hand-authored profile directory. If given, "
+            "induction is skipped and this profile is used directly."
+        ),
+    ),
+    source_b: Path = typer.Option(
+        None, "--source-b", "-b",
+        help="Optional Source B governance JSON (single file).",
+    ),
+    source_c: Path = typer.Option(
+        None, "--source-c", "-c",
+        help="Optional Source C schema input (single path).",
+    ),
+    source_d: Path = typer.Option(
+        None, "--source-d", "-d",
+        help="Optional Source D code input (single directory).",
+    ),
+    thresholds: Path = typer.Option(
+        None, "--thresholds",
+        help="Optional thresholds JSON (only used when inducing).",
+    ),
+    weights: Path = typer.Option(
+        None, "--weights",
+        help="Optional weights JSON (only used when inducing).",
+    ),
+    mode: str = typer.Option(
+        "flag", "--mode",
+        help='Validation mode: "flag" (annotate findings) or "filter".',
+    ),
+    format: str = typer.Option(
+        "turtle", "--format",
+        help='OWL serialisation: "turtle" (default) | "json-ld" | "owl-xml".',
+    ),
+    plan: bool = typer.Option(
+        False, "--plan",
+        help="Print what would run; don't execute.",
+    ),
+) -> None:
+    """Stage 2 of the semantic-layer journey.
+
+    Score the candidate graph (or use your profile), fuse the
+    sources, validate and lint, and emit a draft OWL ontology. The
+    resulting ``draft.owl`` is the handoff artifact for an expert
+    curator working in Ontology Playground, Protégé, or any OWL
+    editor.
+    """
+    from .core.profile import ProfileError, load_profile
+
+    if plan:
+        _print_draft_plan(domain_dir, profile, output)
+        return
+
+    discovery_dir = domain_dir / "discovery"
+    candidate_graph_path = discovery_dir / "candidate-graph.json"
+    if not candidate_graph_path.exists():
+        console.print(
+            f"[red]No candidate-graph.json under {discovery_dir}.[/]\n"
+            "Run `ontozense survey` first."
+        )
+        raise typer.Exit(code=2)
+
+    # ── Resolve profile ──
+    induced_dir = domain_dir / "induced-profile"
+    if profile is not None:
+        try:
+            loaded_profile_path = profile
+            loaded_profile = load_profile(profile)
+        except ProfileError as err:
+            console.print(f"[red]Failed to load --profile {profile}:[/] {err}")
+            raise typer.Exit(code=2)
+    else:
+        # Run induce-profile to produce one.
+        from .core.discovery_contracts import CandidateConcept
+        from .core.profile_induction import write_induced_profile
+        from .core.relevance import (
+            DEFAULT_THRESHOLDS, DEFAULT_WEIGHTS, score_candidates,
+        )
+
+        try:
+            graph_raw = _load_json(candidate_graph_path)
+        except _SourceLoadError as err:
+            console.print(
+                f"[red]Failed to load candidate graph {err.path}:[/] {err}"
+            )
+            raise typer.Exit(code=2)
+
+        try:
+            concepts = [
+                CandidateConcept.from_dict(c)
+                for c in graph_raw.get("concepts", [])
+            ]
+        except (TypeError, KeyError, ValueError, AttributeError) as err:
+            console.print(
+                f"[red]Malformed candidate graph {candidate_graph_path}:[/] "
+                f"{err}"
+            )
+            raise typer.Exit(code=2)
+
+        wmap: dict[str, float] | None = None
+        tmap: dict[str, float] | None = None
+        if weights is not None:
+            try:
+                wmap = _load_scoring_config(
+                    weights,
+                    required_keys=set(DEFAULT_WEIGHTS.keys()),
+                    label="--weights",
+                )
+            except _SourceLoadError as err:
+                console.print(
+                    f"[red]Failed to load --weights {err.path}:[/] {err}"
+                )
+                raise typer.Exit(code=2)
+        if thresholds is not None:
+            try:
+                tmap = _load_scoring_config(
+                    thresholds,
+                    required_keys=set(DEFAULT_THRESHOLDS.keys()),
+                    label="--thresholds",
+                )
+            except _SourceLoadError as err:
+                console.print(
+                    f"[red]Failed to load --thresholds {err.path}:[/] {err}"
+                )
+                raise typer.Exit(code=2)
+
+        scored = score_candidates(concepts, weights=wmap, thresholds=tmap)
+        write_induced_profile(
+            domain_name=domain_dir.name,
+            candidates=scored,
+            out_dir=induced_dir,
+            weights=wmap,
+            thresholds=tmap,
+        )
+        loaded_profile_path = induced_dir
+        try:
+            loaded_profile = load_profile(induced_dir)
+        except ProfileError as err:
+            console.print(
+                f"[red]Failed to load induced profile {induced_dir}:[/] {err}"
+            )
+            raise typer.Exit(code=2)
+
+    # ── Fuse → validate → lint → OWL ──
+    from .core.lint import lint as run_lint
+    from .core.owl_export import fused_to_owl
+    from .core.validation import VALID_MODES, validate as run_validate
+
+    if mode not in VALID_MODES:
+        console.print(
+            f"[red]Invalid --mode value:[/] {mode!r}. "
+            f"Must be one of {sorted(VALID_MODES)}."
+        )
+        raise typer.Exit(code=2)
+
+    source_a_path = discovery_dir / "source-a.json"
+    fused = _run_fuse_for_draft(
+        source_a_path, domain_dir / "fused.json",
+        source_b=source_b,
+        source_c=source_c,
+        source_d=source_d,
+    )
+
+    validation_report = run_validate(fused, loaded_profile, mode=mode)
+    lint_report = run_lint(fused)
+
+    # Translate the user-facing format name "owl-xml" to rdflib's
+    # internal name "xml" (RDF/XML serialisation). "turtle" and
+    # "json-ld" pass through unchanged.
+    rdflib_format = "xml" if format == "owl-xml" else format
+
+    owl_text = fused_to_owl(
+        fused, profile=loaded_profile, format=rdflib_format,
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(owl_text, encoding="utf-8")
+
+    summary_path = domain_dir / "draft-summary.md"
+    summary_path.write_text(
+        _build_draft_summary(
+            fused, validation_report, lint_report, loaded_profile_path,
+        ),
+        encoding="utf-8",
+    )
+
+    console.print(
+        f"[green]Draft written to[/] {output}\n"
+        f"  Summary: {summary_path}\n"
+        f"Open in Ontology Playground or Protégé."
+    )
+
+
+def _run_fuse_for_draft(
+    source_a_path: Path,
+    output_path: Path,
+    *,
+    source_b: Path | None = None,
+    source_c: Path | None = None,
+    source_d: Path | None = None,
+):
+    """Run fusion programmatically and persist ``fused.json``.
+
+    Mirrors the existing ``fuse`` CLI command's load + dispatch
+    pattern. Source A is loaded from the canonical
+    ``discovery/source-a.json``. Sources B / C / D are optional;
+    when provided, each is loaded via the same helper the existing
+    ``fuse`` command uses and passed to ``engine.fuse()`` so the
+    Stage 2 contract — "fuse the resolved profile + all source
+    inputs" — is satisfied.
+    """
+    import json as _json
+    from dataclasses import asdict
+
+    from .core.fusion import FusionEngine
+
+    sa_result = _load_source_a_json(source_a_path)
+
+    sb_result = None
+    sc_result = None
+    sd_result = None
+
+    if source_b is not None:
+        from .extractors.governance_extractor import GovernanceExtractor
+        sb_result = GovernanceExtractor().extract_from_file(source_b)
+        console.print(
+            f"[bold blue]Source B:[/] {len(sb_result.records)} governance "
+            f"records from {source_b.name}"
+        )
+
+    if source_c is not None:
+        # Tycho 1.0+: Source C is a JSON file conforming to the
+        # SchemaResult contract in ontozense.core.source_c. Mirrors
+        # the loader used by the existing ``fuse`` CLI command.
+        from .core.source_c import (
+            SourceCContractError,
+            load_source_c_json,
+        )
+        if source_c.is_dir():
+            console.print(
+                f"[bold red][x] Source C is now a JSON file, "
+                f"not a directory:[/] {source_c}"
+            )
+            console.print(
+                "  In Tycho 1.0 the CLI consumes a SchemaResult JSON "
+                "produced by an adapter. See adapters/README.md."
+            )
+            raise typer.Exit(code=1)
+        try:
+            sc_result = load_source_c_json(source_c)
+        except OSError as e:
+            console.print(
+                f"[bold red][x] Source C file error:[/] {source_c}"
+            )
+            console.print(f"  [dim]{type(e).__name__}: {e}[/]")
+            raise typer.Exit(code=1)
+        except _json.JSONDecodeError as e:
+            console.print(
+                f"[bold red][x] Source C JSON parse error:[/] {source_c}"
+            )
+            console.print(
+                f"  [dim]Line {e.lineno}, col {e.colno}: {e.msg}[/]"
+            )
+            raise typer.Exit(code=1)
+        except SourceCContractError as e:
+            console.print(
+                f"[bold red][x] Source C JSON contract error:[/] "
+                f"{source_c}"
+            )
+            console.print(f"  [dim]{e}[/]")
+            raise typer.Exit(code=1)
+        console.print(
+            f"[bold blue]Source C:[/] {len(sc_result.models)} schema "
+            f"models from {source_c.name}"
+        )
+
+    if source_d is not None:
+        from .extractors.code_extractor import CodeExtractor
+        sd_result = CodeExtractor().extract_from_directory(source_d)
+        console.print(
+            f"[bold blue]Source D:[/] {len(sd_result.rules)} code rules "
+            f"from {source_d}"
+        )
+
+    engine = FusionEngine()
+    result = engine.fuse(
+        source_a=[sa_result],
+        source_b=sb_result,
+        source_c=sc_result,
+        source_d=sd_result,
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        _json.dumps(asdict(result), indent=2, default=str),
+        encoding="utf-8",
+    )
+    return result
+
+
+def _build_draft_summary(fused, validation, lint, profile_path) -> str:
+    """Compose the human-facing ``draft-summary.md``."""
+    lines = [
+        "# Draft summary",
+        "",
+        f"- Profile used: `{profile_path}`",
+        f"- Elements: {len(fused.elements)}",
+        f"- Relationships: {len(fused.relationships)}",
+        f"- Validation: {validation.error_count} errors, "
+        f"{validation.warning_count} warnings",
+        f"- Lint findings: {len(lint.findings)} total "
+        f"({lint.error_count} errors, {lint.warning_count} warnings)",
+        "",
+        "## What the curator should review first",
+        "",
+        "- Validation errors flagged above",
+        "- Elements with low confidence (see fused.json)",
+        "- Bridge concepts and orphan terms in the lint output",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _print_draft_plan(domain_dir: Path, profile: Path | None, output: Path) -> None:
+    """Print the draft plan without executing.
+
+    Uses ``print`` (not ``console.print``) so the output is stable
+    across terminal widths — same approach as the legacy ``rebuild``
+    command.
+    """
+    print(f"Plan for `ontozense draft` against {domain_dir}:")
+    print()
+    if profile is None:
+        print("  1. induce-profile from discovery/candidate-graph.json")
+    else:
+        print(f"  1. use supplied profile: {profile}")
+    print("  2. fuse discovery/source-a.json against the profile")
+    print("  3. validate the fused dictionary (mode=flag)")
+    print("  4. lint the fused dictionary")
+    print(f"  5. export OWL to {output}")
+    print("  6. write draft-summary.md alongside")
 
 
 if __name__ == "__main__":

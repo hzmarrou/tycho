@@ -1,0 +1,287 @@
+"""Tests for the new `ontozense draft` command (Stage 2 orchestrator)."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from typer.testing import CliRunner
+
+from ontozense.cli import app
+
+
+runner = CliRunner()
+
+
+def _seed_workspace(domain_dir: Path) -> None:
+    """Lay out a minimal post-survey workspace that the draft command
+    can consume."""
+    discovery = domain_dir / "discovery"
+    discovery.mkdir(parents=True, exist_ok=True)
+    discovery.joinpath("candidate-graph.json").write_text(
+        json.dumps({
+            "concepts": [
+                {
+                    "candidate_id": "cand_id_borrower",
+                    "label": "Borrower",
+                    "normalized_label": "borrower",
+                    "suggested_entity_type": "Concept",
+                    "classification": "core_business",
+                    "summary_definition": "A party that receives a service.",
+                    "source_presence": {
+                        "A": True, "B": True, "C": False, "D": False,
+                    },
+                    "source_counts": {"A": 3, "B": 1, "C": 0, "D": 0},
+                    "schema_links": [], "code_links": [], "governance_links": [],
+                    "authoritative_evidence_count": 3,
+                    "graph_degree": 4,
+                    "relevance_score": 0.81,
+                    "relevance_breakdown": {"authoritative_frequency": 0.25},
+                    "provenance": [],
+                    "aliases": [],
+                    "status": "candidate",
+                }
+            ],
+            "relationships": [],
+        }),
+        encoding="utf-8",
+    )
+    discovery.joinpath("source-a.json").write_text(
+        json.dumps({
+            "concepts": [{"name": "Borrower", "definition": "A party."}],
+            "relationships": [],
+        }),
+        encoding="utf-8",
+    )
+
+
+def _minimal_profile_dir(profile_dir: Path) -> None:
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "schema.json").write_text(
+        json.dumps({
+            "profile_name": "test",
+            "profile_version": "1.0.0",
+            "entity_types": {
+                "Concept": {"required": [], "optional": [], "subtypes": []},
+            },
+            "predicates": {},
+        }),
+        encoding="utf-8",
+    )
+
+
+class TestDraftHappyPath:
+    def test_draft_with_induced_profile_writes_owl(self, tmp_path: Path):
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        out = tmp_path / "draft.owl"
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(out),
+        ])
+        assert result.exit_code == 0, result.output
+        assert out.exists()
+        assert "Borrower" in out.read_text(encoding="utf-8")
+
+    def test_draft_emits_summary_markdown(self, tmp_path: Path):
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        out = tmp_path / "draft.owl"
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(out),
+        ])
+        assert result.exit_code == 0
+        assert (domain_dir / "draft-summary.md").exists()
+
+
+class TestDraftWithUserProfile:
+    def test_draft_with_provided_profile_skips_induction(
+        self, tmp_path: Path,
+    ):
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        profile_dir = tmp_path / "profile"
+        _minimal_profile_dir(profile_dir)
+        out = tmp_path / "draft.owl"
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--profile", str(profile_dir),
+            "--output", str(out),
+        ])
+        assert result.exit_code == 0, result.output
+        # When a profile is provided, no induced-profile dir should be created.
+        assert not (domain_dir / "induced-profile").exists()
+
+
+class TestDraftFormat:
+    def test_jsonld_format(self, tmp_path: Path):
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        out = tmp_path / "draft.jsonld"
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(out),
+            "--format", "json-ld",
+        ])
+        assert result.exit_code == 0
+        # JSON-LD content must parse as JSON.
+        json.loads(out.read_text(encoding="utf-8"))
+
+    def test_owl_xml_format(self, tmp_path: Path):
+        """Spec §5.2: the third --format option is owl-xml (not the
+        rdflib-internal name 'xml')."""
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        out = tmp_path / "draft.owl"
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(out),
+            "--format", "owl-xml",
+        ])
+        assert result.exit_code == 0, result.output
+        text = out.read_text(encoding="utf-8")
+        assert "<?xml" in text  # RDF/XML always starts with the XML prolog
+
+
+class TestDraftPlan:
+    def test_plan_flag_prints_without_writing(self, tmp_path: Path):
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        out = tmp_path / "draft.owl"
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(out),
+            "--plan",
+        ])
+        assert result.exit_code == 0
+        assert not out.exists()  # nothing written in plan mode
+        for step in ("induce-profile", "fuse", "validate", "lint"):
+            assert step in result.output
+
+
+class TestDraftErrors:
+    def test_missing_candidate_graph_fails_cleanly(self, tmp_path: Path):
+        domain_dir = tmp_path / "domain"
+        # Note: no _seed_workspace() — discovery/ directory absent.
+        out = tmp_path / "draft.owl"
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(out),
+        ])
+        assert result.exit_code != 0
+        assert "survey" in result.output.lower()  # hint to run survey first
+
+
+class TestRebuildDeprecation:
+    def test_rebuild_prints_deprecation_note(self, tmp_path: Path):
+        profile = tmp_path / "profile"
+        _minimal_profile_dir(profile)
+        result = runner.invoke(app, [
+            "rebuild",
+            "--profile", str(profile),
+            "--domain-dir", str(tmp_path / "domain"),
+        ])
+        assert "deprecated" in result.output.lower()
+        # Should point at the replacement.
+        assert "draft" in result.output
+
+
+class TestDraftMultiSource:
+    """Spec §5.2 Stage 2 contract: draft must fuse the resolved
+    profile with ALL source inputs, not just Source A. The round-1
+    review caught that the original draft implementation ignored
+    --source-b/-c/-d."""
+
+    def test_draft_with_source_b_includes_governance(self, tmp_path: Path):
+        """Source B governance contributions should appear in
+        fused.json alongside Source A's content."""
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+
+        # Write a minimal governance JSON with one record.
+        governance = tmp_path / "governance.json"
+        governance.write_text(
+            json.dumps([
+                {
+                    "element_name": "Borrower",
+                    "definition": "Governance-side definition.",
+                    "is_critical": True,
+                },
+            ]),
+            encoding="utf-8",
+        )
+
+        out = tmp_path / "draft.owl"
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(out),
+            "--source-b", str(governance),
+        ])
+        assert result.exit_code == 0, result.output
+
+        # fused.json should mark the Borrower element with Source B
+        # provenance (the governance record contributed to it).
+        fused_path = domain_dir / "fused.json"
+        assert fused_path.exists()
+        fused = json.loads(fused_path.read_text(encoding="utf-8"))
+
+        # Find an element whose name matches "Borrower" (case-insensitive)
+        # and confirm Source B is in its sources list.
+        borrower_elements = [
+            e for e in fused["elements"]
+            if e["element_name"].lower() == "borrower"
+        ]
+        assert borrower_elements, (
+            "Borrower element missing from fused output"
+        )
+
+        # The element's per-field provenance should reference Source B
+        # somewhere. After asdict() each FieldProvenance is a dict with
+        # a "source" key ("A", "B", "C", or "D").
+        borrower = borrower_elements[0]
+        sources_seen = set()
+        for prov_entry in borrower.get("field_provenance", {}).values():
+            if isinstance(prov_entry, dict) and "source" in prov_entry:
+                sources_seen.add(prov_entry["source"])
+        assert "B" in sources_seen, (
+            f"Source B not contributing to Borrower; saw "
+            f"sources: {sources_seen}"
+        )
+
+
+class TestExistingCommandsPointAtNewOrchestrators:
+    """Help text on the underlying commands should hint that most
+    users will call `survey` or `draft` instead."""
+
+    def test_extract_a_help_mentions_survey(self):
+        result = runner.invoke(app, ["extract-a", "--help"])
+        assert "survey" in result.output.lower()
+
+    def test_discover_help_mentions_survey(self):
+        result = runner.invoke(app, ["discover", "--help"])
+        assert "survey" in result.output.lower()
+
+    def test_induce_profile_help_mentions_draft(self):
+        result = runner.invoke(app, ["induce-profile", "--help"])
+        assert "draft" in result.output.lower()
+
+    def test_fuse_help_mentions_draft(self):
+        result = runner.invoke(app, ["fuse", "--help"])
+        assert "draft" in result.output.lower()
+
+    def test_validate_help_mentions_draft(self):
+        result = runner.invoke(app, ["validate", "--help"])
+        assert "draft" in result.output.lower()
+
+    def test_lint_help_mentions_draft(self):
+        result = runner.invoke(app, ["lint", "--help"])
+        assert "draft" in result.output.lower()
