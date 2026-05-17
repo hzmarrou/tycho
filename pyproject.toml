@@ -18,9 +18,10 @@ dependencies = [
     "python-dotenv>=1.0",
     "openpyxl>=3.1",
     "psycopg2-binary>=2.9",
-    "sqlglot>=25.0",
+    "sqlglot>=23.0.0",
     "networkx>=3.2",
     "litellm>=1.40",
+    "inflect>=7.0.0",
 ]
 
 [project.optional-dependencies]
