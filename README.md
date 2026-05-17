@@ -263,15 +263,39 @@ that governs all of this. For the history of how the upgraded
 pipeline was built — the spec, the per-phase reviews, the design
 trade-offs — see `docs/PRD.txt` and the `docs/REVIEW_*.md` files.
 
-## Legacy commands
+## Adjacent OWL utilities
 
-The following commands are retained from the earlier OWL-centric
-pipeline and still work, but the main flow above uses the newer
-four-source architecture:
+These commands sit alongside the `survey` + `draft` flow rather
+than inside it. They fall into two groups: **alternative entry
+points** that bypass the four-source pipeline, and **generic OWL
+utilities** that operate on `draft.owl` (or any OWL file) after
+the pipeline has run.
 
-- `ontozense extract` — generic OntoGPT extraction
-- `ontozense refine` — validate/normalise/deduplicate an OWL graph
-- `ontozense export` — OWL → Playground JSON
-- `ontozense convert` — existing extraction JSON → Playground JSON
-- `ontozense diff` — compare two OWL ontologies
-- `ontozense info` — stats for an OWL graph
+### Alternative entry points
+
+Single-source flows you can use instead of `survey` + `draft`
+when you don't need the full four-source pipeline:
+
+- `ontozense extract` — one-shot OntoGPT extraction of a single
+  document (MD / TXT / PDF) directly to OWL. Useful for a quick
+  draft from one authoritative source.
+- `ontozense convert` — adapt a pre-existing OntoGPT extraction
+  JSON to OWL / Playground JSON without re-running extraction.
+
+### Generic OWL utilities
+
+Operate on any OWL file — including the `draft.owl` produced by
+`ontozense draft` — and complement the pipeline rather than
+replace any part of it:
+
+- `ontozense refine` — validate / normalise / deduplicate /
+  RDFS-reason an OWL graph. Adds reasoning and name normalisation
+  on top of the `validate` + `lint` steps `draft` already runs.
+- `ontozense export` — convert OWL to Ontology Playground JSON.
+  The bridge from `draft.owl` to the sibling Ontology Playground
+  project when that tool needs Playground JSON rather than raw OWL.
+- `ontozense diff` — compare two OWL ontologies. Useful for
+  comparing successive `draft.owl` runs, or measuring curator
+  edits between `draft.owl` and an expert-finalised `final.owl`.
+- `ontozense info` — print class / property / triple statistics
+  for an OWL file.
