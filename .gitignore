@@ -30,3 +30,6 @@ docs/ESG/
 # Default Excel output written by ``ontozense extract-a`` to the cwd
 # when --output isn't specified. Tests-only side-effect.
 source-a-extraction.xlsx
+
+# Local git worktrees used during feature development
+.worktrees/
