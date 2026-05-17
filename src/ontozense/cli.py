@@ -3129,6 +3129,7 @@ def survey(
 
     Next step: ``ontozense draft`` (Stage 2).
     """
+    _load_env()
     import json as _json
 
     from .core.candidate_graph import build_candidate_graph
@@ -3405,6 +3406,7 @@ def draft(
     curator working in Ontology Playground, Protégé, or any OWL
     editor.
     """
+    _load_env()
     from .core.profile import ProfileError, load_profile
 
     if plan:
