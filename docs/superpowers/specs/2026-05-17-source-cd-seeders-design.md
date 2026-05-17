@@ -351,6 +351,35 @@ This intentional narrowness keeps v1.1 contained: the candidate graph becomes ri
 
 `ontozense survey` keeps its existing flags (`--source-a`, `--source-b`, `--source-c`, `--source-d`). What changes is that `--source-c` and `--source-d` now do real work. A user who never passed them gets the same candidate-graph values as today (with the new additive keys present — see §11.1 for the precise regression contract).
 
+### 9.5 `CandidateConcept` loader / serialiser contract
+
+`core/discovery_contracts.py::CandidateConcept` is a strict frozen dataclass; its `from_dict()` does `cls(**data)`, which raises on unknown keys. To match the new on-disk serialisation in §4, **the dataclass itself grows**:
+
+```python
+@dataclass(frozen=True)
+class CandidateConcept:
+    # ... all existing fields unchanged ...
+
+    # NEW additive fields (v1.1) — all optional with defaults so old
+    # candidate-graph.json snapshots from v1.0 deserialise correctly.
+    artifact_kind:       str        = "entity"   # closed vocab (§5)
+    strength:            str        = "medium"   # strong | medium | weak
+    promotion_reason:    str        = ""
+    suppression_reason:  str | None = None
+    suppressed:          bool       = False
+```
+
+**Why grow the dataclass instead of tolerating unknown keys:** loading what we wrote is the natural behaviour; a write-then-discard asymmetry is harder to reason about; v1.2 consumers (profile induction, fusion) will need the fields on the loaded object anyway, so growing now is honest and avoids touching the dataclass twice.
+
+**Compatibility properties:**
+
+- **Old v1.0 `candidate-graph.json` snapshots** (without the new keys) deserialise correctly: `from_dict()` constructs the object, dataclass defaults fill the missing fields.
+- **New v1.1 `candidate-graph.json` snapshots** (with the new keys) deserialise correctly: `from_dict()` reads them into the matching dataclass fields.
+- **`to_dict()` always writes the new keys** (drawing from current field values or defaults), so the on-disk shape is stable across writers.
+- **Existing consumers** (`induce-profile`, `report`, etc.) that read only the pre-v1.1 attributes continue to work without modification — the new attributes are accessible to them but ignored.
+
+This is the precise mechanism behind the "additive backward-compatible" claim in §4. AC1 (§17) pins the contract end-to-end.
+
 ---
 
 ## 10. Provenance and explainability
@@ -534,7 +563,7 @@ Explicit non-goals for v1.1, to keep this design tight:
 
 The implementation is complete when:
 
-- **AC1 — additive backward-compat for A+B-only runs:** A run with only `--source-a` and `--source-b` produces a `candidate-graph.json` where every existing key carries the same value as today's pipeline. The four new candidate fields (`artifact_kind`, `strength`, `promotion_reason`, `suppression_reason`) and the new top-level `audit` key are present. Snapshot tests get a one-time refresh; value-targeted assertions on existing keys pass without change.
+- **AC1 — additive backward-compat for A+B-only runs:** A run with only `--source-a` and `--source-b` produces a `candidate-graph.json` where every existing key carries the same value as today's pipeline. The new candidate fields (`artifact_kind`, `strength`, `promotion_reason`, `suppression_reason`, `suppressed`) and the new top-level `audit` key are present. Snapshot tests get a one-time refresh; value-targeted assertions on existing keys pass without change. The `CandidateConcept` dataclass (§9.5) gains matching optional fields with defaults; **a v1.0 candidate-graph.json snapshot (no new keys) deserialises cleanly via `from_dict()`** and **a v1.1 candidate-graph.json snapshot round-trips through `to_dict()` / `from_dict()` without data loss**. Existing consumers (`induce-profile`, `report`, etc.) run unmodified.
 - **AC2 — Source C seeds:** A run with `--source-c schema.sql` adds new candidates to the graph with `source_type="C"`, `artifact_kind` set per §5, default strength per §6.2, suppression of audit-table noise per §6.3, code-table detection per §6.4.
 - **AC3 — Source D seeds:** A run with `--source-d code/` adds new candidates with `source_type="D"`, classification per §7.2 (deterministic AST-driven, no LLM), default suppression per §7.3, DTO ambiguity flag per §7.3.
 - **AC4 — corroboration recorded:** A concept attested across two axes records at least one tier higher than the same concept attested on only one. A concept attested across all three records at `strong`. The boosted strength is present in `candidate-graph.json` but does not change `draft.owl` output in v1.1.
@@ -549,9 +578,12 @@ The implementation is complete when:
 
 ## 18. Open questions for review
 
-The following are flagged for explicit review by Codex (The Architect) on the next round:
+### Resolved (Codex review round 2 — 2026-05-17)
 
-1. Is the **record-only tier-boost** (boost the `strength` field but don't yet drive downstream behaviour) the right narrowing, or should the tier boost also be deferred to v1.2 to avoid setting a field that no one consumes?
-2. The **`audit` top-level block** is additive — is it worth a separate file (`candidate-graph-audit.json`) instead, to keep the main file lean for fusion-time consumption?
+1. ✅ **Record-only tier boost** — kept. Codex: *"useful instrumentation: you get real-domain data about whether the corroboration heuristic is sensible before making it load-bearing. Deferring it entirely just postpones the same calibration problem."*
+2. ✅ **Single `candidate-graph.json` with `audit` block** — kept (no split into `candidate-graph-audit.json`). Codex: *"simpler contract, less orchestration, easier debugging. If size becomes a problem later, split it in v1.2."*
+
+### Open for the next review round
+
 3. Should `Source C config override` (§6.5) and `Source D config override` (§7.4) live in **one** `domains/<domain>/sources.yaml` file instead of two, given that the override semantics are identical?
 4. Is the **DTO ambiguity flag** (§7.3) the right resolution, or should DTOs be suppressed by default with explicit `include_classes` to opt them in?
