@@ -58,8 +58,13 @@ def _load_env() -> None:
     """
     import os
     try:
-        from dotenv import load_dotenv
-        load_dotenv()
+        from dotenv import find_dotenv, load_dotenv
+        # find_dotenv(usecwd=True) walks up from the user's current
+        # working directory, not from this module's install location.
+        # Without it, editable installs end up loading the source
+        # repository's .env instead of the .env next to the user's
+        # data, silently hiding provider keys that only live there.
+        load_dotenv(find_dotenv(usecwd=True))
     except ImportError:
         pass
 
