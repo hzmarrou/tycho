@@ -233,3 +233,89 @@ class TestInductionReport:
         }
         loaded = InductionReport.from_dict(legacy)
         assert loaded.scoring_thresholds == {}
+
+
+# ─── CandidateConcept v1.1 fields ──────────────────────────────────────────
+
+
+def test_candidate_concept_has_new_v1_1_fields():
+    """v1.1 adds artifact_kind, strength, promotion_reason,
+    suppression_reason, suppressed — all with defaults."""
+    from ontozense.core.discovery_contracts import CandidateConcept
+
+    c = CandidateConcept(
+        candidate_id="cand_test",
+        label="Customer",
+        normalized_label="customer",
+        suggested_entity_type="Entity",
+        classification="unknown",
+        summary_definition="A person doing business with the bank.",
+        source_presence={"A": True, "B": False, "C": False, "D": False},
+        source_counts={"A": 1, "B": 0, "C": 0, "D": 0},
+    )
+    assert c.artifact_kind == "entity"        # default
+    assert c.strength == "medium"             # default
+    assert c.promotion_reason == ""           # default
+    assert c.suppression_reason is None       # default
+    assert c.suppressed is False              # default
+
+
+def test_candidate_concept_v1_0_snapshot_deserialises():
+    """A v1.0 candidate-graph.json (no new keys) deserialises via
+    CandidateConcept.from_dict() using the dataclass defaults."""
+    from ontozense.core.discovery_contracts import CandidateConcept
+
+    legacy = {
+        "candidate_id": "cand_test",
+        "label": "Customer",
+        "normalized_label": "customer",
+        "suggested_entity_type": "Entity",
+        "classification": "unknown",
+        "summary_definition": "",
+        "source_presence": {"A": True, "B": False, "C": False, "D": False},
+        "source_counts": {"A": 1, "B": 0, "C": 0, "D": 0},
+        "schema_links": [],
+        "code_links": [],
+        "governance_links": [],
+        "authoritative_evidence_count": 1,
+        "graph_degree": 0,
+        "relevance_score": 0.0,
+        "relevance_breakdown": {},
+        "provenance": [],
+        "aliases": ["Customer"],
+        "status": "candidate",
+    }
+    c = CandidateConcept.from_dict(legacy)
+    assert c.label == "Customer"
+    assert c.artifact_kind == "entity"        # default
+    assert c.strength == "medium"             # default
+
+
+def test_candidate_concept_v1_1_round_trip_preserves_new_fields():
+    """A v1.1 candidate-graph.json round-trips through to_dict / from_dict."""
+    from ontozense.core.discovery_contracts import CandidateConcept
+
+    original = CandidateConcept(
+        candidate_id="cand_test",
+        label="Customer",
+        normalized_label="customer",
+        suggested_entity_type="Entity",
+        classification="unknown",
+        summary_definition="",
+        source_presence={"A": True, "B": False, "C": True, "D": False},
+        source_counts={"A": 1, "B": 0, "C": 1, "D": 0},
+        artifact_kind="entity",
+        strength="strong",
+        promotion_reason="Attested across A (docs) and C (table 'customers').",
+        suppression_reason=None,
+        suppressed=False,
+    )
+    raw = original.to_dict()
+    assert raw["artifact_kind"] == "entity"
+    assert raw["strength"] == "strong"
+    assert "promotion_reason" in raw
+    assert raw["suppression_reason"] is None
+    assert raw["suppressed"] is False
+
+    restored = CandidateConcept.from_dict(raw)
+    assert restored == original
