@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.13, `sqlglot` (new dependency for DDL parsing), existing `ast` for Python, existing `pytest` + `pytest-snapshot` patterns, `inflect` (new optional dependency for singularization).
 
-**Spec:** `docs/superpowers/specs/2026-05-17-source-cd-seeders-design.md` (commit `0b47613`, Codex-approved).
+**Spec:** `docs/superpowers/specs/2026-05-17-source-cd-seeders-design.md` at commit `0b4761381253` (Codex-approved final revision; spec revision history is `232c30f → f671f62 → 60fb522 → 0b47613`, and this plan is keyed to `0b47613` only). If implementation reveals the spec needs further amendment, pause and re-run the brainstorming → spec → plan cycle rather than diverging at implementation time.
 
 ---
 
@@ -101,18 +101,18 @@ uv run pytest -q
 ```
 Expected: all existing tests pass (the baseline at the branch point of `feat/source-cd-seeders`).
 
-- [ ] **Setup step 4: Add the new dependencies via uv**
+- [ ] **Setup step 4: Add the new dependencies via uv (with version floors)**
 
 ```powershell
-uv add sqlglot inflect
+uv add "sqlglot>=23.0.0" "inflect>=7.0.0"
 ```
-`uv add` updates `pyproject.toml`, regenerates `uv.lock`, and installs the packages into the venv in one shot. No manual edits to `pyproject.toml` are needed.
+`uv add` updates `pyproject.toml` (recording the version specifier), regenerates `uv.lock` (pinning the exact resolved version), and installs the packages into the venv in one shot. The explicit `>=` floors encode the lower bound the design assumes; the lockfile encodes the exact resolution for reproducibility from a fresh worktree at any later date. No manual edits to `pyproject.toml` are needed.
 
 Verify the imports succeed:
 ```powershell
 uv run python -c "import sqlglot, inflect; print(sqlglot.__version__, inflect.__version__)"
 ```
-Expected: prints two version strings, no errors.
+Expected: prints two version strings, both at or above the encoded floors, no errors.
 
 - [ ] **Setup step 5: Commit the dependency additions**
 
@@ -224,7 +224,7 @@ def test_candidate_concept_v1_1_round_trip_preserves_new_fields():
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/test_discovery_contracts.py::test_candidate_concept_has_new_v1_1_fields -v
+uv run pytest tests/core/test_discovery_contracts.py::test_candidate_concept_has_new_v1_1_fields -v
 ```
 Expected: FAIL with `AttributeError: 'CandidateConcept' object has no attribute 'artifact_kind'`.
 
@@ -244,7 +244,7 @@ In `src/ontozense/core/discovery_contracts.py`, after the existing `status: str 
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/test_discovery_contracts.py -v
+uv run pytest tests/core/test_discovery_contracts.py -v
 ```
 Expected: all three new tests PASS. Existing tests in that file still PASS.
 
@@ -371,7 +371,7 @@ def test_suppressed_candidate_carries_reason():
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_base.py -v
+uv run pytest tests/core/ingest/test_base.py -v
 ```
 Expected: FAIL with `ModuleNotFoundError: No module named 'ontozense.core.ingest'`.
 
@@ -480,7 +480,7 @@ class IngestionPolicy(ABC):
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_base.py -v
+uv run pytest tests/core/ingest/test_base.py -v
 ```
 Expected: all five tests PASS.
 
@@ -619,7 +619,7 @@ def test_load_source_config_rejects_invalid_keys(tmp_path):
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_filters.py -v
+uv run pytest tests/core/ingest/test_filters.py -v
 ```
 Expected: FAIL with `ModuleNotFoundError: No module named 'ontozense.core.ingest.filters'`.
 
@@ -810,7 +810,7 @@ def load_source_config(path: Path) -> dict[str, Any]:
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_filters.py -v
+uv run pytest tests/core/ingest/test_filters.py -v
 ```
 Expected: all tests PASS.
 
@@ -921,7 +921,7 @@ def test_carries_raw_type():
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_ingest_a.py -v
+uv run pytest tests/core/ingest/test_ingest_a.py -v
 ```
 Expected: FAIL with `ModuleNotFoundError: No module named 'ontozense.core.ingest.ingest_a'`.
 
@@ -994,7 +994,7 @@ class SourceAIngester(IngestionPolicy):
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_ingest_a.py -v
+uv run pytest tests/core/ingest/test_ingest_a.py -v
 ```
 Expected: all tests PASS.
 
@@ -1083,7 +1083,7 @@ def test_strips_empty_labels():
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_ingest_b.py -v
+uv run pytest tests/core/ingest/test_ingest_b.py -v
 ```
 Expected: FAIL with `ModuleNotFoundError: No module named 'ontozense.core.ingest.ingest_b'`.
 
@@ -1144,7 +1144,7 @@ class SourceBIngester(IngestionPolicy):
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_ingest_b.py -v
+uv run pytest tests/core/ingest/test_ingest_b.py -v
 ```
 Expected: all tests PASS.
 
@@ -1227,7 +1227,7 @@ def test_no_files_yields_nothing():
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_ingest_c.py -v
+uv run pytest tests/core/ingest/test_ingest_c.py -v
 ```
 Expected: FAIL with `ModuleNotFoundError`.
 
@@ -1340,7 +1340,7 @@ class SourceCIngester(IngestionPolicy):
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_ingest_c.py -v
+uv run pytest tests/core/ingest/test_ingest_c.py -v
 ```
 Expected: all tests PASS.
 
@@ -1445,7 +1445,7 @@ def test_foreign_key_yields_relationship_candidate(tmp_path):
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_ingest_c.py -v
+uv run pytest tests/core/ingest/test_ingest_c.py -v
 ```
 Expected: the four new tests FAIL; the prior tests still PASS.
 
@@ -1614,7 +1614,7 @@ Replace `_yield_for_table` in `src/ontozense/core/ingest/ingest_c.py` with the e
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_ingest_c.py -v
+uv run pytest tests/core/ingest/test_ingest_c.py -v
 ```
 Expected: all seven tests PASS.
 
@@ -1727,7 +1727,7 @@ def test_small_table_without_code_naming_stays_entity(tmp_path):
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_ingest_c.py -v
+uv run pytest tests/core/ingest/test_ingest_c.py -v
 ```
 Expected: three new tests FAIL.
 
@@ -1948,7 +1948,7 @@ Also delete the now-superseded `_yield_for_table` method (the prior version from
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_ingest_c.py -v
+uv run pytest tests/core/ingest/test_ingest_c.py -v
 ```
 Expected: all ten tests PASS.
 
@@ -2091,7 +2091,7 @@ def test_user_force_entity_overrides_default_vocabulary(tmp_path):
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_ingest_c.py -v
+uv run pytest tests/core/ingest/test_ingest_c.py -v
 ```
 Expected: six new tests FAIL.
 
@@ -2340,7 +2340,7 @@ The tests in Step 1 pin the contract; the precedence table at the top of this st
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_ingest_c.py -v
+uv run pytest tests/core/ingest/test_ingest_c.py -v
 ```
 Expected: all sixteen tests PASS.
 
@@ -2467,7 +2467,7 @@ def test_unparseable_python_skipped(tmp_path):
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_ingest_d.py -v
+uv run pytest tests/core/ingest/test_ingest_d.py -v
 ```
 Expected: FAIL with `ModuleNotFoundError`.
 
@@ -2622,7 +2622,7 @@ class SourceDIngester(IngestionPolicy):
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_ingest_d.py -v
+uv run pytest tests/core/ingest/test_ingest_d.py -v
 ```
 Expected: all tests PASS.
 
@@ -2711,7 +2711,7 @@ def test_enum_subclass_is_vocabulary(tmp_path):
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_ingest_d.py -v
+uv run pytest tests/core/ingest/test_ingest_d.py -v
 ```
 Expected: three new tests FAIL.
 
@@ -2849,7 +2849,7 @@ Modify `_yield_for_module` to emit Enum as vocabulary and class fields as attrib
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_ingest_d.py -v
+uv run pytest tests/core/ingest/test_ingest_d.py -v
 ```
 Expected: all tests PASS.
 
@@ -2916,7 +2916,7 @@ def test_validation_function_is_rule(tmp_path):
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_ingest_d.py -v
+uv run pytest tests/core/ingest/test_ingest_d.py -v
 ```
 Expected: two new tests FAIL.
 
@@ -2980,7 +2980,7 @@ In the loop that iterates class body for entity classes, add method emission aft
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_ingest_d.py -v
+uv run pytest tests/core/ingest/test_ingest_d.py -v
 ```
 Expected: all tests PASS.
 
@@ -3087,7 +3087,7 @@ def test_user_include_classes_unsuppresses(tmp_path):
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_ingest_d.py -v
+uv run pytest tests/core/ingest/test_ingest_d.py -v
 ```
 Expected: five new tests FAIL.
 
@@ -3230,7 +3230,7 @@ Then use `class_suppressed`, `class_suppression_reason`, and `emitted_raw_type` 
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/ingest/test_ingest_d.py -v
+uv run pytest tests/core/ingest/test_ingest_d.py -v
 ```
 Expected: all tests PASS.
 
@@ -3418,7 +3418,7 @@ def test_upsert_table_prefix_stripped_then_singularized_for_merge():
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/test_candidate_graph_cross_source.py -v
+uv run pytest tests/core/test_candidate_graph_cross_source.py -v
 ```
 Expected: tests FAIL with `ImportError`.
 
@@ -3539,7 +3539,7 @@ In `_merge_into`, after the existing merge logic, apply the corroboration boost.
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/test_candidate_graph_cross_source.py -v
+uv run pytest tests/core/test_candidate_graph_cross_source.py -v
 ```
 Expected: all tests PASS.
 
@@ -3697,7 +3697,7 @@ def test_data_only_run_useful_output(tmp_path):
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/test_candidate_graph_orchestrator.py -v
+uv run pytest tests/core/test_candidate_graph_orchestrator.py -v
 ```
 Expected: tests FAIL because the orchestrator still discards C/D.
 
@@ -3851,7 +3851,7 @@ from dataclasses import dataclass, field, replace
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/core/test_candidate_graph_orchestrator.py tests/core/test_candidate_graph.py -v
+uv run pytest tests/core/test_candidate_graph_orchestrator.py tests/core/test_candidate_graph.py -v
 ```
 Expected: orchestrator tests PASS; existing `test_candidate_graph.py` tests PASS (the A/B paths via ingesters produce identical values to the prior inline blocks).
 
@@ -3969,7 +3969,7 @@ def test_survey_loads_source_c_yaml(tmp_path):
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/test_cli_survey.py::test_survey_uses_source_c_sql tests/test_cli_survey.py::test_survey_loads_source_c_yaml -v
+uv run pytest tests/test_cli_survey.py::test_survey_uses_source_c_sql tests/test_cli_survey.py::test_survey_loads_source_c_yaml -v
 ```
 Expected: FAIL.
 
@@ -4019,7 +4019,7 @@ And in the `build_candidate_graph(...)` call further down, pass `source_c_config
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/test_cli_survey.py -v
+uv run pytest tests/test_cli_survey.py -v
 ```
 Expected: all tests PASS (including pre-existing ones).
 
@@ -4135,7 +4135,7 @@ class CustomerFactory:
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/test_cli_survey.py::test_survey_uses_source_d_python tests/test_cli_survey.py::test_survey_loads_source_d_yaml -v
+uv run pytest tests/test_cli_survey.py::test_survey_uses_source_d_python tests/test_cli_survey.py::test_survey_loads_source_d_yaml -v
 ```
 Expected: FAIL.
 
@@ -4172,7 +4172,7 @@ And update the `build_candidate_graph` call to pass both configs:
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/test_cli_survey.py -v
+uv run pytest tests/test_cli_survey.py -v
 ```
 Expected: all tests PASS.
 
@@ -4375,7 +4375,7 @@ def test_banking_minimal_survey_end_to_end(tmp_path):
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/test_end_to_end_banking.py -v
+uv run pytest tests/test_end_to_end_banking.py -v
 ```
 Expected: PASS.
 
@@ -4478,7 +4478,7 @@ def test_data_only_minimal_yields_useful_concepts():
 
 Run:
 ```bash
-.venv/Scripts/python.exe -m pytest tests/test_end_to_end_data_only.py -v
+uv run pytest tests/test_end_to_end_data_only.py -v
 ```
 Expected: PASS.
 
@@ -4526,7 +4526,7 @@ Edit `docs/ontozense-npl-advanced.md` to add a "Using Source C and Source D" sec
 - [ ] **Step 3: Run the full suite**
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q
+uv run pytest -q
 ```
 Expected: green.
 
@@ -4569,9 +4569,9 @@ git commit -m "docs: README + tutorial updates for v1.1 Source C/D seeders
 ## Final verification — to run at the end of all tasks
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q
-.venv/Scripts/python.exe -m pytest tests/core/ingest -v
-.venv/Scripts/python.exe -m pytest tests/test_end_to_end_banking.py tests/test_end_to_end_data_only.py -v
+uv run pytest -q
+uv run pytest tests/core/ingest -v
+uv run pytest tests/test_end_to_end_banking.py tests/test_end_to_end_data_only.py -v
 git log --oneline 2e55cb9..HEAD
 ```
 
