@@ -3194,17 +3194,27 @@ def survey(
         console.print(f"[red]Failed to load --source-b:[/] {err}")
         raise typer.Exit(code=2)
 
-    # ─── Source C: expand + load JSON ──
+    # ─── Source C: expand .sql files + load per-domain config ──
     try:
         c_files = _expand_source_paths(
-            source_c or [], file_extensions={".json"},
+            source_c or [], file_extensions={".sql", ".json"},
         )
     except _SourceLoadError as err:
         console.print(
             f"[red]Failed to enumerate --source-c paths:[/] {err}"
         )
         raise typer.Exit(code=2)
-    merged_c = _load_source_passthrough(c_files) if c_files else None
+
+    merged_c: dict | None = None
+    if c_files:
+        sql_files = [p for p in c_files if p.suffix.lower() == ".sql"]
+        json_files = [p for p in c_files if p.suffix.lower() == ".json"]
+        if sql_files:
+            merged_c = {"files": [str(p) for p in sql_files]}
+        elif json_files:
+            # Legacy v1.0 JSON passthrough — JSON Source C ingestion is
+            # deferred to v1.2 per spec §13.2 #6. Load to a no-op dict.
+            merged_c = _load_source_passthrough(json_files)
 
     # ─── Source D: expand to file list (manifest) ──
     # The spec recognises .py / .sql / .js / .ts as Source D code
@@ -3239,6 +3249,17 @@ def survey(
             )
             raise typer.Exit(code=2)
 
+    # ─── Load per-domain source-c.yaml (if present) ──
+    source_c_config: dict | None = None
+    cfg_c_path = domain_dir / "source-c.yaml"
+    if cfg_c_path.exists():
+        from .core.ingest.filters import load_source_config, ConfigError
+        try:
+            source_c_config = load_source_config(cfg_c_path)
+        except ConfigError as err:
+            console.print(f"[red]Invalid source-c.yaml:[/] {err}")
+            raise typer.Exit(code=2)
+
     # ─── Run discover ──
     graph = build_candidate_graph(
         source_a=merged_a,
@@ -3246,6 +3267,7 @@ def survey(
         source_c=merged_c,
         source_d=merged_d,
         alias_map=alias_map,
+        source_c_config=source_c_config,
     )
 
     (discovery_dir / "candidate-graph.json").write_text(

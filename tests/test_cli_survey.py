@@ -231,3 +231,118 @@ class TestSurveyUniformInputShapes:
         )
         labels = {c["label"] for c in g["concepts"]}
         assert "Borrower" in labels
+
+
+def test_survey_uses_source_c_sql(tmp_path):
+    """survey --source-c schema.sql produces C-attested candidates in
+    candidate-graph.json."""
+    domain_dir = tmp_path / "domains" / "test"
+    domain_dir.mkdir(parents=True)
+
+    schema = tmp_path / "schema.sql"
+    schema.write_text(
+        """
+        CREATE TABLE customers (
+            customer_id INT PRIMARY KEY,
+            name VARCHAR(100),
+            credit_score INT
+        );
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    from typer.testing import CliRunner
+    from ontozense.cli import app
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "survey",
+            "--source-c", str(schema),
+            "--domain-dir", str(domain_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    import json
+    cg = json.loads(
+        (domain_dir / "discovery" / "candidate-graph.json").read_text()
+    )
+    norm_labels = {c["normalized_label"] for c in cg["concepts"]}
+    assert "customer" in norm_labels   # singularised from 'customers'
+
+
+def test_survey_loads_source_c_yaml(tmp_path):
+    """survey reads <domain-dir>/source-c.yaml and respects its
+    exclude_tables rule. The excluded table appears in the audit
+    block, not in the main concepts list."""
+    domain_dir = tmp_path / "domains" / "test"
+    domain_dir.mkdir(parents=True)
+
+    schema = tmp_path / "schema.sql"
+    schema.write_text(
+        """
+        CREATE TABLE customers (id INT PRIMARY KEY, name VARCHAR(100));
+        CREATE TABLE legacy_loans (id INT PRIMARY KEY, x VARCHAR(100));
+        """.strip(),
+        encoding="utf-8",
+    )
+    (domain_dir / "source-c.yaml").write_text(
+        "source_c:\n  exclude_tables:\n    - legacy_*\n",
+        encoding="utf-8",
+    )
+
+    from typer.testing import CliRunner
+    from ontozense.cli import app
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "survey",
+            "--source-c", str(schema),
+            "--domain-dir", str(domain_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    import json
+    cg = json.loads(
+        (domain_dir / "discovery" / "candidate-graph.json").read_text()
+    )
+    concept_labels = {c["label"] for c in cg["concepts"]}
+    assert "customers" in concept_labels or "customer" in concept_labels
+    # legacy_loans is excluded -> appears in audit, not in concepts
+    audit_labels = {a["label"] for a in cg.get("audit", [])}
+    assert "legacy_loans" in audit_labels
+
+
+def test_survey_rejects_malformed_source_c_yaml(tmp_path):
+    """A malformed source-c.yaml (typo in top-level wrapper) makes
+    the survey exit with code 2 and a clear error message."""
+    domain_dir = tmp_path / "domains" / "test"
+    domain_dir.mkdir(parents=True)
+
+    schema = tmp_path / "schema.sql"
+    schema.write_text(
+        "CREATE TABLE customers (id INT PRIMARY KEY);",
+        encoding="utf-8",
+    )
+    # 'sourcec:' (no underscore) — the strict loader rejects this.
+    (domain_dir / "source-c.yaml").write_text(
+        "sourcec:\n  exclude_tables: [legacy_*]\n",
+        encoding="utf-8",
+    )
+
+    from typer.testing import CliRunner
+    from ontozense.cli import app
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "survey",
+            "--source-c", str(schema),
+            "--domain-dir", str(domain_dir),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "source-c.yaml" in result.stdout.lower() or "source_c" in result.stdout.lower()
