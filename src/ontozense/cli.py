@@ -3108,7 +3108,16 @@ def survey(
     ),
     source_d: list[Path] = typer.Option(
         None, "--source-d",
-        help="Source D code input (forward-compat; not consumed today).",
+        help=(
+            "Source D code input. v1.1 ingests .py files via the "
+            "deterministic AST extractor (classes, dataclasses, "
+            "Pydantic/SQLAlchemy models, Enums, methods, validation "
+            "functions). .sql/.js/.ts/.json are accepted by the CLI "
+            "but currently ignored by the ingester (those languages "
+            "are deferred per spec §13.2 #7). File, glob, or directory; "
+            "repeatable. Per-domain overrides via "
+            "<domain-dir>/source-d.yaml."
+        ),
     ),
     profile: Path = typer.Option(
         None, "--profile",
@@ -3256,6 +3265,17 @@ def survey(
         {"files": [str(p) for p in d_files]} if d_files else None
     )
 
+    # ─── Load per-domain source-d.yaml (if present) ──
+    source_d_config: dict | None = None
+    cfg_d_path = domain_dir / "source-d.yaml"
+    if cfg_d_path.exists():
+        from .core.ingest.filters import load_source_config, ConfigError
+        try:
+            source_d_config = load_source_config(cfg_d_path)
+        except ConfigError as err:
+            console.print(f"[red]Invalid source-d.yaml:[/] {err}")
+            raise typer.Exit(code=2)
+
     # ─── Profile alias_map (light normalisation only) ──
     alias_map: dict[str, str] | None = None
     if profile is not None:
@@ -3288,6 +3308,7 @@ def survey(
         source_d=merged_d,
         alias_map=alias_map,
         source_c_config=source_c_config,
+        source_d_config=source_d_config,
     )
 
     (discovery_dir / "candidate-graph.json").write_text(

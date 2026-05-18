@@ -379,3 +379,122 @@ def test_survey_rejects_mixed_source_c_sql_and_json(tmp_path):
     assert result.exit_code == 2, result.stdout
     msg = result.stdout.lower()
     assert (".sql" in msg and ".json" in msg) or "mixed" in msg
+
+
+def test_survey_uses_source_d_python(tmp_path):
+    """survey --source-d <code_dir> produces D-attested candidates."""
+    domain_dir = tmp_path / "domains" / "test"
+    domain_dir.mkdir(parents=True)
+
+    code_dir = tmp_path / "code"
+    code_dir.mkdir()
+    (code_dir / "models.py").write_text(
+        """
+from dataclasses import dataclass
+
+@dataclass
+class Customer:
+    name: str
+    email: str
+""".strip(),
+        encoding="utf-8",
+    )
+
+    from typer.testing import CliRunner
+    from ontozense.cli import app
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "survey",
+            "--source-d", str(code_dir),
+            "--domain-dir", str(domain_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    import json
+    cg = json.loads(
+        (domain_dir / "discovery" / "candidate-graph.json").read_text()
+    )
+    norm_labels = {c["normalized_label"] for c in cg["concepts"]}
+    assert "customer" in norm_labels
+
+
+def test_survey_loads_source_d_yaml(tmp_path):
+    """survey reads <domain-dir>/source-d.yaml and respects
+    exclude_classes — matching class routes to the audit block."""
+    domain_dir = tmp_path / "domains" / "test"
+    domain_dir.mkdir(parents=True)
+
+    code_dir = tmp_path / "code"
+    code_dir.mkdir()
+    (code_dir / "models.py").write_text(
+        """
+class Customer:
+    name: str
+class CustomerFactory:
+    def create(self): pass
+""".strip(),
+        encoding="utf-8",
+    )
+    (domain_dir / "source-d.yaml").write_text(
+        "source_d:\n  exclude_classes:\n    - '*Factory'\n",
+        encoding="utf-8",
+    )
+
+    from typer.testing import CliRunner
+    from ontozense.cli import app
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "survey",
+            "--source-d", str(code_dir),
+            "--domain-dir", str(domain_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    import json
+    cg = json.loads(
+        (domain_dir / "discovery" / "candidate-graph.json").read_text()
+    )
+    concept_labels = {c["label"] for c in cg["concepts"]}
+    audit_labels = {a["label"] for a in cg.get("audit", [])}
+    assert "Customer" in concept_labels
+    assert "CustomerFactory" in audit_labels
+
+
+def test_survey_rejects_malformed_source_d_yaml(tmp_path):
+    """A malformed source-d.yaml (typo'd top-level wrapper) makes the
+    survey exit with code 2 and a clear error message."""
+    domain_dir = tmp_path / "domains" / "test"
+    domain_dir.mkdir(parents=True)
+
+    code_dir = tmp_path / "code"
+    code_dir.mkdir()
+    (code_dir / "models.py").write_text(
+        "class Customer:\n    name: str\n",
+        encoding="utf-8",
+    )
+    # 'sourced:' (no underscore) — the strict loader rejects this.
+    (domain_dir / "source-d.yaml").write_text(
+        "sourced:\n  exclude_classes: ['*Factory']\n",
+        encoding="utf-8",
+    )
+
+    from typer.testing import CliRunner
+    from ontozense.cli import app
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "survey",
+            "--source-d", str(code_dir),
+            "--domain-dir", str(domain_dir),
+        ],
+    )
+    assert result.exit_code == 2
+    msg = result.stdout.lower()
+    assert "source-d.yaml" in msg or "source_d" in msg
