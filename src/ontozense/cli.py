@@ -3246,11 +3246,14 @@ def survey(
             merged_c = _load_source_passthrough(json_files)
 
     # ─── Source D: expand to file list (manifest) ──
-    # The spec recognises .py / .sql / .js / .ts as Source D code
-    # files (plus .json for pre-built manifests). Source D paths are
-    # bundled as a manifest; the candidate-graph builder accepts the
-    # manifest without extracting from the file contents in this
-    # implementation.
+    # The CLI accepts .py / .sql / .js / .ts / .json paths for Source D
+    # and bundles them into a manifest of the shape {"files": [...]}.
+    # SourceDIngester (v1.1) consumes .py files via the deterministic
+    # AST extractor and silently ignores the other extensions — those
+    # languages are deferred per spec §13.2 #7. The wider extension set
+    # is preserved here so the manifest stays forward-compatible with
+    # the v1.2+ multi-language ingester without another CLI signature
+    # change.
     try:
         d_files = _expand_source_paths(
             source_d or [],
