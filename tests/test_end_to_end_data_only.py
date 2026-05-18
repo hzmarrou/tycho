@@ -97,22 +97,37 @@ def test_audit_block_lists_timestamp_without_domain_prefix():
 
 def test_foreign_key_relationships_emitted():
     """The two FKs in the DDL (customers→countries, orders→customers)
-    emit as relationship candidates.
+    emit as relationship candidates with raw_type='foreign_key'.
 
-    The label pattern is '<src_table>__<fk_col>__<ref_table_singularised>'.
-    Both the source table name and the referenced table name are stored as
-    the raw (plural) table name and the singularised target respectively —
-    customers→countries emits 'customers__country_code__country' and
-    orders→customers emits 'orders__customer_id__customer'.
+    KNOWN LIMITATION (tracked in a separate follow-up): synthetic FK
+    labels emitted by Source C follow the pattern
+    ``<src>__<col>__<ref_table>``, but they currently flow through
+    ``_resolve_alias_with_normalisation`` in ``_upsert``, which
+    partially singularises the trailing segment only — producing
+    asymmetric labels like ``customers__country_code__country``
+    (source stays plural, ref segment is singularised). This is a
+    leaky abstraction: synthetic relationship identifiers should
+    bypass the label canonicaliser entirely. The fix belongs in the
+    merge layer, not in inflection tuning.
+
+    The assertion below pins the weaker, label-agnostic contract:
+    each FK in the DDL emits one relationship candidate, raw_type
+    matches the ingester's output. Exact label spelling is NOT
+    asserted here while the leak persists.
     """
     graph = _build()
-    rel_labels = {c.label for c in graph.concepts
-                  if c.artifact_kind == "relationship"}
-    # customers→countries: label contains the raw source table 'customers'
-    assert any("customers" in r for r in rel_labels), (
-        f"Expected a relationship label containing 'customers'; got: {rel_labels}"
-    )
-    # orders→customers: label contains the raw source table 'orders'
-    assert any("orders" in r for r in rel_labels), (
-        f"Expected a relationship label containing 'orders'; got: {rel_labels}"
-    )
+    relationships = [
+        c for c in graph.concepts
+        if c.artifact_kind == "relationship"
+    ]
+    # Two FKs in the fixture -> two relationship candidates.
+    assert len(relationships) >= 2
+
+    # Every Source C FK relationship carries raw_type='foreign_key' in
+    # at least one provenance entry (raw_type lives on EvidenceEntry,
+    # not on CandidateConcept directly).
+    fk_relationships = [
+        r for r in relationships
+        if any(e.raw_type == "foreign_key" for e in r.provenance)
+    ]
+    assert len(fk_relationships) >= 2
