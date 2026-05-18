@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import ast
 import logging
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Iterable
 
 from .base import (
@@ -32,6 +32,7 @@ from .base import (
 from .filters import (
     DEFAULT_SOURCE_D_CLASS_SUPPRESSIONS,
     glob_match,
+    path_match,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,10 +86,9 @@ class SourceDIngester(IngestionPolicy):
 
             path_suppressed = False
             path_suppression_reason: str | None = None
-            pure = PurePosixPath(path_str_norm)
 
             for p in user_exclude_paths:
-                if pure.match(p):
+                if path_match(path_str_norm, [p]):
                     path_suppressed = True
                     path_suppression_reason = (
                         f"Per-domain config: path matches "
@@ -98,7 +98,7 @@ class SourceDIngester(IngestionPolicy):
 
             if not path_suppressed:
                 for p in DEFAULT_SOURCE_D_PATH_SUPPRESSIONS:
-                    if pure.match(p):
+                    if path_match(path_str_norm, [p]):
                         path_suppressed = True
                         path_suppression_reason = (
                             f"Default Source D suppression: path matches "
@@ -208,7 +208,7 @@ class SourceDIngester(IngestionPolicy):
                     )
                 continue
 
-            class_is_force_included = node.name in user_include_classes
+            class_is_force_included = glob_match(node.name, user_include_classes)
 
             if raw_type == "enum":
                 yield IntermediateCandidate(

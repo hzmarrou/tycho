@@ -284,3 +284,72 @@ def test_user_include_classes_unsuppresses_dto(tmp_path):
     cls = next(c for c in cands if c.label == "LoanRequest"
                and c.artifact_kind == ArtifactKind.ENTITY)
     assert cls.raw_type == "pydantic_model"
+
+
+def test_user_include_classes_glob_unsuppresses_dto(tmp_path):
+    """include_classes: ['*Request'] (glob) restores raw_type=pydantic_model
+    on LoanRequest, mirroring exclude_classes' glob semantics."""
+    src = """
+        from pydantic import BaseModel
+        class LoanRequest(BaseModel):
+            amount: float
+    """
+    f = _write(tmp_path, "schemas.py", src)
+    cfg = {"include_classes": ["*Request"]}
+    cands = list(SourceDIngester(config=cfg).ingest({"files": [str(f)]}))
+    cls = next(c for c in cands if c.label == "LoanRequest"
+               and c.artifact_kind == ArtifactKind.ENTITY)
+    assert cls.raw_type == "pydantic_model"
+
+
+def test_user_include_classes_is_case_insensitive(tmp_path):
+    """include_classes: ['loanrequest'] (lower-case) restores
+    raw_type=pydantic_model on the upper-case LoanRequest class —
+    matching is case-insensitive per spec §7.4."""
+    src = """
+        from pydantic import BaseModel
+        class LoanRequest(BaseModel):
+            amount: float
+    """
+    f = _write(tmp_path, "schemas.py", src)
+    cfg = {"include_classes": ["loanrequest"]}
+    cands = list(SourceDIngester(config=cfg).ingest({"files": [str(f)]}))
+    cls = next(c for c in cands if c.label == "LoanRequest"
+               and c.artifact_kind == ArtifactKind.ENTITY)
+    assert cls.raw_type == "pydantic_model"
+
+
+def test_path_suppression_is_case_insensitive(tmp_path):
+    """Tests/test_models.py (capitalised dir) is suppressed by the
+    default tests/** pattern — matching is case-insensitive per
+    spec §7.4."""
+    test_dir = tmp_path / "Tests"  # capital T
+    test_dir.mkdir()
+    src = """
+        class FakeCustomer:
+            name: str
+    """
+    f = test_dir / "test_models.py"
+    f.write_text(textwrap.dedent(src), encoding="utf-8")
+
+    cands = list(SourceDIngester().ingest({"files": [str(f)]}))
+    labels = {c.label for c in cands if not c.suppressed}
+    assert "FakeCustomer" not in labels
+
+
+def test_path_suppression_config_pattern_is_case_insensitive(tmp_path):
+    """A user exclude_paths pattern in different case still matches
+    a lower-case file path."""
+    code_dir = tmp_path / "legacy_engine"
+    code_dir.mkdir()
+    src = """
+        class LegacyThing:
+            x: int
+    """
+    f = code_dir / "models.py"
+    f.write_text(textwrap.dedent(src), encoding="utf-8")
+
+    cfg = {"exclude_paths": ["LEGACY_*/**"]}    # upper-case pattern
+    cands = list(SourceDIngester(config=cfg).ingest({"files": [str(f)]}))
+    labels = {c.label for c in cands if not c.suppressed}
+    assert "LegacyThing" not in labels

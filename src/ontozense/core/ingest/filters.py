@@ -96,6 +96,28 @@ def glob_match(name: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatchcase(lowered, p.lower()) for p in patterns)
 
 
+def path_match(path_str: str, patterns: list[str]) -> bool:
+    """Return True if ``path_str`` (a POSIX-style path) matches any
+    pattern in ``patterns``. Uses :class:`pathlib.PurePosixPath.match`
+    for proper gitignore-style ``**`` directory semantics, and is
+    case-insensitive per spec §7.4. Empty patterns list returns False.
+
+    Both the path and each pattern are lower-cased before matching;
+    the path string is expected to already use forward slashes
+    (the caller is responsible for the normalisation, e.g.
+    ``str(path).replace("\\\\", "/")``).
+    """
+    from pathlib import PurePosixPath
+
+    if not patterns:
+        return False
+    lowered = path_str.lower()
+    for p in patterns:
+        if PurePosixPath(lowered).match(p.lower()):
+            return True
+    return False
+
+
 def column_is_suppressed(
     column_name: str,
     user_exclude: list[str],
