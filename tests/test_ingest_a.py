@@ -69,3 +69,13 @@ def test_carries_raw_type():
     raw = {"concepts": [{"name": "Customer", "entity_type": "FibroEntity"}]}
     candidates = list(SourceAIngester().ingest(raw))
     assert candidates[0].raw_type == "FibroEntity"
+
+
+def test_handles_non_dict_input_safely():
+    """Anything that's not a dict (None, list, string, number) is
+    treated as 'no concepts' — no exception."""
+    ingester = SourceAIngester()
+    assert list(ingester.ingest(None)) == []
+    assert list(ingester.ingest([])) == []
+    assert list(ingester.ingest("not a dict")) == []
+    assert list(ingester.ingest(42)) == []
