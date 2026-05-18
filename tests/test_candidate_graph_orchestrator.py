@@ -199,3 +199,38 @@ def test_per_domain_source_c_config_passed_through(tmp_path):
     )
     status = next(c for c in graph.concepts if c.label == "status")
     assert status.artifact_kind == "vocabulary"
+
+
+def test_audit_entries_include_full_intermediate_candidate_fields(tmp_path):
+    """Audit entries carry every IntermediateCandidate field, not
+    just the summary subset. The future audit consumer (v1.2) needs
+    the same fidelity as regular candidates."""
+    ddl = tmp_path / "schema.sql"
+    ddl.write_text(
+        """
+        CREATE TABLE customers (customer_id INT PRIMARY KEY, name VARCHAR(100));
+        CREATE TABLE customer_audit (
+            audit_id INT PRIMARY KEY, event VARCHAR(50)
+        );
+        """.strip(),
+        encoding="utf-8",
+    )
+    graph = build_candidate_graph(source_c={"files": [str(ddl)]})
+    raw = graph.to_dict()
+
+    audit_entry = next(e for e in raw["audit"] if e["label"] == "customer_audit")
+
+    # The full IntermediateCandidate shape should be present.
+    required_fields = {
+        "label", "definition", "source_type", "source_artifact",
+        "raw_type", "eid", "artifact_kind", "strength",
+        "promotion_reason", "suppression_reason", "suppressed",
+    }
+    missing = required_fields - set(audit_entry.keys())
+    assert not missing, f"audit entry missing fields: {missing}"
+
+    # Specifically: suppressed is True, suppression_reason is non-empty,
+    # strength carries a value (not stripped).
+    assert audit_entry["suppressed"] is True
+    assert audit_entry["suppression_reason"]
+    assert audit_entry["strength"] in ("strong", "medium", "weak")

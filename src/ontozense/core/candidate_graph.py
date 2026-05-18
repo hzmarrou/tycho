@@ -202,6 +202,27 @@ def build_candidate_graph(
 
     See ``docs/superpowers/specs/2026-05-17-source-cd-seeders-design.md``
     §9.2 for the v1.1 architecture.
+
+    ## v1.1 label canonicalisation (visible behaviour change)
+
+    Starting in v1.1, every candidate's primary ``label`` is
+    canonicalised via :func:`_resolve_alias_with_normalisation`
+    *before* merge: alias_map lookup (case-insensitive) → strip
+    ``tbl_``/``dim_``/``fact_`` prefixes → English singularize (with
+    ``inflect`` round-trip guard). This applies **unconditionally**,
+    including when no ``alias_map`` is supplied — the prefix-strip
+    and singularize steps still run.
+
+    Consequence: a Source A "customers" surfaces in
+    ``CandidateConcept.label`` as "customer", and a Source C
+    ``tbl_customers`` table surfaces as "customer" too. The original
+    surface form is preserved in ``CandidateConcept.aliases`` so
+    consumers can look up either spelling. This narrows the
+    plain-language reading of AC1 (additive backward-compat): the
+    new key/value behaviour is preserved for existing fields, but
+    the *value* of ``label`` for plural/prefixed inputs is now the
+    canonical singular/unprefixed form. Consumers that rely on the
+    raw surface form should read ``aliases`` instead.
     """
     from .ingest.base import IntermediateCandidate
     from .ingest.ingest_a import SourceAIngester
@@ -304,11 +325,16 @@ def build_candidate_graph(
         audit=[
             {
                 "label": ic.label,
+                "definition": ic.definition,
                 "source_type": ic.source_type,
                 "source_artifact": ic.source_artifact,
                 "raw_type": ic.raw_type,
+                "eid": ic.eid,
                 "artifact_kind": ic.artifact_kind.value,
+                "strength": ic.strength.value,
+                "promotion_reason": ic.promotion_reason,
                 "suppression_reason": ic.suppression_reason or "",
+                "suppressed": ic.suppressed,
             }
             for ic in suppressed_audit
         ],
