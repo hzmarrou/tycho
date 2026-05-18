@@ -815,8 +815,17 @@ def _merge_into(
     )
     merged_suppressed = existing.suppressed or suppressed
 
+    # Alias-map authoritative relabel on merge (spec): if this
+    # upsert's alias_map fired and produced a canonical_label
+    # different from the existing surface label, flip the label
+    # (the previous surface form survives in `aliases`).
+    new_label = existing.label
+    if alias_fired and canonical_label and canonical_label != existing.label:
+        new_label = canonical_label
+
     index.by_key[key] = replace(
         existing,
+        label=new_label,
         suggested_entity_type=suggested_type,
         summary_definition=merged_definition,
         source_presence=updated_presence,

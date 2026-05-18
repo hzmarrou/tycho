@@ -306,3 +306,71 @@ def test_alias_map_still_changes_surface_label():
     c = graph.concepts[0]
     # alias_map fired: 'client' -> 'Customer'. Surface label changes.
     assert c.label == "Customer"
+
+
+def test_alias_map_relabels_existing_candidate_on_merge():
+    """Per spec: 'alias_map is authoritative for the surface label'.
+    The order-dependent variant: ingest 'customers' FIRST (surface
+    preserved as 'customers'), THEN ingest 'client' with alias_map
+    {'client': 'Customer'}. The alias_map should win — the final
+    candidate's label is 'Customer'. The previous surface forms
+    should be preserved in aliases."""
+    from ontozense.core.candidate_graph import _CandidateIndex, _upsert
+
+    index = _CandidateIndex()
+
+    # First upsert: no alias fires; surface 'customers' preserved.
+    _upsert(
+        index,
+        label="customers",
+        definition="Bank clients.",
+        source_type="A",
+        source_artifact="docs.md",
+        raw_type="Entity",
+        eid="",
+        artifact_kind="entity",
+        strength="medium",
+        promotion_reason="Source A.",
+        suppression_reason=None,
+        suppressed=False,
+    )
+    assert len(index.values()) == 1
+    assert index.values()[0].label == "customers"
+
+    # Second upsert: alias_map fires on 'client' -> 'Customer'.
+    # Both inputs share the normalised form 'customer', so they
+    # merge into the same candidate.
+    _upsert(
+        index,
+        label="client",
+        definition="A bank client.",
+        source_type="B",
+        source_artifact="glossary.json",
+        raw_type="Entity",
+        eid="",
+        artifact_kind="entity",
+        strength="medium",
+        promotion_reason="Source B.",
+        suppression_reason=None,
+        suppressed=False,
+        alias_map={"client": "Customer"},
+    )
+
+    # Still one merged candidate.
+    candidates = index.values()
+    assert len(candidates) == 1
+    c = candidates[0]
+
+    # alias_map fired on the second upsert: surface label flipped
+    # to 'Customer' (authoritative per spec).
+    assert c.label == "Customer", (
+        f"expected label='Customer' after alias_map fire on merge; "
+        f"got label={c.label!r}"
+    )
+
+    # Both source-presence bits set (merge happened correctly).
+    assert c.source_presence["A"] is True
+    assert c.source_presence["B"] is True
+
+    # Original surface forms preserved in aliases.
+    assert "customers" in c.aliases or "client" in c.aliases
