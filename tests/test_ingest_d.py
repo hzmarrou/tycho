@@ -117,3 +117,58 @@ def test_sqlalchemy_model_is_entity(tmp_path):
     assert "Loan" in by_label
     assert by_label["Loan"].raw_type == "sqlalchemy_model"
     assert by_label["Loan"].strength == Strength.STRONG
+
+
+def test_class_fields_yield_attribute_candidates(tmp_path):
+    src = """
+        class Customer:
+            name: str
+            email: str
+            credit_score: int
+    """
+    f = _write(tmp_path, "models.py", src)
+    cands = list(SourceDIngester().ingest({"files": [str(f)]}))
+    attrs = [c for c in cands if c.artifact_kind == ArtifactKind.ATTRIBUTE]
+    labels = sorted(c.label for c in attrs)
+    assert labels == ["credit_score", "email", "name"]
+
+    for a in attrs:
+        assert a.source_type == "D"
+        # raw_type carries the Python type annotation
+        assert a.raw_type in ("str", "int")
+
+
+def test_dataclass_fields_yield_attribute_candidates(tmp_path):
+    src = """
+        from dataclasses import dataclass
+
+        @dataclass
+        class Loan:
+            amount: float
+            term_months: int
+    """
+    f = _write(tmp_path, "models.py", src)
+    cands = list(SourceDIngester().ingest({"files": [str(f)]}))
+    attrs = [c for c in cands if c.artifact_kind == ArtifactKind.ATTRIBUTE]
+    labels = sorted(c.label for c in attrs)
+    assert labels == ["amount", "term_months"]
+
+
+def test_enum_subclass_is_vocabulary(tmp_path):
+    src = """
+        from enum import Enum
+
+        class LoanStatus(Enum):
+            ACTIVE = "active"
+            CLOSED = "closed"
+            DELINQUENT = "delinquent"
+    """
+    f = _write(tmp_path, "models.py", src)
+    cands = list(SourceDIngester().ingest({"files": [str(f)]}))
+    by_label = {c.label: c for c in cands if c.artifact_kind in
+                (ArtifactKind.VOCABULARY, ArtifactKind.ENTITY)}
+
+    assert "LoanStatus" in by_label
+    assert by_label["LoanStatus"].artifact_kind == ArtifactKind.VOCABULARY
+    assert by_label["LoanStatus"].strength == Strength.MEDIUM
+    assert by_label["LoanStatus"].raw_type == "enum"

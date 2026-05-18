@@ -76,15 +76,33 @@ class SourceDIngester(IngestionPolicy):
         for node in tree.body:
             if not isinstance(node, ast.ClassDef):
                 continue
-
-            # Default-suppress private classes (Python convention).
             if glob_match(node.name, DEFAULT_SOURCE_D_CLASS_SUPPRESSIONS):
                 continue
 
             raw_type = self._classify_class_node(node)
             if raw_type is None:
-                continue  # not a recognised entity class
+                continue
 
+            if raw_type == "enum":
+                yield IntermediateCandidate(
+                    label=node.name,
+                    definition=ast.get_docstring(node) or "",
+                    source_type="D",
+                    source_artifact=f"{source_path}:{node.lineno}",
+                    raw_type="enum",
+                    eid="",
+                    artifact_kind=ArtifactKind.VOCABULARY,
+                    strength=Strength.MEDIUM,
+                    promotion_reason=(
+                        f"Source D: Enum subclass '{node.name}' "
+                        f"({source_path.name}:{node.lineno})."
+                    ),
+                    suppression_reason=None,
+                    suppressed=False,
+                )
+                continue  # don't extract Enum members as attributes
+
+            # Entity classes: emit entity then annotated fields as attributes.
             yield IntermediateCandidate(
                 label=node.name,
                 definition=ast.get_docstring(node) or "",
@@ -102,18 +120,52 @@ class SourceDIngester(IngestionPolicy):
                 suppressed=False,
             )
 
+            for stmt in node.body:
+                if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                    field_name = stmt.target.id
+                    type_annotation = self._render_annotation(stmt.annotation)
+                    yield IntermediateCandidate(
+                        label=field_name,
+                        definition="",
+                        source_type="D",
+                        source_artifact=(
+                            f"{source_path}:{node.name}.{field_name}:{stmt.lineno}"
+                        ),
+                        raw_type=type_annotation,
+                        eid="",
+                        artifact_kind=ArtifactKind.ATTRIBUTE,
+                        strength=Strength.STRONG,
+                        promotion_reason=(
+                            f"Source D: field '{node.name}.{field_name}' "
+                            f"(type {type_annotation})."
+                        ),
+                        suppression_reason=None,
+                        suppressed=False,
+                    )
+
     @staticmethod
     def _classify_class_node(node: ast.ClassDef) -> str | None:
-        """Return a raw_type string ('class', 'dataclass', 'pydantic_model',
-        'sqlalchemy_model') for entity-flavoured classes, or None when
-        the class doesn't look like a domain entity (e.g. utility class,
-        framework Meta, etc.).
+        """Return a raw_type string for entity-flavoured classes, or
+        None when the class doesn't look like a domain entity.
 
-        v1.1 conservative rule: yield for any non-private class with
-        at least one annotated field OR a @dataclass decorator OR a
-        recognised entity base. Tasks 11+ refine to skip framework
-        boilerplate and add Enum detection.
+        Order of checks:
+          1. Enum subclass (Enum / IntEnum / StrEnum / Flag / IntFlag) -> 'enum'
+          2. @dataclass decorator -> 'dataclass'
+          3. Pydantic BaseModel base -> 'pydantic_model'
+          4. SQLAlchemy / known entity base -> 'sqlalchemy_model'
+          5. Plain class with at least one annotated attribute -> 'class'
+          6. Otherwise None.
         """
+        # Enum detection (base must be Enum or a known Enum subclass name).
+        for base in node.bases:
+            base_name = (
+                base.id if isinstance(base, ast.Name)
+                else base.attr if isinstance(base, ast.Attribute)
+                else None
+            )
+            if base_name in ("Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"):
+                return "enum"
+
         has_dataclass_decorator = any(
             (isinstance(d, ast.Name) and d.id == "dataclass") or
             (isinstance(d, ast.Call) and isinstance(d.func, ast.Name)
@@ -123,7 +175,6 @@ class SourceDIngester(IngestionPolicy):
         if has_dataclass_decorator:
             return "dataclass"
 
-        # Pydantic / SQLAlchemy base detection.
         for base in node.bases:
             base_name = (
                 base.id if isinstance(base, ast.Name)
@@ -135,7 +186,6 @@ class SourceDIngester(IngestionPolicy):
             if base_name in ENTITY_BASE_NAMES:
                 return "sqlalchemy_model"
 
-        # Plain class with at least one annotated attribute.
         has_annotated_attr = any(
             isinstance(stmt, ast.AnnAssign)
             for stmt in node.body
@@ -144,3 +194,11 @@ class SourceDIngester(IngestionPolicy):
             return "class"
 
         return None
+
+    @staticmethod
+    def _render_annotation(node: ast.expr) -> str:
+        """Render a type annotation AST node back to a string."""
+        try:
+            return ast.unparse(node)
+        except Exception:
+            return ""
