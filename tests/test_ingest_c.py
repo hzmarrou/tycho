@@ -208,3 +208,113 @@ def test_small_table_without_code_naming_stays_entity(tmp_path):
     cands = list(SourceCIngester().ingest({"files": [str(ddl)]}))
     entities = [c for c in cands if c.artifact_kind == ArtifactKind.ENTITY]
     assert any(c.label == "accounts" for c in entities)
+
+
+def test_audit_table_suppressed(tmp_path):
+    ddl = tmp_path / "schema.sql"
+    ddl.write_text(
+        """
+        CREATE TABLE customers (customer_id INT PRIMARY KEY, name VARCHAR(100));
+        CREATE TABLE customer_audit (
+            audit_id INT PRIMARY KEY,
+            event VARCHAR(50),
+            occurred_at TIMESTAMP
+        );
+        """.strip(),
+        encoding="utf-8",
+    )
+    cands = list(SourceCIngester().ingest({"files": [str(ddl)]}))
+    by_label = {c.label: c for c in cands}
+    assert "customer_audit" in by_label
+    assert by_label["customer_audit"].suppressed is True
+    assert "audit" in (by_label["customer_audit"].suppression_reason or "").lower()
+
+
+def test_created_at_column_suppressed_birth_date_kept(tmp_path):
+    ddl = tmp_path / "schema.sql"
+    ddl.write_text(
+        """
+        CREATE TABLE customers (
+            customer_id INT PRIMARY KEY,
+            name VARCHAR(100),
+            birth_date DATE,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP
+        );
+        """.strip(),
+        encoding="utf-8",
+    )
+    cands = list(SourceCIngester().ingest({"files": [str(ddl)]}))
+    by_label = {c.label: c for c in cands
+                if c.artifact_kind == ArtifactKind.ATTRIBUTE}
+
+    assert by_label["birth_date"].suppressed is False
+    assert by_label["created_at"].suppressed is True
+    assert by_label["updated_at"].suppressed is True
+
+
+def test_user_exclude_tables_overrides_default_keep(tmp_path):
+    ddl = tmp_path / "schema.sql"
+    ddl.write_text(
+        "CREATE TABLE legacy_loans (id INT PRIMARY KEY, x VARCHAR(100));",
+        encoding="utf-8",
+    )
+    cfg = {"exclude_tables": ["legacy_*"]}
+    cands = list(SourceCIngester(config=cfg).ingest({"files": [str(ddl)]}))
+    by_label = {c.label: c for c in cands}
+    assert by_label["legacy_loans"].suppressed is True
+    assert "legacy_*" in (by_label["legacy_loans"].suppression_reason or "")
+
+
+def test_user_include_tables_overrides_default_suppress(tmp_path):
+    """A default-suppressed table (e.g. *_audit) can be brought back
+    via include_tables."""
+    ddl = tmp_path / "schema.sql"
+    ddl.write_text(
+        "CREATE TABLE customer_audit (id INT PRIMARY KEY, event VARCHAR(50));",
+        encoding="utf-8",
+    )
+    cfg = {"include_tables": ["customer_audit"]}
+    cands = list(SourceCIngester(config=cfg).ingest({"files": [str(ddl)]}))
+    by_label = {c.label: c for c in cands}
+    assert by_label["customer_audit"].suppressed is False
+
+
+def test_user_force_vocabulary_overrides_default_entity(tmp_path):
+    ddl = tmp_path / "schema.sql"
+    ddl.write_text(
+        """
+        CREATE TABLE status (id INT PRIMARY KEY, name VARCHAR(50),
+                             description VARCHAR(200), priority INT);
+        """.strip(),
+        encoding="utf-8",
+    )
+    cfg = {"force_vocabulary": ["status"]}
+    cands = list(SourceCIngester(config=cfg).ingest({"files": [str(ddl)]}))
+    status = next(c for c in cands if c.label == "status")
+    assert status.artifact_kind == ArtifactKind.VOCABULARY
+
+
+def test_user_force_entity_overrides_default_vocabulary(tmp_path):
+    ddl = tmp_path / "schema.sql"
+    ddl.write_text(
+        """
+        CREATE TABLE country_lookup (code VARCHAR(2) PRIMARY KEY, name VARCHAR(100));
+        CREATE TABLE customers (
+            id INT PRIMARY KEY,
+            country_code VARCHAR(2),
+            FOREIGN KEY (country_code) REFERENCES country_lookup(code)
+        );
+        CREATE TABLE other (
+            id INT PRIMARY KEY,
+            country_code VARCHAR(2),
+            FOREIGN KEY (country_code) REFERENCES country_lookup(code)
+        );
+        """.strip(),
+        encoding="utf-8",
+    )
+    cfg = {"force_entity": ["country_lookup"]}
+    cands = list(SourceCIngester(config=cfg).ingest({"files": [str(ddl)]}))
+    cl = next(c for c in cands if c.label == "country_lookup"
+              and c.artifact_kind in (ArtifactKind.ENTITY, ArtifactKind.VOCABULARY))
+    assert cl.artifact_kind == ArtifactKind.ENTITY

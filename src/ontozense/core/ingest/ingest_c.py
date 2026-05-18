@@ -96,23 +96,56 @@ class SourceCIngester(IngestionPolicy):
         tdata: dict,
         fk_in_count: int,
     ) -> Iterable[IntermediateCandidate]:
+        from .filters import (
+            DEFAULT_SOURCE_C_TABLE_SUPPRESSIONS,
+            column_is_suppressed,
+            glob_match,
+        )
+
         columns = tdata["columns"]
         pk = tdata["pk"]
         fks = tdata["fks"]
         source_path = tdata["source_path"]
 
+        user_exclude_tables = self.config.get("exclude_tables", []) or []
+        user_include_tables = self.config.get("include_tables", []) or []
+        user_force_vocab = self.config.get("force_vocabulary", []) or []
+        user_force_entity = self.config.get("force_entity", []) or []
+        user_exclude_columns = self.config.get("exclude_columns", []) or []
+
+        # ─── Table-level suppression decision ───────────────────────────
+        table_suppressed = False
+        table_suppression_reason: str | None = None
+
+        if glob_match(tname, user_exclude_tables):
+            table_suppressed = True
+            for p in user_exclude_tables:
+                if glob_match(tname, [p]):
+                    table_suppression_reason = (
+                        f"Per-domain config: table matches exclude_tables "
+                        f"pattern '{p}'."
+                    )
+                    break
+        elif not glob_match(tname, user_include_tables):
+            if glob_match(tname, DEFAULT_SOURCE_C_TABLE_SUPPRESSIONS):
+                table_suppressed = True
+                for p in DEFAULT_SOURCE_C_TABLE_SUPPRESSIONS:
+                    if glob_match(tname, [p]):
+                        table_suppression_reason = (
+                            f"Default Source C suppression: table name "
+                            f"matches pattern '{p}'."
+                        )
+                        break
+
+        # ─── Classification (with user overrides) ───────────────────────
         non_pk_non_fk_columns = [
             (cn, ct) for cn, ct in columns
             if cn not in pk and not any(fk["column"] == cn for fk in fks)
         ]
-
-        # Bridge table: ≥2 FKs, no other domain columns.
         is_bridge = (
-            len(fks) >= 2
-            and len(non_pk_non_fk_columns) == 0
+            len(fks) >= 2 and len(non_pk_non_fk_columns) == 0
         )
 
-        # Code-table detection: ≥2 of 3 triggers.
         code_table_triggers = 0
         name_lower = tname.lower()
         if (
@@ -121,35 +154,33 @@ class SourceCIngester(IngestionPolicy):
             or name_lower.startswith("cd_")
         ):
             code_table_triggers += 1
-
         col_names_lower = [c.lower() for c, _ in columns]
         has_code_col = any(
-            cn in ("code", "code_value", "id")
-            for cn in col_names_lower
+            cn in ("code", "code_value", "id") for cn in col_names_lower
         )
         has_desc_col = any(
-            cn in ("description", "name", "label")
-            for cn in col_names_lower
+            cn in ("description", "name", "label") for cn in col_names_lower
         )
         if 2 <= len(columns) <= 3 and has_code_col and has_desc_col:
             code_table_triggers += 1
-
-        outbound_fks = len(fks)
-        if fk_in_count >= 2 and outbound_fks == 0:
+        if fk_in_count >= 2 and len(fks) == 0:
             code_table_triggers += 1
-
         is_code_table = code_table_triggers >= 2
 
-        # ── Emit ──
+        # User override of classification.
+        if tname in user_force_vocab:
+            is_code_table = True
+            is_bridge = False
+        elif tname in user_force_entity:
+            is_code_table = False
+            is_bridge = False
 
-        # Bridge: emit a relationship between the two FK referents only.
+        # ─── Bridge emission (no entity/columns/FKs separately) ────────
         if is_bridge:
             ref_a, ref_b = fks[0]["ref_table"], fks[1]["ref_table"]
             yield IntermediateCandidate(
                 label=f"{ref_a}__{tname}__{ref_b}",
-                definition=(
-                    f"Bridge table '{tname}' linking {ref_a} and {ref_b}."
-                ),
+                definition=f"Bridge table '{tname}' linking {ref_a} and {ref_b}.",
                 source_type="C",
                 source_artifact=str(source_path),
                 raw_type="bridge_table",
@@ -157,15 +188,15 @@ class SourceCIngester(IngestionPolicy):
                 artifact_kind=ArtifactKind.RELATIONSHIP,
                 strength=Strength.MEDIUM,
                 promotion_reason=(
-                    f"Source C: bridge table '{tname}' (>=2 FKs, "
-                    f"no other domain columns)."
+                    f"Source C: bridge table '{tname}' "
+                    f"(≥2 FKs, no other domain columns)."
                 ),
-                suppression_reason=None,
-                suppressed=False,
+                suppression_reason=table_suppression_reason,
+                suppressed=table_suppressed,
             )
-            return  # bridge: no columns/FKs emitted separately
+            return
 
-        # Code table: emit a vocabulary candidate only.
+        # ─── Code-table emission (vocabulary only) ─────────────────────
         if is_code_table:
             yield IntermediateCandidate(
                 label=tname,
@@ -177,16 +208,19 @@ class SourceCIngester(IngestionPolicy):
                 artifact_kind=ArtifactKind.VOCABULARY,
                 strength=Strength.MEDIUM,
                 promotion_reason=(
-                    f"Source C: table '{tname}' classified as code-table "
-                    f"/ vocabulary ({code_table_triggers} of 3 detection "
+                    f"Source C: table '{tname}' classified as code-table / "
+                    f"vocabulary ({code_table_triggers} of 3 detection "
                     f"triggers fired)."
+                    if tname not in user_force_vocab else
+                    f"Source C: table '{tname}' classified as vocabulary "
+                    f"by per-domain config force_vocabulary."
                 ),
-                suppression_reason=None,
-                suppressed=False,
+                suppression_reason=table_suppression_reason,
+                suppressed=table_suppressed,
             )
-            return  # code table: no columns emitted separately
+            return
 
-        # Regular entity (default): entity + non-PK non-FK columns + FKs.
+        # ─── Regular entity emission ────────────────────────────────────
         yield IntermediateCandidate(
             label=tname,
             definition="",
@@ -198,16 +232,43 @@ class SourceCIngester(IngestionPolicy):
             strength=Strength.STRONG,
             promotion_reason=(
                 f"Source C: table '{tname}' (deterministic schema attestation)."
+                if tname not in user_force_entity else
+                f"Source C: table '{tname}' classified as entity by "
+                f"per-domain config force_entity."
             ),
-            suppression_reason=None,
-            suppressed=False,
+            suppression_reason=table_suppression_reason,
+            suppressed=table_suppressed,
         )
 
+        # Columns → attributes (each may be individually suppressed).
         for col_name, col_type in columns:
             if col_name in pk:
                 continue
             if any(fk["column"] == col_name for fk in fks):
                 continue
+            col_suppressed = column_is_suppressed(
+                col_name, user_exclude_columns, []
+            )
+            col_suppression_reason: str | None = None
+            if col_suppressed:
+                if glob_match(col_name, user_exclude_columns):
+                    col_suppression_reason = (
+                        f"Per-domain config: column '{col_name}' matches "
+                        f"exclude_columns pattern."
+                    )
+                else:
+                    col_suppression_reason = (
+                        f"Default Source C suppression: column "
+                        f"'{col_name}' matches a noise filter pattern."
+                    )
+            # If the parent table is suppressed, the column inherits its
+            # reason instead of any per-column reason (the audit shows
+            # the root cause, not the leaf).
+            final_suppressed = col_suppressed or table_suppressed
+            final_reason = (
+                table_suppression_reason if table_suppressed
+                else col_suppression_reason
+            )
             yield IntermediateCandidate(
                 label=col_name,
                 definition="",
@@ -220,10 +281,11 @@ class SourceCIngester(IngestionPolicy):
                 promotion_reason=(
                     f"Source C: column '{tname}.{col_name}' (type {col_type})."
                 ),
-                suppression_reason=None,
-                suppressed=False,
+                suppression_reason=final_reason,
+                suppressed=final_suppressed,
             )
 
+        # FKs → relationships.
         for fk in fks:
             yield IntermediateCandidate(
                 label=f"{tname}__{fk['column']}__{fk['ref_table']}",
@@ -241,8 +303,8 @@ class SourceCIngester(IngestionPolicy):
                     f"Source C: FK from {tname}.{fk['column']} to "
                     f"{fk['ref_table']}.{fk['ref_column']}."
                 ),
-                suppression_reason=None,
-                suppressed=False,
+                suppression_reason=table_suppression_reason,
+                suppressed=table_suppressed,
             )
 
     @staticmethod
