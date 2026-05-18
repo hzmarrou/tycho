@@ -115,8 +115,10 @@ to the candidate graph that `survey` builds and `draft` consumes.
 **Per-domain YAML config:** place a `source-c.yaml` or `source-d.yaml` file in the
 domain workspace to tune which artifacts Tycho promotes or suppresses. Each file
 supports `exclude_*` / `include_*` glob patterns, `force_vocabulary`, and
-`force_entity` overrides. Include patterns override excludes; overrides override
-heuristics.
+`force_entity` overrides. `exclude_*` patterns always suppress matching names;
+`include_*` patterns rescue specific items from the default heuristic suppressions
+(e.g. keep a `customer_audit` table that the `*_audit` default would have dropped)
+but do not override `exclude_*`.
 
 **Example invocation with all four sources:**
 

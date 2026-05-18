@@ -567,9 +567,11 @@ anchors, corroboration, and profile coverage.
 ## Part E — Using Source C and Source D (v1.1)
 
 As of v1.1, passing `--source-c` (SQL DDL) and `--source-d` (Python files) to
-`survey` (or `discover`) makes those sources active participants in the candidate
-graph rather than inert placeholders. This section shows how to configure them and
-how to read the resulting `audit` block in `candidate-graph.json`.
+`survey` makes those sources active participants in the candidate graph rather than
+inert placeholders. Note: `discover` accepts `--source-c` / `--source-d` on the CLI
+for forward-compatibility, but it retains its v1.0 pass-through behaviour — those
+arguments do not affect candidate generation in `discover`. This section shows how to
+configure them and how to read the resulting `audit` block in `candidate-graph.json`.
 
 ### E.1 Survey invocation with all four sources
 
@@ -606,10 +608,11 @@ source_c:
     - loan_status      # treat as code-table even though naming doesn't match heuristic
 ```
 
-- `exclude_tables` — glob patterns matched against table names. Matching tables
-  and all their columns are skipped.
-- `include_tables` — overrides a matching `exclude_tables` or default suppression
-  rule. Use this to rescue a table that would otherwise be filtered.
+- `exclude_tables` — glob patterns matched against table names. Matching tables and
+  all their columns are always suppressed (no override).
+- `include_tables` — glob patterns; matching tables are exempted from the default
+  `*_audit` / `*_history` / `tmp_*` etc. suppressions. Does NOT exempt from
+  `exclude_tables`.
 - `force_vocabulary` — promotes a table to a vocabulary candidate regardless of
   whether the naming heuristic would have flagged it.
 - `force_entity` — the inverse: demotes a table that the heuristic would have
@@ -631,18 +634,17 @@ source_d:
 ```
 
 - `exclude_paths` — glob patterns matched against file paths within the directory
-  tree. Files matching any pattern are skipped entirely.
+  tree. Files matching any pattern are always suppressed (no override).
 - `exclude_classes` — class-name patterns (supports `*` wildcards). Matching
-  classes are skipped.
-- `include_classes` — overrides `exclude_classes` or default suppression. Useful
-  for rescuing classes with DTO/Mixin/Factory suffixes that are genuinely domain
-  entities in your codebase.
+  classes are always suppressed (no override).
+- `include_classes` — glob patterns; rescue classes from the DTO-suffix default
+  (e.g. `LoanRequest` stays `pydantic_model` instead of being relabelled
+  `dto_candidate`). Does NOT rescue from `exclude_classes`.
 
 ### E.4 Reading the `audit` block
 
-After `survey` (or `discover`) runs with Source C or D active,
-`candidate-graph.json` contains an `audit` array alongside the usual `concepts` and
-`relationships`:
+After `survey` runs with Source C or D active, `candidate-graph.json` contains an
+`audit` array alongside the usual `concepts` and `relationships`:
 
 ```json
 {
@@ -651,31 +653,32 @@ After `survey` (or `discover`) runs with Source C or D active,
   "audit": [
     {
       "label": "customer_audit",
+      "definition": "",
       "source_type": "C",
+      "source_artifact": "schemas/core.sql",
+      "raw_type": "table",
+      "eid": "",
+      "artifact_kind": "entity",
+      "strength": "strong",
+      "promotion_reason": "Source C: table 'customer_audit' (deterministic schema attestation).",
       "suppression_reason": "Default Source C suppression: table name matches pattern '*_audit'.",
-      "overridable": true,
-      "override_key": "include_tables"
-    },
-    {
-      "label": "LoanFactory",
-      "source_type": "D",
-      "suppression_reason": "Default Source D suppression: class name matches pattern '*Factory'.",
-      "overridable": true,
-      "override_key": "include_classes"
+      "suppressed": true
     }
   ]
 }
 ```
 
-Each entry tells you:
+Each entry carries the full candidate payload that a non-suppressed candidate would
+have, plus the suppression fields:
 
-- `label` — the artifact that was suppressed.
-- `source_type` — `"C"` (SQL) or `"D"` (Python).
+- `suppressed: true` — marks the entry as filtered out of `concepts` / `relationships`.
 - `suppression_reason` — human-readable explanation citing the pattern or rule that
   triggered suppression.
-- `overridable` — whether an `include_*` or `force_*` key in the YAML config can
-  rescue this candidate.
-- `override_key` — the exact YAML key to use if you want to override.
+- `promotion_reason` — still populated; documents the classification decision that
+  the suppression overrode (useful for understanding why the item was a candidate at
+  all before being filtered).
+- `label`, `source_type`, `source_artifact`, `raw_type`, `eid`, `artifact_kind`,
+  `strength` — the same fields the entry would have carried if it had been promoted.
 
 ### E.5 Quick reference — default suppression patterns
 
