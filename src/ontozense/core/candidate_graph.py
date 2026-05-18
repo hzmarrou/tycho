@@ -63,7 +63,7 @@ produces a scored version.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .discovery_contracts import (
@@ -84,14 +84,21 @@ class CandidateGraph:
 
     Returned by :func:`build_candidate_graph`. Serialise via
     :meth:`to_dict` for ``candidate-graph.json`` output.
+
+    The ``audit`` field lists suppressed candidates (filtered by
+    per-source noise heuristics or per-domain config). Default
+    consumers ignore this list; an explicit audit consumer can
+    surface it for the curator (deferred to v1.2 per spec §13.1).
     """
     concepts: list[CandidateConcept]
     relationships: list[CandidateRelationship]
+    audit: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "concepts": [c.to_dict() for c in self.concepts],
             "relationships": [r.to_dict() for r in self.relationships],
+            "audit": list(self.audit),
         }
 
 
@@ -143,8 +150,17 @@ def build_candidate_graph(
     source_c: dict[str, Any] | None = None,
     source_d: dict[str, Any] | None = None,
     alias_map: dict[str, str] | None = None,
+    source_c_config: dict[str, Any] | None = None,
+    source_d_config: dict[str, Any] | None = None,
 ) -> CandidateGraph:
     """Build a merged candidate graph from raw source outputs.
+
+    Dispatches to per-source ingesters in :mod:`core.ingest`, then
+    feeds each :class:`IntermediateCandidate` through :func:`_upsert`
+    for merge. Suppressed candidates are routed to the
+    :class:`CandidateGraph.audit` list instead of the main concept
+    list. Source A relationships are processed after merge so
+    endpoint resolution sees the canonical labels.
 
     Each ``source_*`` argument is the raw dict form of the
     corresponding source's JSON output (i.e. ``json.loads(...)`` of
@@ -159,10 +175,10 @@ def build_candidate_graph(
       - ``source_b`` — ``{"records": [...]}`` where each record has
         ``element_name`` and optionally ``entity_type``, ``id``,
         ``definition``.
-      - ``source_c`` / ``source_d`` — accepted in the signature
-        so callers can pass them uniformly across sources. Their
-        payloads do not affect candidate generation in this
-        implementation.
+      - ``source_c`` — ``{"files": [...]}`` where each entry is a
+        path to a SQL DDL file. Parsed via sqlglot.
+      - ``source_d`` — ``{"files": [...]}`` where each entry is a
+        path to a Python source file. Parsed via the AST module.
 
     Any source argument can be ``None`` or absent. Empty / missing
     labels are skipped silently.
@@ -176,52 +192,59 @@ def build_candidate_graph(
     light normalisation only — *not* for filtering or type
     constraints). Without an alias_map, behaviour reduces to the
     id-first / name-only Phase 1 baseline.
+
+    ``source_c_config`` / ``source_d_config`` (optional) — per-domain
+    YAML config dicts forwarded to the respective ingesters. Support
+    keys include ``exclude_tables``, ``include_tables``,
+    ``force_vocabulary``, ``force_entity``, ``exclude_columns`` for
+    Source C, and ``exclude_paths``, ``exclude_classes``,
+    ``include_classes`` for Source D.
+
+    See ``docs/superpowers/specs/2026-05-17-source-cd-seeders-design.md``
+    §9.2 for the v1.1 architecture.
     """
+    from .ingest.base import IntermediateCandidate
+    from .ingest.ingest_a import SourceAIngester
+    from .ingest.ingest_b import SourceBIngester
+    from .ingest.ingest_c import SourceCIngester
+    from .ingest.ingest_d import SourceDIngester
+
     index = _CandidateIndex()
     aliases = alias_map or {}
+    suppressed_audit: list[IntermediateCandidate] = []
 
-    # ─── Concept ingestion ────────────────────────────────────────────────
+    def _dispatch(ingester: Any, raw: Any) -> None:
+        for ic in ingester.ingest(raw):
+            if ic.suppressed:
+                suppressed_audit.append(ic)
+                continue
+            _upsert(
+                index,
+                label=ic.label,
+                definition=ic.definition,
+                source_type=ic.source_type,
+                source_artifact=ic.source_artifact,
+                raw_type=ic.raw_type,
+                eid=ic.eid,
+                artifact_kind=ic.artifact_kind.value,
+                strength=ic.strength.value,
+                promotion_reason=ic.promotion_reason,
+                suppression_reason=ic.suppression_reason,
+                suppressed=False,
+                alias_map=aliases,
+            )
+
     if source_a:
-        for concept in source_a.get("concepts", []) or []:
-            label = (concept.get("name") or "").strip()
-            if not label:
-                continue
-            artifact = ""
-            prov_obj = concept.get("provenance")
-            if isinstance(prov_obj, dict):
-                artifact = prov_obj.get("source_document", "") or ""
-            _upsert(
-                index,
-                label=label,
-                definition=concept.get("definition", "") or "",
-                source_type="A",
-                source_artifact=artifact,
-                raw_type=concept.get("entity_type", "") or "",
-                eid=concept.get("id", "") or "",
-                alias_map=aliases,
-            )
-
+        _dispatch(SourceAIngester(), source_a)
     if source_b:
-        for record in source_b.get("records", []) or []:
-            label = (record.get("element_name") or "").strip()
-            if not label:
-                continue
-            _upsert(
-                index,
-                label=label,
-                definition=record.get("definition", "") or "",
-                source_type="B",
-                source_artifact=record.get("source_file", "") or "",
-                raw_type=record.get("entity_type", "") or "",
-                eid=record.get("id", "") or "",
-                alias_map=aliases,
-            )
+        _dispatch(SourceBIngester(), source_b)
+    if source_c:
+        _dispatch(SourceCIngester(config=source_c_config), source_c)
+    if source_d:
+        _dispatch(SourceDIngester(config=source_d_config), source_d)
 
-    # source_c and source_d are accepted so callers can pass them
-    # uniformly across sources. Their payloads do not affect the
-    # candidate concepts or relationships this builder emits.
-
-    # ─── Relationship ingestion ───────────────────────────────────────────
+    # Relationship ingestion stays in the orchestrator — it requires
+    # post-merge candidate-id resolution that's only available now.
     relationships: list[CandidateRelationship] = []
     degree_neighbours: dict[str, set[str]] = {}
 
@@ -248,7 +271,9 @@ def build_candidate_graph(
                     subject_candidate_id=subj_id,
                     predicate=predicate,
                     object_candidate_id=obj_id,
-                    source_presence={"A": True, "B": False, "C": False, "D": False},
+                    source_presence={
+                        "A": True, "B": False, "C": False, "D": False,
+                    },
                     provenance=[
                         EvidenceEntry(
                             source_type="A",
@@ -266,18 +291,27 @@ def build_candidate_graph(
     # Apply graph_degree updates to candidates. CandidateConcept is
     # frozen, so we rebuild via replace.
     if degree_neighbours:
-        for candidate_id, neighbours in degree_neighbours.items():
-            key = _find_key_for_candidate_id(index, candidate_id)
+        for cid, nbrs in degree_neighbours.items():
+            key = _find_key_for_candidate_id(index, cid)
             if key is None:
                 continue
             existing = index.by_key[key]
-            index.by_key[key] = replace(
-                existing, graph_degree=len(neighbours),
-            )
+            index.by_key[key] = replace(existing, graph_degree=len(nbrs))
 
     return CandidateGraph(
         concepts=index.values(),
         relationships=relationships,
+        audit=[
+            {
+                "label": ic.label,
+                "source_type": ic.source_type,
+                "source_artifact": ic.source_artifact,
+                "raw_type": ic.raw_type,
+                "artifact_kind": ic.artifact_kind.value,
+                "suppression_reason": ic.suppression_reason or "",
+            }
+            for ic in suppressed_audit
+        ],
     )
 
 
