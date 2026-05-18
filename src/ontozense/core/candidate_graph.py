@@ -814,7 +814,7 @@ def _resolve_endpoint_to_candidate_id(
     function and behaviour reduces to the pre-alias baseline:
     direct normalised-label lookup only.
     """
-    canonical_label = _resolve_alias(endpoint_label, alias_map or {})
+    canonical_label = _resolve_alias_with_normalisation(endpoint_label, alias_map or {})
     norm = normalize_label(canonical_label)
     if not norm:
         return None

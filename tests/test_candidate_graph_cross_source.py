@@ -145,3 +145,59 @@ def test_upsert_table_prefix_stripped_then_singularized_for_merge():
     candidates = index.values()
     assert len(candidates) == 1
     assert candidates[0].normalized_label == "customer"
+
+
+def test_relationship_endpoints_resolve_through_singularization():
+    """A Source A relationship whose subject/object is plural
+    (e.g. 'customers') must resolve to a candidate merged under
+    the singular 'customer'. Without this, the relationship is
+    silently dropped and graph_degree is understated."""
+    from ontozense.core.candidate_graph import build_candidate_graph
+
+    source_a = {
+        "concepts": [
+            # 'customer' (singular) is the canonical merged candidate.
+            {"name": "customer", "definition": "A bank client."},
+            {"name": "loan", "definition": "Money borrowed."},
+        ],
+        # Relationship endpoint uses the plural form.
+        "relationships": [
+            {"subject": "loan", "predicate": "applies_to", "object": "customers"},
+        ],
+    }
+    graph = build_candidate_graph(source_a=source_a)
+
+    # The relationship must survive — endpoint 'customers' resolves
+    # to the 'customer' candidate via singularization.
+    assert len(graph.relationships) == 1
+    rel = graph.relationships[0]
+    assert rel.predicate == "applies_to"
+
+    # Both candidates exist as one merged entry each.
+    by_norm = {c.normalized_label: c for c in graph.concepts}
+    assert "customer" in by_norm
+    assert "loan" in by_norm
+
+    # graph_degree should reflect the resolved edge.
+    assert by_norm["customer"].graph_degree == 1
+    assert by_norm["loan"].graph_degree == 1
+
+
+def test_relationship_endpoints_resolve_through_prefix_stripping():
+    """A Source A relationship whose endpoint uses a table-style
+    prefix (e.g. 'tbl_customers') must resolve to a candidate
+    merged under 'customer'."""
+    from ontozense.core.candidate_graph import build_candidate_graph
+
+    source_a = {
+        "concepts": [
+            {"name": "customer", "definition": "A bank client."},
+            {"name": "loan", "definition": "Money borrowed."},
+        ],
+        "relationships": [
+            {"subject": "loan", "predicate": "owned_by", "object": "tbl_customers"},
+        ],
+    }
+    graph = build_candidate_graph(source_a=source_a)
+    assert len(graph.relationships) == 1
+    assert graph.relationships[0].predicate == "owned_by"
