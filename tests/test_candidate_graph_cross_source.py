@@ -16,18 +16,31 @@ from ontozense.core.candidate_graph import (
 
 
 def test_resolve_alias_with_singularization():
-    # Plural → singular.
-    assert _resolve_alias_with_normalisation("customers", {}) == "customer"
+    # The function now returns (canonical, alias_fired) tuple.
+    # Plural → singular (alias_fired=False: only singularisation ran).
+    canonical, fired = _resolve_alias_with_normalisation("customers", {})
+    assert canonical == "customer"
+    assert fired is False
     # Already singular, no change.
-    assert _resolve_alias_with_normalisation("customer", {}) == "customer"
-    # Table prefix stripped + singularized.
-    assert _resolve_alias_with_normalisation("tbl_customers", {}) == "customer"
-    assert _resolve_alias_with_normalisation("dim_customers", {}) == "customer"
-    assert _resolve_alias_with_normalisation("fact_orders", {}) == "order"
-    # Existing alias_map still wins.
-    assert _resolve_alias_with_normalisation(
+    canonical, fired = _resolve_alias_with_normalisation("customer", {})
+    assert canonical == "customer"
+    assert fired is False
+    # Table prefix stripped + singularized (alias_fired=False).
+    canonical, fired = _resolve_alias_with_normalisation("tbl_customers", {})
+    assert canonical == "customer"
+    assert fired is False
+    canonical, fired = _resolve_alias_with_normalisation("dim_customers", {})
+    assert canonical == "customer"
+    assert fired is False
+    canonical, fired = _resolve_alias_with_normalisation("fact_orders", {})
+    assert canonical == "order"
+    assert fired is False
+    # Existing alias_map wins (alias_fired=True).
+    canonical, fired = _resolve_alias_with_normalisation(
         "client", {"client": "Customer"}
-    ) == "Customer"
+    )
+    assert canonical == "Customer"
+    assert fired is True
 
 
 def test_tier_boost_single_axis_returns_max_strength_no_boost():
@@ -201,3 +214,95 @@ def test_relationship_endpoints_resolve_through_prefix_stripping():
     graph = build_candidate_graph(source_a=source_a)
     assert len(graph.relationships) == 1
     assert graph.relationships[0].predicate == "owned_by"
+
+
+def test_cross_kind_collision_keeps_both_candidates_and_logs_conflict():
+    """Spec §8 point 2: when an entity (e.g. Source C table 'customer')
+    and an attribute (e.g. Source A 'customer' as a property) share the
+    same normalised label, BOTH must survive as separate candidates
+    with their distinct artifact_kinds. The conflict is surfaced via
+    an audit entry."""
+    from ontozense.core.candidate_graph import _CandidateIndex, _upsert
+
+    index = _CandidateIndex()
+    _upsert(
+        index,
+        label="customer",
+        definition="A bank client.",
+        source_type="A",
+        source_artifact="docs.md",
+        raw_type="property",
+        eid="",
+        artifact_kind="attribute",
+        strength="medium",
+        promotion_reason="Source A attribute.",
+        suppression_reason=None,
+        suppressed=False,
+    )
+    _upsert(
+        index,
+        label="customer",
+        definition="The customers table.",
+        source_type="C",
+        source_artifact="schema.sql",
+        raw_type="table",
+        eid="",
+        artifact_kind="entity",
+        strength="strong",
+        promotion_reason="Source C entity.",
+        suppression_reason=None,
+        suppressed=False,
+    )
+    candidates = index.values()
+    # Both survive as SEPARATE candidates with distinct kinds.
+    kinds = {c.artifact_kind for c in candidates}
+    assert kinds == {"attribute", "entity"}, (
+        f"expected both attribute and entity to survive; got {kinds}"
+    )
+    assert len(candidates) == 2
+
+    # Both share the same normalized label.
+    norms = {c.normalized_label for c in candidates}
+    assert norms == {"customer"}
+
+
+def test_a_b_only_run_preserves_original_plural_label():
+    """AC1 backward-compat (per spec §17): for an A+B-only run, the
+    existing CandidateConcept.label value carries the same content
+    as today. v1.1 must NOT singularize 'customers' to 'customer'
+    in the surface label — only normalized_label is canonicalised."""
+    from ontozense.core.candidate_graph import build_candidate_graph
+
+    source_a = {
+        "concepts": [
+            {"name": "customers", "definition": "Bank clients (plural)."},
+        ],
+        "relationships": [],
+    }
+    graph = build_candidate_graph(source_a=source_a)
+    assert len(graph.concepts) == 1
+    c = graph.concepts[0]
+    # AC1: original surface label preserved.
+    assert c.label == "customers"
+    # But the merge key IS canonicalised so cross-source merge still works.
+    assert c.normalized_label == "customer"
+
+
+def test_alias_map_still_changes_surface_label():
+    """An explicit alias_map entry IS authoritative for the surface
+    label (this preserves the pre-v1.1 alias-resolution behaviour).
+    Only the singularisation/prefix-strip steps leave label alone."""
+    from ontozense.core.candidate_graph import build_candidate_graph
+
+    source_a = {
+        "concepts": [{"name": "client"}],
+        "relationships": [],
+    }
+    graph = build_candidate_graph(
+        source_a=source_a,
+        alias_map={"client": "Customer"},
+    )
+    assert len(graph.concepts) == 1
+    c = graph.concepts[0]
+    # alias_map fired: 'client' -> 'Customer'. Surface label changes.
+    assert c.label == "Customer"

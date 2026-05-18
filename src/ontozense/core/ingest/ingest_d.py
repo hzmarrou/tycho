@@ -70,6 +70,7 @@ class SourceDIngester(IngestionPolicy):
         user_exclude_paths = self.config.get("exclude_paths", []) or []
         user_exclude_classes = self.config.get("exclude_classes", []) or []
         user_include_classes = self.config.get("include_classes", []) or []
+        user_force_vocabulary = self.config.get("force_vocabulary", []) or []
 
         from .filters import DEFAULT_SOURCE_D_PATH_SUPPRESSIONS
 
@@ -154,6 +155,7 @@ class SourceDIngester(IngestionPolicy):
                 tree, path,
                 user_exclude_classes=user_exclude_classes,
                 user_include_classes=user_include_classes,
+                user_force_vocabulary=user_force_vocabulary,
             )
 
     def _yield_for_module(
@@ -163,9 +165,11 @@ class SourceDIngester(IngestionPolicy):
         *,
         user_exclude_classes: list[str] | None = None,
         user_include_classes: list[str] | None = None,
+        user_force_vocabulary: list[str] | None = None,
     ) -> Iterable[IntermediateCandidate]:
         user_exclude_classes = user_exclude_classes or []
         user_include_classes = user_include_classes or []
+        user_force_vocabulary = user_force_vocabulary or []
 
         for node in tree.body:
             if not isinstance(node, ast.ClassDef):
@@ -237,6 +241,60 @@ class SourceDIngester(IngestionPolicy):
                 and not class_is_force_included
             ):
                 emitted_raw_type = "dto_candidate"
+
+            # ─── force_vocabulary override ────────────────────────────
+            # When the class name matches a force_vocabulary glob pattern,
+            # override the artifact_kind to VOCABULARY at MEDIUM strength.
+            # Enums are already VOCABULARY and are handled above; this path
+            # only runs for non-enum classes. (spec §7.4)
+            if user_force_vocabulary and glob_match(node.name, user_force_vocabulary):
+                matched_pattern = next(
+                    p for p in user_force_vocabulary if glob_match(node.name, [p])
+                )
+                yield IntermediateCandidate(
+                    label=node.name,
+                    definition=ast.get_docstring(node) or "",
+                    source_type="D",
+                    source_artifact=f"{source_path}:{node.lineno}",
+                    raw_type=emitted_raw_type,
+                    eid="",
+                    artifact_kind=ArtifactKind.VOCABULARY,
+                    strength=Strength.MEDIUM,
+                    promotion_reason=(
+                        f"Source D: {emitted_raw_type} '{node.name}' "
+                        f"reclassified to vocabulary by force_vocabulary "
+                        f"pattern '{matched_pattern}' "
+                        f"({source_path.name}:{node.lineno})."
+                    ),
+                    suppression_reason=class_suppression_reason,
+                    suppressed=class_suppressed,
+                )
+                if class_suppressed:
+                    continue
+                # Emit fields for the force-vocabulary class.
+                for stmt in node.body:
+                    if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                        field_name = stmt.target.id
+                        type_annotation = self._render_annotation(stmt.annotation)
+                        yield IntermediateCandidate(
+                            label=field_name,
+                            definition="",
+                            source_type="D",
+                            source_artifact=(
+                                f"{source_path}:{node.name}.{field_name}:{stmt.lineno}"
+                            ),
+                            raw_type=type_annotation,
+                            eid="",
+                            artifact_kind=ArtifactKind.ATTRIBUTE,
+                            strength=Strength.STRONG,
+                            promotion_reason=(
+                                f"Source D: field '{node.name}.{field_name}' "
+                                f"(type {type_annotation})."
+                            ),
+                            suppression_reason=None,
+                            suppressed=False,
+                        )
+                continue
 
             # ─── Emit entity ──────────────────────────────────────────
             yield IntermediateCandidate(

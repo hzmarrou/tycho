@@ -235,7 +235,7 @@ Python files (`.py`) only. The existing `code_extractor.py` supports SQL and sql
 | `@dataclass` / Pydantic `BaseModel` / SQLAlchemy model | `entity` | `strong` |
 | `class FooEnum(Enum):` | `vocabulary` | `medium` |
 | Class field with type annotation | `attribute` of parent class | same tier as parent |
-| Method involving two domain classes | `relationship` | `medium` |
+| Method involving two domain classes | `relationship` | (deferred to v1.2 — see §13.1) |
 | Function with name matching `validate_*`, `check_*`, `assert_*` plus regex-matching body | `rule` | `weak` |
 | Other methods | `behavior` | `weak` |
 
@@ -482,6 +482,7 @@ Explicit non-goals for v1.1, to keep this design tight:
    - Annotation properties for `behavior` and `rule` kinds
 4. **`skos:Concept` member emission** — requires concrete vocabulary values from Source B enums, Source D `Enum` literals, or value-bearing Source C inputs. v1.1 emits only the `vocabulary` kind marker.
 5. **`ontozense audit` consumer CLI** — a consumer that displays suppressed candidates with reasons for curator review.
+6. **Source D method→relationship extraction.** §7.2 originally listed methods involving two domain classes as a relationship-emitting case. v1.1's deterministic AST doesn't carry the cross-class type resolution required to identify when a method's signature actually references two domain classes (vs. utility types like `str` or external library types). Deferred until §7.2's already-deferred LLM-labelling pass lands in v1.2 — both naturally fit the same release.
 
 ### 13.2 Deferred to v1.2+ (input expansion)
 

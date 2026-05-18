@@ -353,3 +353,21 @@ def test_path_suppression_config_pattern_is_case_insensitive(tmp_path):
     cands = list(SourceDIngester(config=cfg).ingest({"files": [str(f)]}))
     labels = {c.label for c in cands if not c.suppressed}
     assert "LegacyThing" not in labels
+
+
+def test_user_force_vocabulary_supports_glob(tmp_path):
+    """force_vocabulary: ['*Status'] reclassifies a class named
+    CustomerStatusInfo from ENTITY to VOCABULARY at MEDIUM strength,
+    matching Source C's force_vocabulary contract (per spec §7.4)."""
+    src = """
+        class CustomerStatusInfo:
+            code: str
+            description: str
+    """
+    f = _write(tmp_path, "models.py", src)
+    cfg = {"force_vocabulary": ["*Status*"]}
+    cands = list(SourceDIngester(config=cfg).ingest({"files": [str(f)]}))
+    by_label = {c.label: c for c in cands}
+    assert "CustomerStatusInfo" in by_label
+    assert by_label["CustomerStatusInfo"].artifact_kind == ArtifactKind.VOCABULARY
+    assert by_label["CustomerStatusInfo"].strength == Strength.MEDIUM
