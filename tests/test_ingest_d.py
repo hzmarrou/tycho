@@ -172,3 +172,40 @@ def test_enum_subclass_is_vocabulary(tmp_path):
     assert by_label["LoanStatus"].artifact_kind == ArtifactKind.VOCABULARY
     assert by_label["LoanStatus"].strength == Strength.MEDIUM
     assert by_label["LoanStatus"].raw_type == "enum"
+
+
+def test_method_without_two_class_endpoints_is_behavior(tmp_path):
+    src = """
+        class Customer:
+            name: str
+            def compute_score(self) -> int:
+                return 42
+    """
+    f = _write(tmp_path, "models.py", src)
+    cands = list(SourceDIngester().ingest({"files": [str(f)]}))
+    behaviors = [c for c in cands if c.artifact_kind == ArtifactKind.BEHAVIOR]
+    assert any(c.label.endswith("compute_score") for c in behaviors)
+
+    b = next(c for c in behaviors if c.label.endswith("compute_score"))
+    assert b.strength == Strength.WEAK
+    assert b.raw_type == "method"
+
+
+def test_validation_function_is_rule(tmp_path):
+    src = """
+        def validate_amount(amount: float) -> bool:
+            return amount > 0
+
+        def check_credit_score(score: int) -> bool:
+            return 300 <= score <= 850
+    """
+    f = _write(tmp_path, "rules.py", src)
+    cands = list(SourceDIngester().ingest({"files": [str(f)]}))
+    rules = [c for c in cands if c.artifact_kind == ArtifactKind.RULE]
+    rule_labels = {c.label for c in rules}
+    assert "validate_amount" in rule_labels
+    assert "check_credit_score" in rule_labels
+
+    for r in rules:
+        assert r.strength == Strength.WEAK
+        assert r.raw_type == "validation_function"

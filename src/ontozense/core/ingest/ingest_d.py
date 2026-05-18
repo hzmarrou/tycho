@@ -143,6 +143,51 @@ class SourceDIngester(IngestionPolicy):
                         suppressed=False,
                     )
 
+            # Methods on entity classes -> BEHAVIOR (private methods skipped).
+            for stmt in node.body:
+                if isinstance(stmt, ast.FunctionDef) and not stmt.name.startswith("_"):
+                    yield IntermediateCandidate(
+                        label=f"{node.name}.{stmt.name}",
+                        definition=ast.get_docstring(stmt) or "",
+                        source_type="D",
+                        source_artifact=(
+                            f"{source_path}:{node.name}.{stmt.name}:{stmt.lineno}"
+                        ),
+                        raw_type="method",
+                        eid="",
+                        artifact_kind=ArtifactKind.BEHAVIOR,
+                        strength=Strength.WEAK,
+                        promotion_reason=(
+                            f"Source D: method '{node.name}.{stmt.name}' "
+                            f"({source_path.name}:{stmt.lineno})."
+                        ),
+                        suppression_reason=None,
+                        suppressed=False,
+                    )
+
+        # Module-level functions: look for validate_*/check_*/assert_* -> RULE.
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef):
+                if (node.name.startswith("validate_")
+                        or node.name.startswith("check_")
+                        or node.name.startswith("assert_")):
+                    yield IntermediateCandidate(
+                        label=node.name,
+                        definition=ast.get_docstring(node) or "",
+                        source_type="D",
+                        source_artifact=f"{source_path}:{node.lineno}",
+                        raw_type="validation_function",
+                        eid="",
+                        artifact_kind=ArtifactKind.RULE,
+                        strength=Strength.WEAK,
+                        promotion_reason=(
+                            f"Source D: validation function "
+                            f"'{node.name}' ({source_path.name}:{node.lineno})."
+                        ),
+                        suppression_reason=None,
+                        suppressed=False,
+                    )
+
     @staticmethod
     def _classify_class_node(node: ast.ClassDef) -> str | None:
         """Return a raw_type string for entity-flavoured classes, or
