@@ -346,3 +346,36 @@ def test_survey_rejects_malformed_source_c_yaml(tmp_path):
     )
     assert result.exit_code == 2
     assert "source-c.yaml" in result.stdout.lower() or "source_c" in result.stdout.lower()
+
+
+def test_survey_rejects_mixed_source_c_sql_and_json(tmp_path):
+    """When --source-c receives both .sql and .json inputs in the
+    same invocation, the survey command must exit non-zero with a
+    clear error. Silent precedence (sql wins, json silently dropped)
+    is a bad CLI contract."""
+    domain_dir = tmp_path / "domains" / "test"
+    domain_dir.mkdir(parents=True)
+
+    sql_file = tmp_path / "schema.sql"
+    sql_file.write_text(
+        "CREATE TABLE customers (id INT PRIMARY KEY);",
+        encoding="utf-8",
+    )
+    json_file = tmp_path / "legacy.json"
+    json_file.write_text("{}", encoding="utf-8")
+
+    from typer.testing import CliRunner
+    from ontozense.cli import app
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "survey",
+            "--source-c", str(sql_file),
+            "--source-c", str(json_file),
+            "--domain-dir", str(domain_dir),
+        ],
+    )
+    assert result.exit_code == 2, result.stdout
+    msg = result.stdout.lower()
+    assert (".sql" in msg and ".json" in msg) or "mixed" in msg

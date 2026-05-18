@@ -3097,7 +3097,14 @@ def survey(
     ),
     source_c: list[Path] = typer.Option(
         None, "--source-c",
-        help="Source C schema input (forward-compat; not consumed today).",
+        help=(
+            "Source C schema input. Accepts .sql DDL files (parsed via "
+            "sqlglot, v1.1 ingestion) or .json files (legacy v1.0 "
+            "passthrough, no-op; full JSON ingestion is v1.2 work). "
+            "File, glob, or directory; repeatable. Per-domain overrides "
+            "via <domain-dir>/source-c.yaml. Mixed .sql + .json in one "
+            "invocation is rejected."
+        ),
     ),
     source_d: list[Path] = typer.Option(
         None, "--source-d",
@@ -3209,6 +3216,19 @@ def survey(
     if c_files:
         sql_files = [p for p in c_files if p.suffix.lower() == ".sql"]
         json_files = [p for p in c_files if p.suffix.lower() == ".json"]
+        if sql_files and json_files:
+            # Mixed input: hard error. v1.1 ingestion uses .sql DDL files;
+            # .json remains as legacy v1.0 passthrough (deferred to v1.2
+            # per spec §13.2 #6). Mixing both in one invocation is
+            # ambiguous and would silently drop one set.
+            console.print(
+                "[red]--source-c received both .sql and .json inputs in "
+                "the same invocation.[/]\n"
+                "Source C accepts either .sql DDL files (v1.1 ingestion) "
+                "OR .json passthrough (legacy v1.0 no-op), not both. "
+                "Split into separate survey runs or drop one set."
+            )
+            raise typer.Exit(code=2)
         if sql_files:
             merged_c = {"files": [str(p) for p in sql_files]}
         elif json_files:
