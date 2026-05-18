@@ -128,3 +128,83 @@ def test_foreign_key_yields_relationship_candidate(tmp_path):
     assert "customer" in r.label.lower()
     assert r.raw_type == "foreign_key"
     assert r.strength == Strength.MEDIUM
+
+
+def test_code_table_classified_as_vocabulary(tmp_path):
+    """Table named *_lookup with code+name columns → vocabulary."""
+    ddl = tmp_path / "schema.sql"
+    ddl.write_text(
+        """
+        CREATE TABLE customers (
+            customer_id INT PRIMARY KEY,
+            name VARCHAR(100),
+            country_code VARCHAR(2),
+            FOREIGN KEY (country_code) REFERENCES country_lookup(code)
+        );
+        CREATE TABLE country_lookup (
+            code VARCHAR(2) PRIMARY KEY,
+            name VARCHAR(100)
+        );
+        """.strip(),
+        encoding="utf-8",
+    )
+    cands = list(SourceCIngester().ingest({"files": [str(ddl)]}))
+    by_label = {c.label: c for c in cands if c.artifact_kind in
+                (ArtifactKind.ENTITY, ArtifactKind.VOCABULARY)}
+
+    # customers stays an entity
+    assert by_label["customers"].artifact_kind == ArtifactKind.ENTITY
+    # country_lookup is reclassified as vocabulary
+    assert by_label["country_lookup"].artifact_kind == ArtifactKind.VOCABULARY
+    assert by_label["country_lookup"].strength == Strength.MEDIUM
+    promo = by_label["country_lookup"].promotion_reason.lower()
+    assert "code-table" in promo or "vocabulary" in promo
+
+
+def test_bridge_table_yields_relationship_only(tmp_path):
+    """A table with only FKs (no other domain columns) is a bridge
+    table — emits as a relationship between its two referents, no
+    entity candidate."""
+    ddl = tmp_path / "schema.sql"
+    ddl.write_text(
+        """
+        CREATE TABLE students (student_id INT PRIMARY KEY, name VARCHAR(100));
+        CREATE TABLE courses (course_id INT PRIMARY KEY, title VARCHAR(200));
+        CREATE TABLE enrolments (
+            student_id INT,
+            course_id INT,
+            PRIMARY KEY (student_id, course_id),
+            FOREIGN KEY (student_id) REFERENCES students(student_id),
+            FOREIGN KEY (course_id) REFERENCES courses(course_id)
+        );
+        """.strip(),
+        encoding="utf-8",
+    )
+    cands = list(SourceCIngester().ingest({"files": [str(ddl)]}))
+
+    # No standalone 'enrolments' entity candidate
+    entity_labels = {c.label for c in cands
+                     if c.artifact_kind == ArtifactKind.ENTITY}
+    assert "enrolments" not in entity_labels
+    assert "students" in entity_labels
+    assert "courses" in entity_labels
+
+    # A relationship that mentions both endpoints (from the bridge)
+    rels = [c for c in cands if c.artifact_kind == ArtifactKind.RELATIONSHIP]
+    bridge_rels = [r for r in rels
+                   if "students" in r.label.lower() and "courses" in r.label.lower()]
+    assert len(bridge_rels) == 1
+    assert bridge_rels[0].strength == Strength.MEDIUM
+
+
+def test_small_table_without_code_naming_stays_entity(tmp_path):
+    """A 2-column table without lookup/code naming and no FK-in pressure
+    stays an entity (default classification)."""
+    ddl = tmp_path / "schema.sql"
+    ddl.write_text(
+        "CREATE TABLE accounts (account_id INT PRIMARY KEY, balance DECIMAL);",
+        encoding="utf-8",
+    )
+    cands = list(SourceCIngester().ingest({"files": [str(ddl)]}))
+    entities = [c for c in cands if c.artifact_kind == ArtifactKind.ENTITY]
+    assert any(c.label == "accounts" for c in entities)

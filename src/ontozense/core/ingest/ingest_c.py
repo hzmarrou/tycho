@@ -42,6 +42,9 @@ class SourceCIngester(IngestionPolicy):
     def ingest(self, raw_input: Any) -> Iterable[IntermediateCandidate]:
         if not isinstance(raw_input, dict):
             return
+
+        # ── Pass 1: parse all tables into a structured index ──
+        tables: dict[str, dict] = {}
         for path_str in raw_input.get("files", []) or []:
             path = Path(path_str)
             if path.suffix.lower() != ".sql":
@@ -56,32 +59,136 @@ class SourceCIngester(IngestionPolicy):
                     path, exc,
                 )
                 continue
-
             for stmt in statements or []:
                 if not isinstance(stmt, exp.Create):
                     continue
                 if (stmt.args.get("kind") or "").upper() != "TABLE":
                     continue
-                yield from self._yield_for_table(stmt, path)
+                name = self._table_name(stmt)
+                if not name:
+                    continue
+                tables[name] = {
+                    "stmt": stmt,
+                    "source_path": path,
+                    "columns": self._extract_columns(stmt),
+                    "pk": self._extract_pk_columns(stmt),
+                    "fks": self._extract_foreign_keys(stmt, name),
+                }
+
+        # ── Compute FK-in counts for code-table detection ──
+        fk_in: dict[str, int] = {}
+        for tname, tdata in tables.items():
+            for fk in tdata["fks"]:
+                ref = fk["ref_table"]
+                fk_in[ref] = fk_in.get(ref, 0) + 1
+
+        # ── Pass 2: emit candidates per table ──
+        for tname, tdata in tables.items():
+            yield from self._emit_for_table(
+                tname, tdata, fk_in_count=fk_in.get(tname, 0),
+            )
 
     # ─── Per-table emission ────────────────────────────────────────────────
 
-    def _yield_for_table(
-        self, stmt: exp.Create, source_path: Path,
+    def _emit_for_table(
+        self,
+        tname: str,
+        tdata: dict,
+        fk_in_count: int,
     ) -> Iterable[IntermediateCandidate]:
-        table_name = self._table_name(stmt)
-        if not table_name:
-            return
+        columns = tdata["columns"]
+        pk = tdata["pk"]
+        fks = tdata["fks"]
+        source_path = tdata["source_path"]
 
-        columns = self._extract_columns(stmt)
-        foreign_keys = self._extract_foreign_keys(stmt, table_name)
+        non_pk_non_fk_columns = [
+            (cn, ct) for cn, ct in columns
+            if cn not in pk and not any(fk["column"] == cn for fk in fks)
+        ]
 
-        # Identify PK column(s) for demotion.
-        pk_columns = self._extract_pk_columns(stmt)
+        # Bridge table: ≥2 FKs, no other domain columns.
+        is_bridge = (
+            len(fks) >= 2
+            and len(non_pk_non_fk_columns) == 0
+        )
 
-        # Entity for the table itself.
+        # Code-table detection: ≥2 of 3 triggers.
+        code_table_triggers = 0
+        name_lower = tname.lower()
+        if (
+            name_lower.endswith("_codes") or name_lower.endswith("_lookup")
+            or name_lower.startswith("ref_") or name_lower.endswith("_code_master")
+            or name_lower.startswith("cd_")
+        ):
+            code_table_triggers += 1
+
+        col_names_lower = [c.lower() for c, _ in columns]
+        has_code_col = any(
+            cn in ("code", "code_value", "id")
+            for cn in col_names_lower
+        )
+        has_desc_col = any(
+            cn in ("description", "name", "label")
+            for cn in col_names_lower
+        )
+        if 2 <= len(columns) <= 3 and has_code_col and has_desc_col:
+            code_table_triggers += 1
+
+        outbound_fks = len(fks)
+        if fk_in_count >= 2 and outbound_fks == 0:
+            code_table_triggers += 1
+
+        is_code_table = code_table_triggers >= 2
+
+        # ── Emit ──
+
+        # Bridge: emit a relationship between the two FK referents only.
+        if is_bridge:
+            ref_a, ref_b = fks[0]["ref_table"], fks[1]["ref_table"]
+            yield IntermediateCandidate(
+                label=f"{ref_a}__{tname}__{ref_b}",
+                definition=(
+                    f"Bridge table '{tname}' linking {ref_a} and {ref_b}."
+                ),
+                source_type="C",
+                source_artifact=str(source_path),
+                raw_type="bridge_table",
+                eid="",
+                artifact_kind=ArtifactKind.RELATIONSHIP,
+                strength=Strength.MEDIUM,
+                promotion_reason=(
+                    f"Source C: bridge table '{tname}' (>=2 FKs, "
+                    f"no other domain columns)."
+                ),
+                suppression_reason=None,
+                suppressed=False,
+            )
+            return  # bridge: no columns/FKs emitted separately
+
+        # Code table: emit a vocabulary candidate only.
+        if is_code_table:
+            yield IntermediateCandidate(
+                label=tname,
+                definition="",
+                source_type="C",
+                source_artifact=str(source_path),
+                raw_type="table",
+                eid="",
+                artifact_kind=ArtifactKind.VOCABULARY,
+                strength=Strength.MEDIUM,
+                promotion_reason=(
+                    f"Source C: table '{tname}' classified as code-table "
+                    f"/ vocabulary ({code_table_triggers} of 3 detection "
+                    f"triggers fired)."
+                ),
+                suppression_reason=None,
+                suppressed=False,
+            )
+            return  # code table: no columns emitted separately
+
+        # Regular entity (default): entity + non-PK non-FK columns + FKs.
         yield IntermediateCandidate(
-            label=table_name,
+            label=tname,
             definition="",
             source_type="C",
             source_artifact=str(source_path),
@@ -90,53 +197,48 @@ class SourceCIngester(IngestionPolicy):
             artifact_kind=ArtifactKind.ENTITY,
             strength=Strength.STRONG,
             promotion_reason=(
-                f"Source C: table '{table_name}' "
-                f"(deterministic schema attestation)."
+                f"Source C: table '{tname}' (deterministic schema attestation)."
             ),
             suppression_reason=None,
             suppressed=False,
         )
 
-        # Attributes for non-PK, non-FK columns.
-        fk_column_names = {fk["column"] for fk in foreign_keys}
         for col_name, col_type in columns:
-            if col_name in pk_columns:
-                continue  # PK demoted to identifier-of-parent
-            if col_name in fk_column_names:
-                continue  # FK columns handled via relationship below
+            if col_name in pk:
+                continue
+            if any(fk["column"] == col_name for fk in fks):
+                continue
             yield IntermediateCandidate(
                 label=col_name,
                 definition="",
                 source_type="C",
-                source_artifact=f"{source_path}#{table_name}.{col_name}",
+                source_artifact=f"{source_path}#{tname}.{col_name}",
                 raw_type=col_type,
                 eid="",
                 artifact_kind=ArtifactKind.ATTRIBUTE,
                 strength=Strength.STRONG,
                 promotion_reason=(
-                    f"Source C: column '{table_name}.{col_name}' "
-                    f"(type {col_type})."
+                    f"Source C: column '{tname}.{col_name}' (type {col_type})."
                 ),
                 suppression_reason=None,
                 suppressed=False,
             )
 
-        # Relationships for foreign keys.
-        for fk in foreign_keys:
+        for fk in fks:
             yield IntermediateCandidate(
-                label=f"{table_name}__{fk['column']}__{fk['ref_table']}",
+                label=f"{tname}__{fk['column']}__{fk['ref_table']}",
                 definition=(
-                    f"Foreign key: {table_name}.{fk['column']} -> "
+                    f"Foreign key: {tname}.{fk['column']} -> "
                     f"{fk['ref_table']}.{fk['ref_column']}"
                 ),
                 source_type="C",
-                source_artifact=f"{source_path}#{table_name}.{fk['column']}",
+                source_artifact=f"{source_path}#{tname}.{fk['column']}",
                 raw_type="foreign_key",
                 eid="",
                 artifact_kind=ArtifactKind.RELATIONSHIP,
                 strength=Strength.MEDIUM,
                 promotion_reason=(
-                    f"Source C: FK from {table_name}.{fk['column']} to "
+                    f"Source C: FK from {tname}.{fk['column']} to "
                     f"{fk['ref_table']}.{fk['ref_column']}."
                 ),
                 suppression_reason=None,
