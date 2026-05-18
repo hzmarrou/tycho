@@ -104,3 +104,69 @@ def test_load_source_config_rejects_invalid_keys(tmp_path):
     with pytest.raises(ConfigError) as exc_info:
         load_source_config(path)
     assert "bogus_key" in str(exc_info.value)
+
+
+def test_load_source_config_rejects_typo_in_top_level_wrapper(tmp_path):
+    """A typo like `sourcec:` (missing underscore) at the top level
+    must raise, not silently return {}. The spec requires the loader
+    to schema-validate, not silently accept malformed wrappers."""
+    from ontozense.core.ingest.filters import load_source_config, ConfigError
+
+    path = tmp_path / "source-c.yaml"
+    path.write_text(
+        "sourcec:\n  exclude_tables:\n    - legacy_*\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError) as exc_info:
+        load_source_config(path)
+    msg = str(exc_info.value).lower()
+    assert "source_c" in msg or "source_d" in msg or "top-level" in msg
+
+
+def test_load_source_config_rejects_unrelated_top_level_key(tmp_path):
+    """Any wrapper key other than source_c / source_d must raise."""
+    from ontozense.core.ingest.filters import load_source_config, ConfigError
+
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "bogus_top_level:\n  something: value\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError):
+        load_source_config(path)
+
+
+def test_load_source_config_rejects_both_source_c_and_source_d(tmp_path):
+    """One config file should describe one source — both blocks
+    present at the top level is a structural mistake."""
+    from ontozense.core.ingest.filters import load_source_config, ConfigError
+
+    path = tmp_path / "sources.yaml"
+    path.write_text(
+        """
+source_c:
+  exclude_tables: [legacy_*]
+source_d:
+  exclude_paths: ["tests/**"]
+""".strip(),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError) as exc_info:
+        load_source_config(path)
+    msg = str(exc_info.value).lower()
+    assert "source_c" in msg and "source_d" in msg
+
+
+def test_load_source_config_empty_file_still_returns_empty(tmp_path):
+    """Empty file or YAML null at the top level still returns {} —
+    nothing to validate, no error."""
+    from ontozense.core.ingest.filters import load_source_config
+
+    path = tmp_path / "empty.yaml"
+    path.write_text("", encoding="utf-8")
+    assert load_source_config(path) == {}
+
+    path2 = tmp_path / "null.yaml"
+    path2.write_text("null\n", encoding="utf-8")
+    # YAML `null` parses to None, which the loader treats as empty.
+    assert load_source_config(path2) == {}

@@ -145,27 +145,49 @@ def load_source_config(path: Path) -> dict[str, Any]:
     or ``source_d`` key). Returns ``{}`` if the file doesn't exist or
     is empty.
 
-    Raises :class:`ConfigError` if the YAML contains keys not in
-    the per-source allowed set.
+    Raises :class:`ConfigError` if:
+      - the YAML top level is not a mapping
+      - the top-level mapping is non-empty but contains neither
+        ``source_c`` nor ``source_d`` (catches typos like ``sourcec:``)
+      - the top-level mapping contains BOTH ``source_c`` and ``source_d``
+        (one config file describes one source)
+      - the inner mapping contains keys outside the per-source
+        allowed set
     """
     if not path.exists():
         return {}
 
-    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if raw is None:
+        # Empty file or explicit YAML null — nothing to validate.
+        return {}
+
     if not isinstance(raw, dict):
         raise ConfigError(f"{path}: top-level YAML must be a mapping")
 
-    # Accept either {"source_c": {...}} or {"source_d": {...}}.
-    inner: dict[str, Any] = {}
-    if "source_c" in raw and isinstance(raw["source_c"], dict):
+    has_c = "source_c" in raw and isinstance(raw["source_c"], dict)
+    has_d = "source_d" in raw and isinstance(raw["source_d"], dict)
+
+    if has_c and has_d:
+        raise ConfigError(
+            f"{path}: both 'source_c' and 'source_d' present at the "
+            f"top level; one config file must describe exactly one "
+            f"source — split into source-c.yaml and source-d.yaml."
+        )
+
+    if not has_c and not has_d:
+        raise ConfigError(
+            f"{path}: top-level mapping must contain exactly one of "
+            f"'source_c' or 'source_d'; got keys {sorted(raw.keys())}. "
+            f"(Did you mean 'source_c'? Note the underscore.)"
+        )
+
+    if has_c:
         inner = raw["source_c"]
         valid = SOURCE_C_VALID_CONFIG_KEYS
-    elif "source_d" in raw and isinstance(raw["source_d"], dict):
+    else:
         inner = raw["source_d"]
         valid = SOURCE_D_VALID_CONFIG_KEYS
-    else:
-        # Empty or unrecognised top-level — treat as empty config.
-        return {}
 
     invalid_keys = set(inner.keys()) - valid
     if invalid_keys:
