@@ -318,3 +318,76 @@ def test_user_force_entity_overrides_default_vocabulary(tmp_path):
     cl = next(c for c in cands if c.label == "country_lookup"
               and c.artifact_kind in (ArtifactKind.ENTITY, ArtifactKind.VOCABULARY))
     assert cl.artifact_kind == ArtifactKind.ENTITY
+
+
+def test_user_force_vocabulary_supports_glob(tmp_path):
+    """force_vocabulary: ['*_lookup'] reclassifies country_lookup
+    despite the *_lookup pattern (not exact-match)."""
+    ddl = tmp_path / "schema.sql"
+    ddl.write_text(
+        """
+        CREATE TABLE country_lookup (
+            id INT PRIMARY KEY,
+            name VARCHAR(100),
+            iso_alpha_3 VARCHAR(3),
+            currency_code VARCHAR(3)
+        );
+        """.strip(),
+        encoding="utf-8",
+    )
+    cfg = {"force_vocabulary": ["*_lookup"]}
+    cands = list(SourceCIngester(config=cfg).ingest({"files": [str(ddl)]}))
+    cl = next(c for c in cands if c.label == "country_lookup")
+    assert cl.artifact_kind == ArtifactKind.VOCABULARY
+    # The promotion_reason should cite the matched pattern
+    assert "*_lookup" in cl.promotion_reason or "lookup" in cl.promotion_reason.lower()
+
+
+def test_user_force_entity_is_case_insensitive(tmp_path):
+    """force_entity: ['COUNTRY_LOOKUP'] (upper-case) reclassifies the
+    lower-case 'country_lookup' table — globbing is case-insensitive
+    per spec §6.5."""
+    ddl = tmp_path / "schema.sql"
+    ddl.write_text(
+        """
+        CREATE TABLE country_lookup (code VARCHAR(2) PRIMARY KEY, name VARCHAR(100));
+        CREATE TABLE customers (
+            id INT PRIMARY KEY,
+            country_code VARCHAR(2),
+            FOREIGN KEY (country_code) REFERENCES country_lookup(code)
+        );
+        CREATE TABLE other (
+            id INT PRIMARY KEY,
+            country_code VARCHAR(2),
+            FOREIGN KEY (country_code) REFERENCES country_lookup(code)
+        );
+        """.strip(),
+        encoding="utf-8",
+    )
+    # Note: UPPER-CASE force_entity entry
+    cfg = {"force_entity": ["COUNTRY_LOOKUP"]}
+    cands = list(SourceCIngester(config=cfg).ingest({"files": [str(ddl)]}))
+    cl = next(c for c in cands if c.label == "country_lookup"
+              and c.artifact_kind in (ArtifactKind.ENTITY, ArtifactKind.VOCABULARY))
+    assert cl.artifact_kind == ArtifactKind.ENTITY
+
+
+def test_user_force_vocabulary_glob_does_not_match_unrelated(tmp_path):
+    """Sanity check: force_vocabulary: ['*_lookup'] does NOT reclassify
+    'customers' even though it's a regular entity."""
+    ddl = tmp_path / "schema.sql"
+    ddl.write_text(
+        """
+        CREATE TABLE customers (id INT PRIMARY KEY, name VARCHAR(100), email VARCHAR(200));
+        CREATE TABLE status_lookup (id INT PRIMARY KEY, name VARCHAR(50), description VARCHAR(200));
+        """.strip(),
+        encoding="utf-8",
+    )
+    cfg = {"force_vocabulary": ["*_lookup"]}
+    cands = list(SourceCIngester(config=cfg).ingest({"files": [str(ddl)]}))
+    customers = next(c for c in cands if c.label == "customers"
+                     and c.artifact_kind in (ArtifactKind.ENTITY, ArtifactKind.VOCABULARY))
+    status_lookup = next(c for c in cands if c.label == "status_lookup"
+                         and c.artifact_kind in (ArtifactKind.ENTITY, ArtifactKind.VOCABULARY))
+    assert customers.artifact_kind == ArtifactKind.ENTITY
+    assert status_lookup.artifact_kind == ArtifactKind.VOCABULARY

@@ -167,13 +167,24 @@ class SourceCIngester(IngestionPolicy):
             code_table_triggers += 1
         is_code_table = code_table_triggers >= 2
 
-        # User override of classification.
-        if tname in user_force_vocab:
+        # User override of classification (case-insensitive globbing,
+        # per spec §6.5).
+        force_vocab_pattern: str | None = None
+        force_entity_pattern: str | None = None
+        if glob_match(tname, user_force_vocab):
             is_code_table = True
             is_bridge = False
-        elif tname in user_force_entity:
+            for p in user_force_vocab:
+                if glob_match(tname, [p]):
+                    force_vocab_pattern = p
+                    break
+        elif glob_match(tname, user_force_entity):
             is_code_table = False
             is_bridge = False
+            for p in user_force_entity:
+                if glob_match(tname, [p]):
+                    force_entity_pattern = p
+                    break
 
         # ─── Bridge emission (no entity/columns/FKs separately) ────────
         if is_bridge:
@@ -208,12 +219,13 @@ class SourceCIngester(IngestionPolicy):
                 artifact_kind=ArtifactKind.VOCABULARY,
                 strength=Strength.MEDIUM,
                 promotion_reason=(
+                    f"Source C: table '{tname}' classified as vocabulary "
+                    f"by per-domain config force_vocabulary pattern "
+                    f"'{force_vocab_pattern}'."
+                    if force_vocab_pattern is not None else
                     f"Source C: table '{tname}' classified as code-table / "
                     f"vocabulary ({code_table_triggers} of 3 detection "
                     f"triggers fired)."
-                    if tname not in user_force_vocab else
-                    f"Source C: table '{tname}' classified as vocabulary "
-                    f"by per-domain config force_vocabulary."
                 ),
                 suppression_reason=table_suppression_reason,
                 suppressed=table_suppressed,
@@ -231,10 +243,11 @@ class SourceCIngester(IngestionPolicy):
             artifact_kind=ArtifactKind.ENTITY,
             strength=Strength.STRONG,
             promotion_reason=(
-                f"Source C: table '{tname}' (deterministic schema attestation)."
-                if tname not in user_force_entity else
                 f"Source C: table '{tname}' classified as entity by "
-                f"per-domain config force_entity."
+                f"per-domain config force_entity pattern "
+                f"'{force_entity_pattern}'."
+                if force_entity_pattern is not None else
+                f"Source C: table '{tname}' (deterministic schema attestation)."
             ),
             suppression_reason=table_suppression_reason,
             suppressed=table_suppressed,
