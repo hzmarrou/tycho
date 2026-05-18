@@ -77,6 +77,12 @@ class CandidateConcept:
     provenance: list[EvidenceEntry] = field(default_factory=list)
     aliases: list[str] = field(default_factory=list)
     status: str = "candidate"
+    # NEW v1.1 fields — additive, defaulted so v1.0 snapshots deserialise.
+    artifact_kind: str = "entity"            # closed vocab: see ingest/base.py ArtifactKind
+    strength: str = "medium"                 # strong | medium | weak
+    promotion_reason: str = ""
+    suppression_reason: str | None = None
+    suppressed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         raw = asdict(self)

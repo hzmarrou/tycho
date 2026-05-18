@@ -3097,11 +3097,27 @@ def survey(
     ),
     source_c: list[Path] = typer.Option(
         None, "--source-c",
-        help="Source C schema input (forward-compat; not consumed today).",
+        help=(
+            "Source C schema input. Accepts .sql DDL files (parsed via "
+            "sqlglot, v1.1 ingestion) or .json files (legacy v1.0 "
+            "passthrough, no-op; full JSON ingestion is v1.2 work). "
+            "File, glob, or directory; repeatable. Per-domain overrides "
+            "via <domain-dir>/source-c.yaml. Mixed .sql + .json in one "
+            "invocation is rejected."
+        ),
     ),
     source_d: list[Path] = typer.Option(
         None, "--source-d",
-        help="Source D code input (forward-compat; not consumed today).",
+        help=(
+            "Source D code input. v1.1 ingests .py files via the "
+            "deterministic AST extractor (classes, dataclasses, "
+            "Pydantic/SQLAlchemy models, Enums, methods, validation "
+            "functions). .sql/.js/.ts/.json are accepted by the CLI "
+            "but currently ignored by the ingester (those languages "
+            "are deferred per spec §13.2 #7). File, glob, or directory; "
+            "repeatable. Per-domain overrides via "
+            "<domain-dir>/source-d.yaml."
+        ),
     ),
     profile: Path = typer.Option(
         None, "--profile",
@@ -3194,24 +3210,50 @@ def survey(
         console.print(f"[red]Failed to load --source-b:[/] {err}")
         raise typer.Exit(code=2)
 
-    # ─── Source C: expand + load JSON ──
+    # ─── Source C: expand .sql files + load per-domain config ──
     try:
         c_files = _expand_source_paths(
-            source_c or [], file_extensions={".json"},
+            source_c or [], file_extensions={".sql", ".json"},
         )
     except _SourceLoadError as err:
         console.print(
             f"[red]Failed to enumerate --source-c paths:[/] {err}"
         )
         raise typer.Exit(code=2)
-    merged_c = _load_source_passthrough(c_files) if c_files else None
+
+    merged_c: dict | None = None
+    if c_files:
+        sql_files = [p for p in c_files if p.suffix.lower() == ".sql"]
+        json_files = [p for p in c_files if p.suffix.lower() == ".json"]
+        if sql_files and json_files:
+            # Mixed input: hard error. v1.1 ingestion uses .sql DDL files;
+            # .json remains as legacy v1.0 passthrough (deferred to v1.2
+            # per spec §13.2 #6). Mixing both in one invocation is
+            # ambiguous and would silently drop one set.
+            console.print(
+                "[red]--source-c received both .sql and .json inputs in "
+                "the same invocation.[/]\n"
+                "Source C accepts either .sql DDL files (v1.1 ingestion) "
+                "OR .json passthrough (legacy v1.0 no-op), not both. "
+                "Split into separate survey runs or drop one set."
+            )
+            raise typer.Exit(code=2)
+        if sql_files:
+            merged_c = {"files": [str(p) for p in sql_files]}
+        elif json_files:
+            # Legacy v1.0 JSON passthrough — JSON Source C ingestion is
+            # deferred to v1.2 per spec §13.2 #6. Load to a no-op dict.
+            merged_c = _load_source_passthrough(json_files)
 
     # ─── Source D: expand to file list (manifest) ──
-    # The spec recognises .py / .sql / .js / .ts as Source D code
-    # files (plus .json for pre-built manifests). Source D paths are
-    # bundled as a manifest; the candidate-graph builder accepts the
-    # manifest without extracting from the file contents in this
-    # implementation.
+    # The CLI accepts .py / .sql / .js / .ts / .json paths for Source D
+    # and bundles them into a manifest of the shape {"files": [...]}.
+    # SourceDIngester (v1.1) consumes .py files via the deterministic
+    # AST extractor and silently ignores the other extensions — those
+    # languages are deferred per spec §13.2 #7. The wider extension set
+    # is preserved here so the manifest stays forward-compatible with
+    # the v1.2+ multi-language ingester without another CLI signature
+    # change.
     try:
         d_files = _expand_source_paths(
             source_d or [],
@@ -3226,6 +3268,17 @@ def survey(
         {"files": [str(p) for p in d_files]} if d_files else None
     )
 
+    # ─── Load per-domain source-d.yaml (if present) ──
+    source_d_config: dict | None = None
+    cfg_d_path = domain_dir / "source-d.yaml"
+    if cfg_d_path.exists():
+        from .core.ingest.filters import load_source_config, ConfigError
+        try:
+            source_d_config = load_source_config(cfg_d_path)
+        except ConfigError as err:
+            console.print(f"[red]Invalid source-d.yaml:[/] {err}")
+            raise typer.Exit(code=2)
+
     # ─── Profile alias_map (light normalisation only) ──
     alias_map: dict[str, str] | None = None
     if profile is not None:
@@ -3239,6 +3292,17 @@ def survey(
             )
             raise typer.Exit(code=2)
 
+    # ─── Load per-domain source-c.yaml (if present) ──
+    source_c_config: dict | None = None
+    cfg_c_path = domain_dir / "source-c.yaml"
+    if cfg_c_path.exists():
+        from .core.ingest.filters import load_source_config, ConfigError
+        try:
+            source_c_config = load_source_config(cfg_c_path)
+        except ConfigError as err:
+            console.print(f"[red]Invalid source-c.yaml:[/] {err}")
+            raise typer.Exit(code=2)
+
     # ─── Run discover ──
     graph = build_candidate_graph(
         source_a=merged_a,
@@ -3246,6 +3310,8 @@ def survey(
         source_c=merged_c,
         source_d=merged_d,
         alias_map=alias_map,
+        source_c_config=source_c_config,
+        source_d_config=source_d_config,
     )
 
     (discovery_dir / "candidate-graph.json").write_text(

@@ -1,0 +1,6 @@
+{
+  "records": [
+    {"element_name": "Customer", "entity_type": "Entity",
+     "definition": "The party with whom the bank has a relationship."}
+  ]
+}

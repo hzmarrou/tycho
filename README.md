@@ -95,6 +95,54 @@ There are three ways to use the journey above, depending on what you bring to it
 
 All three paths end at the same place: a `draft.owl` you can open in an OWL editor.
 
+### Sources C and D as seeders (v1.1)
+
+As of v1.1, `--source-c` (`.sql` DDL files) and `--source-d` (`.py` files) are no
+longer forward-compatible no-ops — they actively contribute first-class candidates
+to the candidate graph that `survey` builds and `draft` consumes.
+
+**What each source produces:**
+
+- **Source C (SQL DDL):** tables → entity candidates, columns → attribute
+  candidates, foreign-key constraints → relationship candidates, lookup/code tables
+  (detected by naming heuristics or `force_vocabulary` override) → vocabulary
+  candidates.
+- **Source D (Python code):** classes, dataclasses, Pydantic models, and SQLAlchemy
+  models → entity candidates; fields → attribute candidates; `Enum` subclasses →
+  vocabulary candidates; validation functions → rule candidates; methods → behaviour
+  candidates.
+
+**Per-domain YAML config:** place a `source-c.yaml` or `source-d.yaml` file in the
+domain workspace to tune which artifacts Tycho promotes or suppresses. Each file
+supports `exclude_*` / `include_*` glob patterns, `force_vocabulary`, and
+`force_entity` overrides. `exclude_*` patterns always suppress matching names;
+`include_*` patterns rescue specific items from the default heuristic suppressions
+(e.g. keep a `customer_audit` table that the `*_audit` default would have dropped)
+but do not override `exclude_*`.
+
+**Example invocation with all four sources:**
+
+```bash
+ontozense survey \
+  --source-a domain/docs/ \
+  --source-b domain/governance.json \
+  --source-c domain/schemas/core.sql \
+  --source-d domain/code/ \
+  --domain-dir domain/
+```
+
+**The `audit` block:** `candidate-graph.json` now carries an `audit` array alongside
+`concepts` and `relationships`. Each entry records a candidate that was filtered,
+the reason (default suppression pattern or explicit YAML rule), and the source type
+(`"C"` or `"D"`). Use it to understand what Tycho chose not to promote and why.
+
+**Sources A and B are unchanged.** Every pipeline run that worked before v1.1
+continues to work identically. Passing `--source-c` or `--source-d` is always
+optional.
+
+For full design details, suppression-pattern rationale, and YAML schema reference,
+see `docs/superpowers/specs/2026-05-17-source-cd-seeders-design.md`.
+
 ## What's in a rich data dictionary?
 
 The fused output is a JSON file containing a list of **elements** (one

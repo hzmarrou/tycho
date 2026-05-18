@@ -63,7 +63,7 @@ produces a scored version.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .discovery_contracts import (
@@ -84,14 +84,21 @@ class CandidateGraph:
 
     Returned by :func:`build_candidate_graph`. Serialise via
     :meth:`to_dict` for ``candidate-graph.json`` output.
+
+    The ``audit`` field lists suppressed candidates (filtered by
+    per-source noise heuristics or per-domain config). Default
+    consumers ignore this list; an explicit audit consumer can
+    surface it for the curator (deferred to v1.2 per spec §13.1).
     """
     concepts: list[CandidateConcept]
     relationships: list[CandidateRelationship]
+    audit: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "concepts": [c.to_dict() for c in self.concepts],
             "relationships": [r.to_dict() for r in self.relationships],
+            "audit": list(self.audit),
         }
 
 
@@ -127,6 +134,8 @@ class _CandidateIndex:
         self.by_id: dict[str, str] = {}
         self.by_name: dict[str, str] = {}
         self.ambiguous_norms: set[str] = set()
+        self.attestations: dict[str, list[tuple[str, str]]] = {}
+        self.kind_conflicts: list[dict[str, str]] = []
 
     def values(self) -> list[CandidateConcept]:
         return list(self.by_key.values())
@@ -142,8 +151,17 @@ def build_candidate_graph(
     source_c: dict[str, Any] | None = None,
     source_d: dict[str, Any] | None = None,
     alias_map: dict[str, str] | None = None,
+    source_c_config: dict[str, Any] | None = None,
+    source_d_config: dict[str, Any] | None = None,
 ) -> CandidateGraph:
     """Build a merged candidate graph from raw source outputs.
+
+    Dispatches to per-source ingesters in :mod:`core.ingest`, then
+    feeds each :class:`IntermediateCandidate` through :func:`_upsert`
+    for merge. Suppressed candidates are routed to the
+    :class:`CandidateGraph.audit` list instead of the main concept
+    list. Source A relationships are processed after merge so
+    endpoint resolution sees the canonical labels.
 
     Each ``source_*`` argument is the raw dict form of the
     corresponding source's JSON output (i.e. ``json.loads(...)`` of
@@ -158,10 +176,10 @@ def build_candidate_graph(
       - ``source_b`` — ``{"records": [...]}`` where each record has
         ``element_name`` and optionally ``entity_type``, ``id``,
         ``definition``.
-      - ``source_c`` / ``source_d`` — accepted in the signature
-        so callers can pass them uniformly across sources. Their
-        payloads do not affect candidate generation in this
-        implementation.
+      - ``source_c`` — ``{"files": [...]}`` where each entry is a
+        path to a SQL DDL file. Parsed via sqlglot.
+      - ``source_d`` — ``{"files": [...]}`` where each entry is a
+        path to a Python source file. Parsed via the AST module.
 
     Any source argument can be ``None`` or absent. Empty / missing
     labels are skipped silently.
@@ -175,52 +193,91 @@ def build_candidate_graph(
     light normalisation only — *not* for filtering or type
     constraints). Without an alias_map, behaviour reduces to the
     id-first / name-only Phase 1 baseline.
+
+    ``source_c_config`` / ``source_d_config`` (optional) — per-domain
+    YAML config dicts forwarded to the respective ingesters. Support
+    keys include ``exclude_tables``, ``include_tables``,
+    ``force_vocabulary``, ``force_entity``, ``exclude_columns`` for
+    Source C, and ``exclude_paths``, ``exclude_classes``,
+    ``include_classes`` for Source D.
+
+    See ``docs/superpowers/specs/2026-05-17-source-cd-seeders-design.md``
+    §9.2 for the v1.1 architecture.
+
+    ## v1.1 label canonicalisation and AC1 backward-compatibility
+
+    :func:`_resolve_alias_with_normalisation` runs before merge and
+    produces a canonical form via: alias_map lookup (case-insensitive)
+    → strip ``tbl_``/``dim_``/``fact_`` prefixes → English singularize
+    (with ``inflect`` round-trip guard).
+
+    **What changes vs pre-v1.1:**
+
+    - ``alias_map`` entries **DO change the surface** ``label`` on the
+      emitted :class:`~.discovery_contracts.CandidateConcept`. When an
+      alias_map entry fires (e.g. ``{"client": "Customer"}``), the
+      canonical form becomes the primary label. This preserves the
+      pre-v1.1 alias-resolution contract — labels are order-independent
+      for the alias-map case.
+
+    - **Singularisation and prefix-strip affect ``normalized_label``
+      only** (the internal merge key). The primary surface ``label``
+      on the emitted candidate is the **original surface form** the
+      caller passed. So a Source A ``"customers"`` surfaces in
+      ``CandidateConcept.label`` as ``"customers"`` (not ``"customer"``),
+      and ``"tbl_customers"`` surfaces as ``"tbl_customers"``. However,
+      both merge with ``"customer"`` and with each other because their
+      ``normalized_label`` is ``"customer"``. The original surface form
+      is always preserved in ``CandidateConcept.aliases`` as well.
+
+    **AC1 (additive backward-compat) is preserved:** existing
+    ``label`` values are unchanged for A+B-only runs. Consumers that
+    previously saw ``"customers"`` (plural) will continue to see
+    ``"customers"`` in ``label``; the canonical merge key is
+    accessible via ``normalized_label``.
     """
+    from .ingest.base import IntermediateCandidate
+    from .ingest.ingest_a import SourceAIngester
+    from .ingest.ingest_b import SourceBIngester
+    from .ingest.ingest_c import SourceCIngester
+    from .ingest.ingest_d import SourceDIngester
+
     index = _CandidateIndex()
     aliases = alias_map or {}
+    suppressed_audit: list[IntermediateCandidate] = []
 
-    # ─── Concept ingestion ────────────────────────────────────────────────
+    def _dispatch(ingester: Any, raw: Any) -> None:
+        for ic in ingester.ingest(raw):
+            if ic.suppressed:
+                suppressed_audit.append(ic)
+                continue
+            _upsert(
+                index,
+                label=ic.label,
+                definition=ic.definition,
+                source_type=ic.source_type,
+                source_artifact=ic.source_artifact,
+                raw_type=ic.raw_type,
+                eid=ic.eid,
+                artifact_kind=ic.artifact_kind.value,
+                strength=ic.strength.value,
+                promotion_reason=ic.promotion_reason,
+                suppression_reason=ic.suppression_reason,
+                suppressed=False,
+                alias_map=aliases,
+            )
+
     if source_a:
-        for concept in source_a.get("concepts", []) or []:
-            label = (concept.get("name") or "").strip()
-            if not label:
-                continue
-            artifact = ""
-            prov_obj = concept.get("provenance")
-            if isinstance(prov_obj, dict):
-                artifact = prov_obj.get("source_document", "") or ""
-            _upsert(
-                index,
-                label=label,
-                definition=concept.get("definition", "") or "",
-                source_type="A",
-                source_artifact=artifact,
-                raw_type=concept.get("entity_type", "") or "",
-                eid=concept.get("id", "") or "",
-                alias_map=aliases,
-            )
-
+        _dispatch(SourceAIngester(), source_a)
     if source_b:
-        for record in source_b.get("records", []) or []:
-            label = (record.get("element_name") or "").strip()
-            if not label:
-                continue
-            _upsert(
-                index,
-                label=label,
-                definition=record.get("definition", "") or "",
-                source_type="B",
-                source_artifact=record.get("source_file", "") or "",
-                raw_type=record.get("entity_type", "") or "",
-                eid=record.get("id", "") or "",
-                alias_map=aliases,
-            )
+        _dispatch(SourceBIngester(), source_b)
+    if source_c:
+        _dispatch(SourceCIngester(config=source_c_config), source_c)
+    if source_d:
+        _dispatch(SourceDIngester(config=source_d_config), source_d)
 
-    # source_c and source_d are accepted so callers can pass them
-    # uniformly across sources. Their payloads do not affect the
-    # candidate concepts or relationships this builder emits.
-
-    # ─── Relationship ingestion ───────────────────────────────────────────
+    # Relationship ingestion stays in the orchestrator — it requires
+    # post-merge candidate-id resolution that's only available now.
     relationships: list[CandidateRelationship] = []
     degree_neighbours: dict[str, set[str]] = {}
 
@@ -247,7 +304,9 @@ def build_candidate_graph(
                     subject_candidate_id=subj_id,
                     predicate=predicate,
                     object_candidate_id=obj_id,
-                    source_presence={"A": True, "B": False, "C": False, "D": False},
+                    source_presence={
+                        "A": True, "B": False, "C": False, "D": False,
+                    },
                     provenance=[
                         EvidenceEntry(
                             source_type="A",
@@ -265,18 +324,57 @@ def build_candidate_graph(
     # Apply graph_degree updates to candidates. CandidateConcept is
     # frozen, so we rebuild via replace.
     if degree_neighbours:
-        for candidate_id, neighbours in degree_neighbours.items():
-            key = _find_key_for_candidate_id(index, candidate_id)
+        for cid, nbrs in degree_neighbours.items():
+            key = _find_key_for_candidate_id(index, cid)
             if key is None:
                 continue
             existing = index.by_key[key]
-            index.by_key[key] = replace(
-                existing, graph_degree=len(neighbours),
-            )
+            index.by_key[key] = replace(existing, graph_degree=len(nbrs))
+
+    # Surface cross-kind collisions in the audit block.
+    from .ingest.base import ArtifactKind as _ArtifactKind
+    from .ingest.base import IntermediateCandidate as _IntermediateCandidate
+    from .ingest.base import Strength as _Strength
+    for conflict in index.kind_conflicts:
+        suppressed_audit.append(_IntermediateCandidate(
+            label=f"<kind-conflict:{conflict['normalized_label']}>",
+            definition="",
+            source_type=conflict["incoming_source"],
+            source_artifact="",
+            raw_type="",
+            eid="",
+            artifact_kind=_ArtifactKind.ENTITY,  # nominal — audit-marker only
+            strength=_Strength.WEAK,
+            promotion_reason="",
+            suppression_reason=(
+                f"Cross-kind collision on normalised label "
+                f"'{conflict['normalized_label']}': existing kind="
+                f"{conflict['existing_kind']}, incoming kind="
+                f"{conflict['incoming_kind']}. Both candidates retained "
+                f"as separate entries per spec §8.2."
+            ),
+            suppressed=True,
+        ))
 
     return CandidateGraph(
         concepts=index.values(),
         relationships=relationships,
+        audit=[
+            {
+                "label": ic.label,
+                "definition": ic.definition,
+                "source_type": ic.source_type,
+                "source_artifact": ic.source_artifact,
+                "raw_type": ic.raw_type,
+                "eid": ic.eid,
+                "artifact_kind": ic.artifact_kind.value,
+                "strength": ic.strength.value,
+                "promotion_reason": ic.promotion_reason,
+                "suppression_reason": ic.suppression_reason or "",
+                "suppressed": ic.suppressed,
+            }
+            for ic in suppressed_audit
+        ],
     )
 
 
@@ -292,6 +390,11 @@ def _upsert(
     source_artifact: str = "",
     raw_type: str = "",
     eid: str = "",
+    artifact_kind: str = "entity",
+    strength: str = "medium",
+    promotion_reason: str = "",
+    suppression_reason: str | None = None,
+    suppressed: bool = False,
     alias_map: dict[str, str] | None = None,
 ) -> None:
     """Insert or merge a candidate for ``label`` following the
@@ -317,10 +420,11 @@ def _upsert(
     a separate post-name-miss lookup) collapses steps 2 and 3 into
     one lookup with identical observable behaviour.
     """
-    # Step 3: alias-expand the label up-front. With no alias_map the
-    # resolver is the identity function and behaviour matches the
-    # pre-alias baseline.
-    canonical_label = _resolve_alias(label, alias_map or {})
+    # Step 3: alias-expand the label up-front (with prefix-strip and
+    # singularization). With no alias_map the resolver strips prefixes
+    # and singularizes before normalisation; with an alias_map the map
+    # wins first. Behaviour is a strict superset of the pre-alias baseline.
+    canonical_label, alias_fired = _resolve_alias_with_normalisation(label, alias_map or {})
     norm = normalize_label(canonical_label)
     if not norm:
         return
@@ -340,7 +444,12 @@ def _upsert(
         _merge_into(
             index, key, evidence, label, definition, source_type,
             raw_type, canonical_label=canonical_label,
+            alias_fired=alias_fired,
+            artifact_kind=artifact_kind, strength=strength,
+            promotion_reason=promotion_reason,
+            suppression_reason=suppression_reason, suppressed=suppressed,
         )
+        _record_attestation_and_boost(index, key, source_type, strength)
         return
 
     # 1b. Ambiguity guard. If this norm has already been split into
@@ -357,6 +466,10 @@ def _upsert(
                 raw_type=raw_type, source_type=source_type,
                 eid="", evidence=evidence,
                 canonical_label=canonical_label,
+                alias_fired=alias_fired,
+                artifact_kind=artifact_kind, strength=strength,
+                promotion_reason=promotion_reason,
+                suppression_reason=suppression_reason, suppressed=suppressed,
             )
             # Distinguish the bucket from regular cand_<norm> ids so
             # downstream consumers can spot it.
@@ -368,13 +481,58 @@ def _upsert(
             _merge_into(
                 index, ambig_key, evidence, label, definition,
                 source_type, raw_type, canonical_label=canonical_label,
+                alias_fired=alias_fired,
+                artifact_kind=artifact_kind, strength=strength,
+                promotion_reason=promotion_reason,
+                suppression_reason=suppression_reason, suppressed=suppressed,
             )
+        _record_attestation_and_boost(index, ambig_key, source_type, strength)
         return
 
     # 2. Normalised-label hit (already alias-expanded) — disambiguation cases:
     if norm in index.by_name:
         existing_key = index.by_name[norm]
         existing = index.by_key[existing_key]
+
+        # Cross-kind collision: same normalised label but different
+        # artifact_kinds. Both candidates survive as separate entries
+        # (spec §8.2). Checked BEFORE the id-disambiguation path.
+        if existing.artifact_kind != artifact_kind:
+            collision_key = f"name:{norm}#kind:{artifact_kind}"
+            if collision_key not in index.by_key:
+                new_kind_cand = _new_candidate(
+                    norm=norm, label=label, definition=definition,
+                    raw_type=raw_type, source_type=source_type,
+                    eid=eid, evidence=evidence,
+                    canonical_label=canonical_label,
+                    alias_fired=alias_fired,
+                    artifact_kind=artifact_kind, strength=strength,
+                    promotion_reason=promotion_reason,
+                    suppression_reason=suppression_reason,
+                    suppressed=suppressed,
+                )
+                index.by_key[collision_key] = new_kind_cand
+                index.kind_conflicts.append({
+                    "normalized_label": norm,
+                    "existing_kind": existing.artifact_kind,
+                    "incoming_kind": artifact_kind,
+                    "incoming_source": source_type,
+                })
+            else:
+                _merge_into(
+                    index, collision_key, evidence, label, definition,
+                    source_type, raw_type, canonical_label=canonical_label,
+                    alias_fired=alias_fired,
+                    artifact_kind=artifact_kind, strength=strength,
+                    promotion_reason=promotion_reason,
+                    suppression_reason=suppression_reason,
+                    suppressed=suppressed,
+                )
+            _record_attestation_and_boost(
+                index, collision_key, source_type, strength,
+            )
+            return
+
         existing_id = _candidate_id_of(existing)
         if eid and existing_id and existing_id != eid:
             # Case 4: ambiguity — same name, different ids. Keep
@@ -393,6 +551,11 @@ def _upsert(
                     eid=eid,
                     evidence=evidence,
                     canonical_label=canonical_label,
+                    alias_fired=alias_fired,
+                    artifact_kind=artifact_kind, strength=strength,
+                    promotion_reason=promotion_reason,
+                    suppression_reason=suppression_reason,
+                    suppressed=suppressed,
                 )
                 index.by_id[eid] = collision_key
                 index.ambiguous_norms.add(norm)
@@ -400,7 +563,15 @@ def _upsert(
                 _merge_into(
                     index, collision_key, evidence, label, definition,
                     source_type, raw_type, canonical_label=canonical_label,
+                    alias_fired=alias_fired,
+                    artifact_kind=artifact_kind, strength=strength,
+                    promotion_reason=promotion_reason,
+                    suppression_reason=suppression_reason,
+                    suppressed=suppressed,
                 )
+            _record_attestation_and_boost(
+                index, collision_key, source_type, strength,
+            )
             return
         if eid and not existing_id:
             # Case 2a: existing has no id, incoming has id — promote.
@@ -416,6 +587,13 @@ def _upsert(
                 index, existing_key, evidence, label, definition,
                 source_type, raw_type, promote_id=eid,
                 canonical_label=canonical_label,
+                alias_fired=alias_fired,
+                artifact_kind=artifact_kind, strength=strength,
+                promotion_reason=promotion_reason,
+                suppression_reason=suppression_reason, suppressed=suppressed,
+            )
+            _record_attestation_and_boost(
+                index, existing_key, source_type, strength,
             )
             return
         # Case 2b / 3: both have no id (or matching id), or alias-expansion
@@ -423,6 +601,13 @@ def _upsert(
         _merge_into(
             index, existing_key, evidence, label, definition,
             source_type, raw_type, canonical_label=canonical_label,
+            alias_fired=alias_fired,
+            artifact_kind=artifact_kind, strength=strength,
+            promotion_reason=promotion_reason,
+            suppression_reason=suppression_reason, suppressed=suppressed,
+        )
+        _record_attestation_and_boost(
+            index, existing_key, source_type, strength,
         )
         return
 
@@ -432,6 +617,10 @@ def _upsert(
         raw_type=raw_type, source_type=source_type,
         eid=eid, evidence=evidence,
         canonical_label=canonical_label,
+        alias_fired=alias_fired,
+        artifact_kind=artifact_kind, strength=strength,
+        promotion_reason=promotion_reason,
+        suppression_reason=suppression_reason, suppressed=suppressed,
     )
     if eid:
         key = f"id:{eid}"
@@ -440,6 +629,27 @@ def _upsert(
         key = f"name:{norm}"
     index.by_key[key] = new
     index.by_name[norm] = key
+    _record_attestation_and_boost(index, key, source_type, strength)
+
+
+def _record_attestation_and_boost(
+    index: _CandidateIndex,
+    key: str,
+    source_type: str,
+    strength: str,
+) -> None:
+    """Append an attestation for *key* and recompute its strength via
+    :func:`_apply_corroboration_boost`.
+
+    Called at the end of every ``_upsert`` merge case so the candidate's
+    ``strength`` field always reflects the cross-source boost.
+    """
+    attestations = index.attestations.setdefault(key, [])
+    attestations.append((source_type, strength))
+    if key in index.by_key:
+        existing = index.by_key[key]
+        boosted = _apply_corroboration_boost(attestations)
+        index.by_key[key] = replace(existing, strength=boosted)
 
 
 def _new_candidate(
@@ -452,32 +662,45 @@ def _new_candidate(
     eid: str,
     evidence: EvidenceEntry,
     canonical_label: str = "",
+    alias_fired: bool = False,
+    artifact_kind: str = "entity",
+    strength: str = "medium",
+    promotion_reason: str = "",
+    suppression_reason: str | None = None,
+    suppressed: bool = False,
 ) -> CandidateConcept:
     """Construct a fresh :class:`CandidateConcept` for a never-seen-before
     normalised label.
 
-    ``label`` is the surface form the caller passed.
-    ``canonical_label`` is the alias-resolved form — when an
-    alias_map is in effect, this is the value the merge keyed on.
+    ``label`` is the original surface form the caller passed.
+    ``canonical_label`` is the alias-resolved / normalised form —
+    used as the merge key.
+    ``alias_fired`` indicates that an explicit alias_map entry fired
+    (as opposed to only singularisation/prefix-strip changing the label).
 
-    Round-1 reviewer finding pinned here: the candidate's primary
-    ``label`` is the *canonical* form (alias-resolved), not the
-    first surface form encountered. That makes the emitted label
-    order-independent — reversing source order with the same
-    alias_map and same evidence yields the same primary label
-    instead of flipping between synonym and canonical. The
-    original surface form is still preserved in ``aliases`` so
-    callers can locate the candidate via either spelling.
+    **AC1 label-preservation contract:**
+    The candidate's primary ``label`` is set to the alias-resolved
+    ``canonical_label`` ONLY when ``alias_fired`` is ``True`` — i.e.
+    when an explicit alias_map entry changed the surface form. This
+    preserves the original surface form for inputs where only
+    singularisation or prefix-strip ran (the common A+B-only case).
+    ``canonical_label`` (when it differs from ``label``) is always
+    tracked in ``aliases`` regardless.
+
+    The emitted label is therefore order-independent for alias-map
+    cases (the canonical form always wins), while respecting the
+    caller's original surface form for non-alias canonicalisation.
     """
     candidate_id = (
         f"cand_id_{eid}"
         if eid
         else f"cand_{norm.replace(' ', '_')}"
     )
-    # Prefer the canonical (alias-resolved) form for the primary
-    # label. Falls back to the surface ``label`` only when no
-    # canonical was supplied (callers that don't pass alias_map).
-    preferred_label = canonical_label if canonical_label else label
+    # Use the canonical (alias-resolved) form as the primary label ONLY
+    # when an alias_map entry explicitly fired. When canonical differs
+    # from label purely due to singularisation/prefix-strip, preserve
+    # the original surface label (AC1 backward-compat contract).
+    preferred_label = canonical_label if (canonical_label and alias_fired) else label
     initial_aliases = (
         sorted({label, canonical_label})
         if canonical_label and canonical_label != label
@@ -505,6 +728,11 @@ def _new_candidate(
         authoritative_evidence_count=1 if source_type == "A" else 0,
         provenance=[evidence],
         aliases=initial_aliases,
+        artifact_kind=artifact_kind,
+        strength=strength,
+        promotion_reason=promotion_reason,
+        suppression_reason=suppression_reason,
+        suppressed=suppressed,
     )
 
 
@@ -519,12 +747,38 @@ def _merge_into(
     *,
     promote_id: str = "",
     canonical_label: str = "",
+    alias_fired: bool = False,
+    artifact_kind: str = "entity",
+    strength: str = "medium",
+    promotion_reason: str = "",
+    suppression_reason: str | None = None,
+    suppressed: bool = False,
 ) -> None:
     """Merge incoming evidence into the candidate stored at ``key``.
 
     Both the original surface ``label`` and the alias-resolved
     ``canonical_label`` (when different) are added to the candidate's
     ``aliases`` list so the merge is observable from either spelling.
+
+    **AC1 label-preservation:** the existing candidate's surface ``label``
+    is updated to ``canonical_label`` ONLY when ``alias_fired`` is ``True``.
+    Singularisation/prefix-strip alone do NOT update the surface label of
+    an already-existing candidate (the original surface form is preserved).
+
+    New v1.1 fields are merged as follows:
+      - ``artifact_kind``: prefer non-default ("entity") value; if both
+        are non-default and differ, keep the existing value.
+      - ``strength``: take the max via :data:`_STRENGTH_RANK`.
+      - ``promotion_reason``: concatenate with ``"; "`` separator, skipping
+        empty values.
+      - ``suppression_reason``: prefer the non-None incoming value when the
+        existing is ``None``; otherwise keep existing.
+      - ``suppressed``: logical OR (suppressed if either side is suppressed).
+
+    Note: the caller's ``_record_attestation_and_boost`` will overwrite
+    ``strength`` with the corroboration-boosted value immediately after
+    this function returns, so the max-strength computation here is only
+    a fallback used if attestation tracking is somehow bypassed.
     """
     existing = index.by_key[key]
 
@@ -541,8 +795,37 @@ def _merge_into(
     if (not suggested_type or suggested_type == "Concept") and raw_type:
         suggested_type = raw_type
 
+    # Merge v1.1 fields.
+    merged_artifact_kind = (
+        artifact_kind
+        if existing.artifact_kind == "entity" and artifact_kind != "entity"
+        else existing.artifact_kind
+    )
+    merged_strength_rank = max(
+        _STRENGTH_RANK.get(existing.strength, 1),
+        _STRENGTH_RANK.get(strength, 1),
+    )
+    merged_strength = _RANK_TO_NAME.get(merged_strength_rank, "medium")
+    parts = [p for p in [existing.promotion_reason, promotion_reason] if p]
+    merged_promotion_reason = "; ".join(parts)
+    merged_suppression_reason = (
+        suppression_reason
+        if existing.suppression_reason is None and suppression_reason is not None
+        else existing.suppression_reason
+    )
+    merged_suppressed = existing.suppressed or suppressed
+
+    # Alias-map authoritative relabel on merge (spec): if this
+    # upsert's alias_map fired and produced a canonical_label
+    # different from the existing surface label, flip the label
+    # (the previous surface form survives in `aliases`).
+    new_label = existing.label
+    if alias_fired and canonical_label and canonical_label != existing.label:
+        new_label = canonical_label
+
     index.by_key[key] = replace(
         existing,
+        label=new_label,
         suggested_entity_type=suggested_type,
         summary_definition=merged_definition,
         source_presence=updated_presence,
@@ -552,6 +835,11 @@ def _merge_into(
         ),
         provenance=[*existing.provenance, evidence],
         aliases=merged_aliases,
+        artifact_kind=merged_artifact_kind,
+        strength=merged_strength,
+        promotion_reason=merged_promotion_reason,
+        suppression_reason=merged_suppression_reason,
+        suppressed=merged_suppressed,
     )
 
 
@@ -568,6 +856,109 @@ def _resolve_alias(label: str, alias_map: dict[str, str]) -> str:
     if not alias_map:
         return label
     return alias_map.get(label.strip().lower(), label)
+
+
+def _resolve_alias_with_normalisation(
+    label: str, alias_map: dict[str, str],
+) -> tuple[str, bool]:
+    """Apply alias_map first (case-insensitive lookup); then strip
+    table-name prefixes and singularize plurals before normalisation.
+
+    Returns a ``(canonical, alias_fired)`` tuple where:
+
+    - ``canonical`` is the alias-resolved form if an alias_map entry
+      matched, otherwise the prefix-stripped + singularized label.
+    - ``alias_fired`` is ``True`` only when an alias_map entry matched
+      (NOT when only singularisation/prefix-strip changed the label).
+
+    The downstream normalisation (case-fold etc.) happens in
+    :func:`normalize_label` as before — this function only does the
+    semantic-mapping work that needs to happen *before* normalisation.
+
+    **AC1 label preservation:** callers that use this function to set
+    the primary surface ``label`` on a candidate must use the returned
+    ``canonical`` for the surface label ONLY when ``alias_fired`` is
+    ``True``. When ``alias_fired`` is ``False``, the singularisation
+    and prefix-strip affect only the merge key (``normalized_label``)
+    and the caller should keep the original surface form as the primary
+    ``label``.
+    """
+    # Alias map: exact match first, then case-insensitive.
+    label_lower = label.lower()
+    if label in alias_map:
+        return alias_map[label], True
+    if label_lower in alias_map:
+        return alias_map[label_lower], True
+    # Case-insensitive search through alias_map keys.
+    for k, v in alias_map.items():
+        if k.lower() == label_lower:
+            return v, True
+
+    work = label
+    lower = work.lower()
+    for prefix in ("tbl_", "dim_", "fact_"):
+        if lower.startswith(prefix):
+            work = work[len(prefix):]
+            break
+
+    # English singularization via inflect; safe-fallback to chop trailing 's'.
+    # Guard: only accept the singularized form when the round-trip
+    # plural(singular) matches the original (case-insensitive).  This
+    # rejects inflect false-positives such as "Address" → "Addres".
+    try:
+        import inflect
+        engine = inflect.engine()
+        singular = engine.singular_noun(work)
+        if singular and isinstance(singular, str):
+            # Round-trip check: plural of the candidate singular should
+            # equal the original word (case-insensitive).
+            round_trip = engine.plural(singular)
+            if isinstance(round_trip, str) and round_trip.lower() == work.lower():
+                work = singular
+    except ImportError:
+        if work.lower().endswith("s") and len(work) > 1:
+            work = work[:-1]
+
+    # alias_fired is False: only singularisation/prefix-strip ran.
+    return work, False
+
+
+_STRENGTH_RANK: dict[str, int] = {"weak": 0, "medium": 1, "strong": 2}
+_RANK_TO_NAME: dict[int, str] = {v: k for k, v in _STRENGTH_RANK.items()}
+
+
+def _apply_corroboration_boost(
+    attestations: list[tuple[str, str]],
+) -> str:
+    """Given a list of (source_type, strength) attestations, return
+    the boosted strength tier.
+
+    Rules:
+      - max strength across all attestations
+      - +1 tier if at least 2 distinct axes attest
+        (semantic axis = A or B; structural axis = C; executable axis = D)
+      - capped at 'strong'
+    """
+    if not attestations:
+        return "medium"
+
+    max_rank = max(
+        _STRENGTH_RANK.get(s, 1) for _, s in attestations
+    )
+
+    axes_seen: set[str] = set()
+    for src, _ in attestations:
+        if src in ("A", "B"):
+            axes_seen.add("semantic")
+        elif src == "C":
+            axes_seen.add("structural")
+        elif src == "D":
+            axes_seen.add("executable")
+
+    if len(axes_seen) >= 2:
+        max_rank = min(max_rank + 1, 2)
+
+    return _RANK_TO_NAME.get(max_rank, "medium")
 
 
 def _candidate_id_of(candidate: CandidateConcept) -> str:
@@ -593,18 +984,19 @@ def _resolve_endpoint_to_candidate_id(
     Endpoints typically come from Source A's free-form text where
     the LLM uses element_name strings, not deterministic ids — so
     resolution is name-based. The lookup applies the same
-    alias-expansion pass that concept ingestion uses (see
-    :func:`_upsert`): the endpoint label is resolved through
-    ``alias_map`` *before* normalisation. That way a relationship
-    endpoint spelled with a synonym surface form (e.g. ``"car"``)
-    still resolves to the candidate that was merged under the
-    canonical label (e.g. ``"Automobile"``).
+    canonicalisation pass that concept ingestion uses (see
+    :func:`_upsert`) via :func:`_resolve_alias_with_normalisation`:
+    alias_map lookup (case-insensitive), then table-prefix stripping
+    (``tbl_``/``dim_``/``fact_``), then English singularization with
+    an `inflect` round-trip guard. So a relationship endpoint
+    spelled as a synonym (``"car"``), a plural (``"customers"``),
+    or a prefixed table name (``"tbl_customers"``) all resolve to
+    the candidate merged under the canonical label.
 
-    Without an alias_map, :func:`_resolve_alias` is the identity
-    function and behaviour reduces to the pre-alias baseline:
-    direct normalised-label lookup only.
+    With an empty alias_map the alias-lookup step is a no-op; the
+    prefix-strip + singularize steps still apply unconditionally.
     """
-    canonical_label = _resolve_alias(endpoint_label, alias_map or {})
+    canonical_label, _alias_fired = _resolve_alias_with_normalisation(endpoint_label, alias_map or {})
     norm = normalize_label(canonical_label)
     if not norm:
         return None

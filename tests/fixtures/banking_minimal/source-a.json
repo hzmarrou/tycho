@@ -1,0 +1,7 @@
+{
+  "concepts": [
+    {"name": "Customer", "definition": "A person doing business with the bank."},
+    {"name": "Loan", "definition": "Money lent that must be repaid."}
+  ],
+  "relationships": []
+}

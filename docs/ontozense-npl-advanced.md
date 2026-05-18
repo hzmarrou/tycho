@@ -564,7 +564,151 @@ anchors, corroboration, and profile coverage.
 
 ---
 
-## Part E — Side-by-side comparison
+## Part E — Using Source C and Source D (v1.1)
+
+As of v1.1, passing `--source-c` (SQL DDL) and `--source-d` (Python files) to
+`survey` makes those sources active participants in the candidate graph rather than
+inert placeholders. Note: `discover` accepts `--source-c` / `--source-d` on the CLI
+for forward-compatibility, but it retains its v1.0 pass-through behaviour — those
+arguments do not affect candidate generation in `discover`. This section shows how to
+configure them and how to read the resulting `audit` block in `candidate-graph.json`.
+
+### E.1 Survey invocation with all four sources
+
+```bash
+ontozense survey \
+  --source-a domain/docs/ \
+  --source-b domain/governance.json \
+  --source-c domain/schemas/core.sql \
+  --source-d domain/code/ \
+  --domain-dir domain/
+```
+
+Each source contributes different artifact kinds:
+
+| Source | Input | Candidate kinds |
+|---|---|---|
+| A | `.md` / `.txt` / `.pdf` documents | entities, relationships, rules |
+| B | governance `.json` | authoritative entities, definitions |
+| C | `.sql` DDL files | entities (tables), attributes (columns), relationships (FKs), vocabulary (lookup tables) |
+| D | `.py` files | entities (classes/models), attributes (fields), vocabulary (Enums), rules (validators), behaviours (methods) |
+
+### E.2 Configuring Source C with `source-c.yaml`
+
+Place this file at `domain/source-c.yaml` (i.e. in the domain workspace folder
+you pass to `--domain-dir`):
+
+```yaml
+source_c:
+  exclude_tables:
+    - legacy_*
+  include_tables:
+    - customer_audit   # keep this one despite default suppression
+  force_vocabulary:
+    - loan_status      # treat as code-table even though naming doesn't match heuristic
+```
+
+- `exclude_tables` — glob patterns matched against table names. Matching tables and
+  all their columns are always suppressed (no override).
+- `include_tables` — glob patterns; matching tables are exempted from the default
+  `*_audit` / `*_history` / `tmp_*` etc. suppressions. Does NOT exempt from
+  `exclude_tables`.
+- `force_vocabulary` — promotes a table to a vocabulary candidate regardless of
+  whether the naming heuristic would have flagged it.
+- `force_entity` — the inverse: demotes a table that the heuristic would have
+  classified as a code-table back to a regular entity.
+
+### E.3 Configuring Source D with `source-d.yaml`
+
+Place this file at `domain/source-d.yaml`:
+
+```yaml
+source_d:
+  exclude_paths:
+    - apps/legacy_engine/**
+  exclude_classes:
+    - "*Factory"
+    - "*Mixin"
+  include_classes:
+    - LoanRequest      # force-promote DTO suffix back to canonical entity
+```
+
+- `exclude_paths` — glob patterns matched against file paths within the directory
+  tree. Files matching any pattern are always suppressed (no override).
+- `exclude_classes` — class-name patterns (supports `*` wildcards). Matching
+  classes are always suppressed (no override).
+- `include_classes` — glob patterns; rescue classes from the DTO-suffix default
+  (e.g. `LoanRequest` stays `pydantic_model` instead of being relabelled
+  `dto_candidate`). Does NOT rescue from `exclude_classes`.
+
+### E.4 Reading the `audit` block
+
+After `survey` runs with Source C or D active, `candidate-graph.json` contains an
+`audit` array alongside the usual `concepts` and `relationships`:
+
+```json
+{
+  "concepts": [...],
+  "relationships": [...],
+  "audit": [
+    {
+      "label": "customer_audit",
+      "definition": "",
+      "source_type": "C",
+      "source_artifact": "schemas/core.sql",
+      "raw_type": "table",
+      "eid": "",
+      "artifact_kind": "entity",
+      "strength": "strong",
+      "promotion_reason": "Source C: table 'customer_audit' (deterministic schema attestation).",
+      "suppression_reason": "Default Source C suppression: table name matches pattern '*_audit'.",
+      "suppressed": true
+    }
+  ]
+}
+```
+
+Each entry carries the full candidate payload that a non-suppressed candidate would
+have, plus the suppression fields:
+
+- `suppressed: true` — marks the entry as filtered out of `concepts` / `relationships`.
+- `suppression_reason` — human-readable explanation citing the pattern or rule that
+  triggered suppression.
+- `promotion_reason` — still populated; documents the classification decision that
+  the suppression overrode (useful for understanding why the item was a candidate at
+  all before being filtered).
+- `label`, `source_type`, `source_artifact`, `raw_type`, `eid`, `artifact_kind`,
+  `strength` — the same fields the entry would have carried if it had been promoted.
+
+### E.5 Quick reference — default suppression patterns
+
+**Source C (SQL DDL):**
+
+Tables suppressed by default:
+- `*_audit`, `*_history`, `*_log`, `*_journal` — operational tracking tables
+- `tmp_*`, `bkp_*`, `bak_*` — temporary and backup tables
+
+Columns suppressed by default:
+- `created_at`, `updated_at`
+- `*_at`, `*_ts`, `*_timestamp` — unless the prefix is domain-bearing (e.g.
+  `birth_date`, `expiry_date` are kept)
+- `etag`, `row_version` — optimistic-concurrency bookkeeping columns
+
+**Source D (Python code):**
+
+Paths suppressed by default:
+- `tests/**`, `mocks/**`, `fixtures/**`, `migrations/**`
+- Files containing `# DO NOT EDIT` or `# AUTOGENERATED` header markers
+
+Classes suppressed by default:
+- `_*` — private classes (leading underscore)
+
+All default suppressions can be overridden via the domain YAML config files
+described in Sections E.2 and E.3.
+
+---
+
+## Part F — Side-by-side comparison
 
 Open both profiles side by side for a final visual check:
 
