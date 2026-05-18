@@ -82,9 +82,15 @@ def test_loan_status_classified_as_entity():
     To classify it as vocabulary, a per-domain config with
     force_vocabulary: ['loan_status'] would be required.
 
-    Note: inflect singularises 'loan_status' to 'loan_statu' because
-    plural('loan_statu') != 'loan_status'. The round-trip guard rejects this,
-    so the label and normalised form both end up as 'loan_statu'.
+    KNOWN LIMITATION around normalization (tracked in a follow-up):
+    inflect's singular_noun() on the compound 'loan_status' returns
+    'loan_statu'.  The Task 14 round-trip guard does NOT reject this
+    case — the guard catches simple truncations like 'Address -> Addres'
+    but misses underscore-compound nouns such as 'loan_status -> loan_statu'.
+    The mangled form therefore persists in normalized_label and label.
+    The test tolerates both spellings deliberately; this is a known
+    limitation of the v1.1 normaliser.  Future work: extend the guard
+    or add an alternative singularization path for compound-noun cases.
     """
     source_c = {"files": [str(FIXTURE / "source-c.sql")]}
     graph = build_candidate_graph(source_c=source_c)
@@ -149,11 +155,15 @@ def test_customer_status_enum_classified_as_vocabulary():
     """The CustomerStatus(Enum) class in source-d/customer.py emits
     as a vocabulary candidate at MEDIUM strength.
 
-    Note: inflect singularises 'CustomerStatus' to 'CustomerStatu'
-    because plural('CustomerStatu') != 'CustomerStatus'. The round-trip
-    guard rejects this — so the primary label ends up as 'CustomerStatu'.
-    The test locates the candidate by searching for the 'CustomerStat'
-    prefix (matching either spelling) and verifies kind and strength.
+    KNOWN LIMITATION around normalization (tracked in a follow-up):
+    inflect's singular_noun() on 'CustomerStatus' returns 'CustomerStatu'.
+    The Task 14 round-trip guard does NOT reject this case — the guard
+    catches simple truncations like 'Address -> Addres' but misses
+    camel-case '<word>Status' compounds.  The mangled form therefore
+    persists as the primary label.  The test tolerates both spellings
+    deliberately; this is a known limitation of the v1.1 normaliser.
+    Future work: extend the guard or add an alternative singularization
+    path for compound-noun cases.
     """
     source_d = {
         "files": [
@@ -163,9 +173,9 @@ def test_customer_status_enum_classified_as_vocabulary():
     }
     graph = build_candidate_graph(source_d=source_d)
 
-    # inflect singularises 'CustomerStatus' -> 'CustomerStatu' (round-trip
-    # guard rejects it, so the stored label is whatever _resolve_alias_with_
-    # normalisation returns). Accept either spelling.
+    # inflect singularises 'CustomerStatus' -> 'CustomerStatu'; the round-trip
+    # guard does NOT reject this case, so the mangled form persists as the
+    # stored label (known limitation — see docstring). Accept either spelling.
     vocabulary_concepts = [c for c in graph.concepts if c.artifact_kind == "vocabulary"]
     matching = [
         c for c in vocabulary_concepts
