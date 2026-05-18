@@ -64,8 +64,10 @@ def test_pydantic_basemodel_is_entity(tmp_path):
     entities = [c for c in cands if c.artifact_kind == ArtifactKind.ENTITY]
     by_label = {c.label: c for c in entities}
     assert "CustomerModel" in by_label
-    # DTO flag (Pydantic *Model -> raw_type=dto_candidate) lands in
-    # Task 13. For Task 10, just confirm the class surfaces as entity.
+    # Pin the raw_type per the four-shape classifier contract. DTO flag
+    # (raw_type=dto_candidate) lands in Task 13; Task 10 scaffold emits
+    # pydantic_model.
+    assert by_label["CustomerModel"].raw_type == "pydantic_model"
 
 
 def test_no_files_yields_nothing():
@@ -96,3 +98,22 @@ def test_unparseable_python_skipped(tmp_path):
     f = _write(tmp_path, "broken.py", "def : not valid python at all")
     cands = list(SourceDIngester().ingest({"files": [str(f)]}))
     assert cands == []
+
+
+def test_sqlalchemy_model_is_entity(tmp_path):
+    """A class inheriting from SQLAlchemy's Base (or a recognised
+    entity base like Document) emits as entity with
+    raw_type='sqlalchemy_model'."""
+    src = """
+        class Loan(Base):
+            id: int
+            amount: float
+            term_months: int
+    """
+    f = _write(tmp_path, "models.py", src)
+    cands = list(SourceDIngester().ingest({"files": [str(f)]}))
+    entities = [c for c in cands if c.artifact_kind == ArtifactKind.ENTITY]
+    by_label = {c.label: c for c in entities}
+    assert "Loan" in by_label
+    assert by_label["Loan"].raw_type == "sqlalchemy_model"
+    assert by_label["Loan"].strength == Strength.STRONG
