@@ -803,16 +803,17 @@ def _resolve_endpoint_to_candidate_id(
     Endpoints typically come from Source A's free-form text where
     the LLM uses element_name strings, not deterministic ids — so
     resolution is name-based. The lookup applies the same
-    alias-expansion pass that concept ingestion uses (see
-    :func:`_upsert`): the endpoint label is resolved through
-    ``alias_map`` *before* normalisation. That way a relationship
-    endpoint spelled with a synonym surface form (e.g. ``"car"``)
-    still resolves to the candidate that was merged under the
-    canonical label (e.g. ``"Automobile"``).
+    canonicalisation pass that concept ingestion uses (see
+    :func:`_upsert`) via :func:`_resolve_alias_with_normalisation`:
+    alias_map lookup (case-insensitive), then table-prefix stripping
+    (``tbl_``/``dim_``/``fact_``), then English singularization with
+    an `inflect` round-trip guard. So a relationship endpoint
+    spelled as a synonym (``"car"``), a plural (``"customers"``),
+    or a prefixed table name (``"tbl_customers"``) all resolve to
+    the candidate merged under the canonical label.
 
-    Without an alias_map, :func:`_resolve_alias` is the identity
-    function and behaviour reduces to the pre-alias baseline:
-    direct normalised-label lookup only.
+    With an empty alias_map the alias-lookup step is a no-op; the
+    prefix-strip + singularize steps still apply unconditionally.
     """
     canonical_label = _resolve_alias_with_normalisation(endpoint_label, alias_map or {})
     norm = normalize_label(canonical_label)
