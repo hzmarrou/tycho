@@ -7,8 +7,11 @@ See docs/superpowers/specs/2026-05-19-source-d-v1.2-executable-rule-extraction-d
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from ontozense.core.ingest.base import IntermediateCandidate
 
@@ -36,7 +39,11 @@ def run(path: Path, config: dict | None = None) -> Iterable[IntermediateCandidat
     config = config or {}
     try:
         pm = parse_module(path)
-    except SyntaxError:
+    except (SyntaxError, UnicodeDecodeError) as exc:
+        # Match v1.1 SourceDIngester tolerance: log and skip on any
+        # parse/decode failure rather than abort the whole batch. The
+        # `parse_module` contract leaves error policy to the caller.
+        logger.warning("Source D: skipping %s (%s)", path, exc)
         return
     families = select_families(pm)
     if config.get("rule_extractors"):
