@@ -36,3 +36,28 @@ def test_module_with_class_and_pandas_selects_both(tmp_path):
     pm = parse_module(f)
     fams = select_families(pm)
     assert set(fams) >= {"model", "pipeline", "procedural"}
+
+
+def test_sql_string_literal_selects_pipeline(tmp_path):
+    """A module with embedded SQL but no pandas-like import must
+    still trigger the pipeline family per spec §6.2."""
+    f = tmp_path / "sql_only.py"
+    f.write_text(
+        "def load_loans(con):\n"
+        "    return con.execute('SELECT * FROM loan WHERE amount > 0')\n"
+    )
+    pm = parse_module(f)
+    fams = select_families(pm)
+    assert "pipeline" in fams
+
+
+def test_non_sql_string_does_not_trigger_pipeline(tmp_path):
+    """Plain string literals must not false-positive into pipeline."""
+    f = tmp_path / "plain.py"
+    f.write_text(
+        "def greet():\n"
+        "    return 'hello world'\n"
+    )
+    pm = parse_module(f)
+    fams = select_families(pm)
+    assert "pipeline" not in fams
