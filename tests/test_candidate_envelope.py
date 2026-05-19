@@ -154,13 +154,20 @@ def test_rule_payloads_with_same_canonical_label_but_different_kind_do_not_colli
 
 def test_rule_store_key_is_collision_safe_across_colons_in_components():
     """Two structurally distinct rule tuples must never produce the
-    same store key, even when components contain ':' characters."""
+    same store key, even when components contain ':' characters.
+
+    The naive ``":".join(str(p) for p in ...)`` collides for tuples
+    where a separator floats across component boundaries: ``("a:b", "c")``
+    and ``("a", "b:c")`` both join to ``"a:b:c"`` but are distinct
+    tuples. ``repr(...)`` distinguishes them.
+    """
     from ontozense.core.candidate_graph import _rule_store_key
 
-    a = ("validation", "loan", "amount", "gt", 0, None)
-    b = ("validation", "loan:amount", "gt:0", "", "", None)
-    # Both have the same naive ':'.join(...) representation but are
-    # structurally distinct. Their store keys must differ.
+    a = ("a:b", "c")
+    b = ("a", "b:c")
+    # Sanity-check the naive collision the fix protects against:
+    assert ":".join(str(p) for p in a) == ":".join(str(p) for p in b)
+    # The fix: structured-tuple repr distinguishes them.
     assert _rule_store_key(a) != _rule_store_key(b)
 
 
