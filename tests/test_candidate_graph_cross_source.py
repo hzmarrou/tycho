@@ -374,3 +374,54 @@ def test_alias_map_relabels_existing_candidate_on_merge():
 
     # Original surface forms preserved in aliases.
     assert "customers" in c.aliases or "client" in c.aliases
+
+
+def test_normalisation_keeps_compound_us_suffix_words():
+    """v1.1.1 follow-up #94: inflect mangles 'loan_status' to
+    'loan_statu' and 'CustomerStatus' to 'CustomerStatu'. The
+    round-trip guard didn't catch these (the s->s round-trip is
+    reversible). Forward suffix-denylist for 'us'/'ss'/'is'
+    closes the gap."""
+    from ontozense.core.candidate_graph import _resolve_alias_with_normalisation
+
+    # Underscore-compound -us suffix
+    canon, fired = _resolve_alias_with_normalisation("loan_status", {})
+    assert canon == "loan_status", f"got {canon!r}"
+    assert fired is False
+
+    # Camel-case <word>Status
+    canon, fired = _resolve_alias_with_normalisation("CustomerStatus", {})
+    assert canon == "CustomerStatus", f"got {canon!r}"
+    assert fired is False
+
+    # -ss suffix (was already guarded by round-trip; pin it explicitly)
+    canon, fired = _resolve_alias_with_normalisation("Address", {})
+    assert canon == "Address", f"got {canon!r}"
+    assert fired is False
+
+    # -is suffix (analysis, basis, …)
+    canon, fired = _resolve_alias_with_normalisation("analysis", {})
+    assert canon == "analysis", f"got {canon!r}"
+    assert fired is False
+
+
+def test_normalisation_still_singularises_clean_plurals():
+    """The denylist must NOT regress clean plural cases."""
+    from ontozense.core.candidate_graph import _resolve_alias_with_normalisation
+
+    canon, fired = _resolve_alias_with_normalisation("customers", {})
+    assert canon == "customer"
+    assert fired is False
+
+    canon, fired = _resolve_alias_with_normalisation("countries", {})
+    assert canon == "country"
+
+    canon, fired = _resolve_alias_with_normalisation("addresses", {})
+    assert canon == "address"
+
+    canon, fired = _resolve_alias_with_normalisation("orders", {})
+    assert canon == "order"
+
+    # Singular forms already correct — pass through unchanged.
+    canon, fired = _resolve_alias_with_normalisation("customer", {})
+    assert canon == "customer"

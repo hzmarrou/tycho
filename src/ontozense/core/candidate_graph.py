@@ -901,23 +901,35 @@ def _resolve_alias_with_normalisation(
             work = work[len(prefix):]
             break
 
-    # English singularization via inflect; safe-fallback to chop trailing 's'.
-    # Guard: only accept the singularized form when the round-trip
-    # plural(singular) matches the original (case-insensitive).  This
-    # rejects inflect false-positives such as "Address" → "Addres".
-    try:
-        import inflect
-        engine = inflect.engine()
-        singular = engine.singular_noun(work)
-        if singular and isinstance(singular, str):
-            # Round-trip check: plural of the candidate singular should
-            # equal the original word (case-insensitive).
-            round_trip = engine.plural(singular)
-            if isinstance(round_trip, str) and round_trip.lower() == work.lower():
-                work = singular
-    except ImportError:
-        if work.lower().endswith("s") and len(work) > 1:
-            work = work[:-1]
+    # Forward denylist: words whose lowercased form ends in -us / -ss /
+    # -is are almost never plurals (status, address, analysis, ...). The
+    # inflect round-trip guard happens to pass these because the s->s
+    # add/remove is reversible (e.g. plural('loan_statu') == 'loan_status'
+    # round-trips to itself), so the guard alone leaves a mangled
+    # singular. Skip singularisation entirely for these suffixes.
+    work_lower = work.lower()
+    NON_PLURAL_SUFFIXES = ("us", "ss", "is")
+    if any(work_lower.endswith(suf) for suf in NON_PLURAL_SUFFIXES):
+        # Skip inflect; keep `work` as-is.
+        pass
+    else:
+        # English singularization via inflect; safe-fallback to chop trailing 's'.
+        # Guard: only accept the singularized form when the round-trip
+        # plural(singular) matches the original (case-insensitive).  This
+        # rejects inflect false-positives such as "Address" → "Addres".
+        try:
+            import inflect
+            engine = inflect.engine()
+            singular = engine.singular_noun(work)
+            if singular and isinstance(singular, str):
+                # Round-trip check: plural of the candidate singular should
+                # equal the original word (case-insensitive).
+                round_trip = engine.plural(singular)
+                if isinstance(round_trip, str) and round_trip.lower() == work.lower():
+                    work = singular
+        except ImportError:
+            if work.lower().endswith("s") and len(work) > 1:
+                work = work[:-1]
 
     # alias_fired is False: only singularisation/prefix-strip ran.
     return work, False
