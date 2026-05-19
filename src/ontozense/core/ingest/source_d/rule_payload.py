@@ -32,6 +32,8 @@ ALLOWED_PREDICATES = frozenset({
 
 ALLOWED_NORMALIZATION_STATUS = frozenset({"deterministic", "llm_rephrased"})
 
+_RULE_KIND_VALUES: frozenset[str] = frozenset(k.value for k in RuleKind)
+
 REQUIRED_FIELDS = (
     "rule_kind", "subject_entity", "predicate", "object_value",
     "expression", "evidence_span", "normalization_status",
@@ -43,14 +45,14 @@ def validate_rule_payload(p: dict) -> None:
     for f in REQUIRED_FIELDS:
         if f not in p:
             raise ValueError(f"rule_payload missing required field: {f}")
-    if p["rule_kind"] not in {k.value for k in RuleKind}:
+    if p["rule_kind"] not in _RULE_KIND_VALUES:
         raise ValueError(f"rule_kind {p['rule_kind']!r} not in closed enum")
     if p["predicate"] not in ALLOWED_PREDICATES:
         raise ValueError(f"predicate {p['predicate']!r} not allowed")
     if p["normalization_status"] not in ALLOWED_NORMALIZATION_STATUS:
         raise ValueError(f"normalization_status {p['normalization_status']!r} not allowed")
     ev = p["evidence_span"]
-    if not isinstance(ev, dict) or "file" not in ev or "start_line" not in ev:
+    if not isinstance(ev, dict) or not {"file", "start_line", "end_line", "snippet"} <= ev.keys():
         raise ValueError("evidence_span must be {file, start_line, end_line, snippet}")
 
 

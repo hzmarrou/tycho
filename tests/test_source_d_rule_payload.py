@@ -78,3 +78,17 @@ def test_merge_key_differs_when_predicate_differs():
          "subject_attribute": "amount", "predicate": "gte", "object_value": 0,
          "condition": None}
     assert merge_key(a) != merge_key(b)
+
+
+def test_validate_rejects_evidence_span_missing_end_line():
+    with pytest.raises(ValueError, match="evidence_span"):
+        validate_rule_payload({
+            "rule_kind": "validation",
+            "subject_entity": "Loan",
+            "subject_attribute": "amount",
+            "predicate": "gt",
+            "object_value": 0,
+            "expression": "amount > 0",
+            "evidence_span": {"file": "loans.py", "start_line": 1},  # missing end_line + snippet
+            "normalization_status": "deterministic",
+        })
