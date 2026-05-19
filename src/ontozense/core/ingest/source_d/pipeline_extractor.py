@@ -38,6 +38,56 @@ def _span(node: ast.AST, file: str, source: str) -> EvidenceSpan:
     return EvidenceSpan(file=file, start_line=start, end_line=end, snippet=snippet[:200])
 
 
+def _is_dataframe_annotation(node: ast.expr | None) -> bool:
+    """Recognise `pd.DataFrame`, `pandas.DataFrame`, or bare `DataFrame`
+    as a parameter annotation."""
+    if node is None:
+        return False
+    if isinstance(node, ast.Attribute) and node.attr == "DataFrame":
+        return True
+    if isinstance(node, ast.Name) and node.id == "DataFrame":
+        return True
+    return False
+
+
+def _collect_df_names(pm: ParsedModule) -> set[str]:
+    """Build the set of identifiers in the module that are known
+    DataFrame-typed via parameter annotations. Falls back to {"df"}
+    if no annotations are present so the conventional naming still
+    works for unannotated pandas code.
+
+    This is a conservative scope guard: the pipeline extractors only
+    emit facts when the subscript receiver is in this set, preventing
+    `config["x"] = "y"` style dict assignments from being treated as
+    DataFrame derived columns.
+    """
+    names: set[str] = set()
+    for node in ast.walk(pm.tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for arg in node.args.args:
+            if _is_dataframe_annotation(arg.annotation):
+                names.add(arg.arg)
+    if not names:
+        names.add("df")
+    return names
+
+
+def _strict_df_column(node: ast.expr, df_names: set[str]) -> str | None:
+    """Return the column name for ``<receiver>["<col>"]`` only when
+    ``<receiver>`` is an ``ast.Name`` in ``df_names``. Returns None for
+    any other shape, including subscripts on non-DataFrame receivers
+    like ``config["x"]``."""
+    col = _df_subscript_column(node)
+    if col is None:
+        return None
+    if not (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)):
+        return None
+    if node.value.id not in df_names:
+        return None
+    return col
+
+
 def _df_subscript_column(node: ast.expr) -> str | None:
     """Return column name for `<df>["<col>"]` shaped as `ast.Subscript`
     with a string-literal slice. Returns None for non-string slices,
@@ -47,12 +97,15 @@ def _df_subscript_column(node: ast.expr) -> str | None:
     return None
 
 
-def _extract_boolean_mask(node: ast.Subscript, source: str, file: str) -> Iterable[RuleFact]:
+def _extract_boolean_mask(node: ast.Subscript, df_names: set[str], source: str, file: str) -> Iterable[RuleFact]:
     """df[df["col"] <op> <literal>] -> validation rule on <col>."""
+    # Outer receiver must be a DataFrame name (e.g. df[...]).
+    if not (isinstance(node.value, ast.Name) and node.value.id in df_names):
+        return
     sl = node.slice
     if not isinstance(sl, ast.Compare) or len(sl.ops) != 1:
         return
-    col = _df_subscript_column(sl.left)
+    col = _strict_df_column(sl.left, df_names)
     if col is None:
         return
     op = type(sl.ops[0])
@@ -75,12 +128,12 @@ def _extract_boolean_mask(node: ast.Subscript, source: str, file: str) -> Iterab
     )
 
 
-def _extract_derived_column(stmt: ast.Assign, source: str, file: str) -> Iterable[object]:
+def _extract_derived_column(stmt: ast.Assign, df_names: set[str], source: str, file: str) -> Iterable[object]:
     """df["new"] = <expr> -> AttributeFact + derivation rule."""
     if len(stmt.targets) != 1:
         return
     tgt = stmt.targets[0]
-    col = _df_subscript_column(tgt)
+    col = _strict_df_column(tgt, df_names)
     if col is None:
         return
     yield AttributeFact(
@@ -90,7 +143,7 @@ def _extract_derived_column(stmt: ast.Assign, source: str, file: str) -> Iterabl
     )
     deps: list[str] = []
     for node in ast.walk(stmt.value):
-        c = _df_subscript_column(node)
+        c = _strict_df_column(node, df_names)
         if c:
             deps.append(c)
     yield RuleFact(
@@ -184,11 +237,12 @@ def _extract_embedded_sql(node: ast.Constant, source: str, file: str) -> Iterabl
 
 def extract_pipeline(pm: ParsedModule) -> Iterable[object]:
     file = str(pm.path)
+    df_names = _collect_df_names(pm)
     for node in ast.walk(pm.tree):
         if isinstance(node, ast.Subscript):
-            yield from _extract_boolean_mask(node, pm.source, file)
+            yield from _extract_boolean_mask(node, df_names, pm.source, file)
         elif isinstance(node, ast.Assign):
-            yield from _extract_derived_column(node, pm.source, file)
+            yield from _extract_derived_column(node, df_names, pm.source, file)
         elif isinstance(node, ast.Call):
             yield from _extract_dropna(node, pm.source, file)
         elif isinstance(node, ast.Constant):

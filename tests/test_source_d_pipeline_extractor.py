@@ -200,3 +200,58 @@ def test_pipeline_sql_with_multiple_where_predicates_emits_one_rule_per_predicat
     predicates = {(r.predicate, r.object_value) for r in rules}
     assert ("gt", 0) in predicates, f"expected amount > 0, got {predicates}"
     assert ("lt", 1000000) in predicates, f"expected amount < 1000000, got {predicates}"
+
+
+def test_pipeline_non_dataframe_keyed_assignment_does_not_trigger_derived_column(tmp_path):
+    """A keyed assignment like config["x"] = "y" inside a pandas-bearing
+    module must NOT be treated as a DataFrame derived column."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "import pandas as pd\n"
+        "config = {}\n"
+        "def setup(df: pd.DataFrame):\n"
+        "    config['risk_band'] = 'high'\n"
+        "    return df\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_pipeline(pm))
+    attrs = [f for f in facts if isinstance(f, AttributeFact) and f.name == "risk_band"]
+    rules = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "derivation" and r.subject_attribute == "risk_band"]
+    assert attrs == [], f"non-DataFrame keyed assign emitted AttributeFact: {attrs}"
+    assert rules == [], f"non-DataFrame keyed assign emitted derivation rule: {rules}"
+
+
+def test_pipeline_unannotated_df_convention_still_works(tmp_path):
+    """When NO function has a pd.DataFrame annotation, the extractor
+    falls back to the `df` name convention so bare pandas code still
+    triggers extraction."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "import pandas as pd\n"
+        "def clean(df):\n"
+        "    df['risk_band'] = df['credit_score']\n"
+        "    return df\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_pipeline(pm))
+    attrs = [f for f in facts if isinstance(f, AttributeFact) and f.name == "risk_band"]
+    assert attrs, "expected risk_band AttributeFact under the df convention"
+
+
+def test_pipeline_annotated_dataframe_param_is_tracked(tmp_path):
+    """A function parameter annotated `pd.DataFrame` or bare `DataFrame`
+    becomes a tracked DataFrame name."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "import pandas as pd\n"
+        "from pandas import DataFrame\n"
+        "def step_a(frame: DataFrame):\n"
+        "    frame['new'] = 0\n"
+        "def step_b(my_df: pd.DataFrame):\n"
+        "    my_df['other'] = 1\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_pipeline(pm))
+    attr_names = {f.name for f in facts if isinstance(f, AttributeFact)}
+    assert "new" in attr_names, "step_a's frame should be tracked"
+    assert "other" in attr_names, "step_b's my_df should be tracked"
