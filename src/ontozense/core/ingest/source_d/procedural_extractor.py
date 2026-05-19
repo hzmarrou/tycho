@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Iterable
-from fnmatch import fnmatch
+
+from ontozense.core.ingest.filters import glob_match
 
 from .ir import EvidenceSpan, RuleFact
 from .parse import ParsedModule
@@ -126,8 +127,9 @@ def extract_procedural(pm: ParsedModule, config: dict | None = None) -> Iterable
     force = list(config.get("force_rule", []) or [])
     file = str(pm.path)
     for name, func in pm.functions.items():
-        # Skip excluded functions entirely.
-        if any(fnmatch(name, pat) for pat in exclude):
+        # Skip excluded functions entirely (consistent case-insensitive
+        # glob behavior with other Source D config keys).
+        if exclude and glob_match(name, exclude):
             continue
         yielded_any = False
         for r in _extract_function_rules(func, pm.source, file):
@@ -136,7 +138,7 @@ def extract_procedural(pm: ParsedModule, config: dict | None = None) -> Iterable
         # Weak-rule fallback: validate_*/check_*/assert_* OR force_rule glob.
         if not yielded_any and (
             name.startswith(_VALIDATE_PREFIXES)
-            or any(fnmatch(name, pat) for pat in force)
+            or (force and glob_match(name, force))
         ):
             yield RuleFact(
                 rule_kind="validation",
