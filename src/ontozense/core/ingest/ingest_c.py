@@ -29,6 +29,61 @@ from .source_d.rule_payload import canonical_rule_label
 logger = logging.getLogger(__name__)
 
 
+_SIMPLE_OP_MAP: dict[type, str] = {
+    exp.GT: "gt",
+    exp.GTE: "gte",
+    exp.LT: "lt",
+    exp.LTE: "lte",
+    exp.EQ: "eq",
+    exp.NEQ: "neq",
+}
+
+
+def _try_extract_simple_check(
+    check_expr: exp.Expression, table_name: str, source_path: Path
+) -> tuple[dict | None, str | None]:
+    """Return (rule_payload, None) for a simple <col> <op> <literal> CHECK.
+    Return (None, suppression_reason) for any non-trivial CHECK.
+    """
+    op_type = type(check_expr)
+    if op_type not in _SIMPLE_OP_MAP:
+        return None, "non_trivial_check_constraint:unsupported_operator"
+    left, right = check_expr.this, check_expr.expression
+    if not isinstance(left, exp.Column):
+        return None, "non_trivial_check_constraint:non_column_lhs"
+    if not isinstance(right, exp.Literal):
+        return None, "non_trivial_check_constraint:non_literal_rhs"
+    col_name = left.name
+    raw = right.this
+    try:
+        value = int(raw) if right.is_int else float(raw)
+    except (TypeError, ValueError):
+        value = raw
+    payload = {
+        "rule_kind": "validation",
+        "subject_entity": table_name,
+        "subject_attribute": col_name,
+        "predicate": _SIMPLE_OP_MAP[op_type],
+        "object_value": value,
+        "condition": None,
+        "depends_on": [],
+        "expression": check_expr.sql(),
+        # sqlglot does not surface per-token line numbers reliably;
+        # the file-level provenance is in source_artifact.
+        "evidence_span": {
+            "file": str(source_path),
+            "start_line": 0,
+            "end_line": 0,
+            "snippet": check_expr.sql(),
+        },
+        "code_context": f"CREATE TABLE {table_name}",
+        "confidence": 1.0,
+        "extractor_family": "source_c_ddl",
+        "normalization_status": "deterministic",
+    }
+    return payload, None
+
+
 def _build_required_rule_payload(
     table_name: str, column_name: str, source_path: Path
 ) -> dict:
@@ -282,15 +337,18 @@ class SourceCIngester(IngestionPolicy):
             suppressed=table_suppressed,
         )
 
-        # Columns → attributes (each may be individually suppressed).
-        # NOT NULL columns also produce a required-rule candidate (AC1a)
-        # which inherits the column's suppression decision.
+        # Columns → attributes; NOT NULL rules; per-column inline CHECK rules.
+        # All three share the column's suppression decision.
         constraints = tdata["constraints"]
+        column_decisions: dict[str, tuple[bool, str | None]] = {}
+        seen_check_sql: set[str] = set()
+
         for col_name, col_type in columns:
             if col_name in pk:
                 continue
             if any(fk["column"] == col_name for fk in fks):
                 continue
+
             col_suppressed = column_is_suppressed(
                 col_name, user_exclude_columns, []
             )
@@ -314,6 +372,8 @@ class SourceCIngester(IngestionPolicy):
                 table_suppression_reason if table_suppressed
                 else col_suppression_reason
             )
+            column_decisions[col_name] = (final_suppressed, final_reason)
+
             yield IntermediateCandidate(
                 label=col_name,
                 definition="",
@@ -348,6 +408,94 @@ class SourceCIngester(IngestionPolicy):
                     suppression_reason=final_reason,
                     suppressed=final_suppressed,
                     rule_payload=payload,
+                )
+
+            # Per-column inline CHECK constraints (collected in pass 1).
+            for check_expr in col_constraints["checks"]:
+                seen_check_sql.add(check_expr.sql())
+                payload, suppress_reason = _try_extract_simple_check(
+                    check_expr, tname, source_path
+                )
+                if payload is not None:
+                    yield IntermediateCandidate(
+                        label=canonical_rule_label(payload),
+                        definition=f"CHECK constraint on {tname}.{payload['subject_attribute']}",
+                        source_type="C",
+                        source_artifact=f"{source_path}#{tname}.{payload['subject_attribute']}",
+                        raw_type="check_constraint",
+                        eid="",
+                        artifact_kind=ArtifactKind.RULE,
+                        strength=Strength.STRONG,
+                        promotion_reason=f"Source C: CHECK ({check_expr.sql()}) on {tname}.",
+                        suppression_reason=final_reason,
+                        suppressed=final_suppressed,
+                        rule_payload=payload,
+                    )
+                else:
+                    yield IntermediateCandidate(
+                        label=f"complex check on {tname}: {check_expr.sql()[:80]}",
+                        definition=f"Non-trivial CHECK constraint on {tname}",
+                        source_type="C",
+                        source_artifact=str(source_path),
+                        raw_type="check_constraint",
+                        eid="",
+                        artifact_kind=ArtifactKind.RULE,
+                        strength=Strength.WEAK,
+                        promotion_reason=f"Source C: complex CHECK ({check_expr.sql()[:80]}) on {tname} — audit only.",
+                        suppression_reason=suppress_reason,
+                        suppressed=True,
+                    )
+
+        # Table-level CHECK constraints (not already seen as inline).
+        # These appear as CheckColumnConstraint nodes directly inside the
+        # Schema's expression list (not nested inside a ColumnDef).
+        stmt = tdata["stmt"]
+        schema = stmt.this
+        table_level_checks = (
+            e for e in (schema.expressions if isinstance(schema, exp.Schema) else [])
+            if isinstance(e, exp.CheckColumnConstraint)
+        )
+        for check in table_level_checks:
+            inner = check.this
+            if inner is None or inner.sql() in seen_check_sql:
+                continue
+            payload, suppress_reason = _try_extract_simple_check(
+                inner, tname, source_path
+            )
+            if payload is not None:
+                # Inherit the subject column's suppression decision when known;
+                # otherwise default to table-level decision.
+                subj = payload["subject_attribute"]
+                col_suppressed, col_reason = column_decisions.get(
+                    subj, (table_suppressed, table_suppression_reason)
+                )
+                yield IntermediateCandidate(
+                    label=canonical_rule_label(payload),
+                    definition=f"CHECK constraint on {tname}.{subj}",
+                    source_type="C",
+                    source_artifact=f"{source_path}#{tname}.{subj}",
+                    raw_type="check_constraint",
+                    eid="",
+                    artifact_kind=ArtifactKind.RULE,
+                    strength=Strength.STRONG,
+                    promotion_reason=f"Source C: CHECK ({inner.sql()}) on {tname}.",
+                    suppression_reason=col_reason,
+                    suppressed=col_suppressed,
+                    rule_payload=payload,
+                )
+            else:
+                yield IntermediateCandidate(
+                    label=f"complex check on {tname}: {inner.sql()[:80]}",
+                    definition=f"Non-trivial CHECK constraint on {tname}",
+                    source_type="C",
+                    source_artifact=str(source_path),
+                    raw_type="check_constraint",
+                    eid="",
+                    artifact_kind=ArtifactKind.RULE,
+                    strength=Strength.WEAK,
+                    promotion_reason=f"Source C: complex CHECK ({inner.sql()[:80]}) on {tname} — audit only.",
+                    suppression_reason=suppress_reason,
+                    suppressed=True,
                 )
 
         # FKs → relationships.

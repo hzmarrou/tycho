@@ -114,3 +114,83 @@ def test_excluded_column_suppresses_both_attribute_and_rule(tmp_path: Path):
     ]
     assert len(amount_rules) == 1
     assert amount_rules[0].suppressed is False
+
+
+def test_check_constraint_emits_rule_candidate(tmp_path: Path):
+    sql = tmp_path / "loans.sql"
+    sql.write_text(
+        "CREATE TABLE loan (\n"
+        "  loan_id VARCHAR(32) PRIMARY KEY,\n"
+        "  amount NUMERIC NOT NULL CHECK (amount > 0)\n"
+        ");\n",
+        encoding="utf-8",
+    )
+    cands = _ingest(sql)
+
+    check_rules = [
+        c for c in cands
+        if c.artifact_kind == ArtifactKind.RULE
+        and c.rule_payload
+        and c.rule_payload["predicate"] == "gt"
+    ]
+    assert len(check_rules) == 1
+    rp = check_rules[0].rule_payload
+    assert rp["subject_entity"] == "loan"
+    assert rp["subject_attribute"] == "amount"
+    assert rp["object_value"] == 0
+    assert rp["extractor_family"] == "source_c_ddl"
+    assert check_rules[0].label == "loan.amount gt 0"
+
+
+def test_complex_check_constraint_is_suppressed(tmp_path: Path):
+    sql = tmp_path / "loans.sql"
+    sql.write_text(
+        "CREATE TABLE loan (\n"
+        "  amount NUMERIC,\n"
+        "  fees NUMERIC,\n"
+        "  CHECK (amount + fees > 0)\n"
+        ");\n",
+        encoding="utf-8",
+    )
+    cands = _ingest(sql)
+    suppressed = [c for c in cands if c.suppressed and c.raw_type == "check_constraint"]
+    assert len(suppressed) == 1
+    assert suppressed[0].suppression_reason
+    assert suppressed[0].suppression_reason.startswith("non_trivial_check_constraint:")
+
+
+def test_check_constraint_on_excluded_column_is_suppressed(tmp_path: Path):
+    """Per-column CHECK rules must honor column-level suppression
+    (same discipline as NOT NULL rules — Task 3 fix #ceb6a2b)."""
+    sql = tmp_path / "loans.sql"
+    sql.write_text(
+        "CREATE TABLE loan (\n"
+        "  amount NUMERIC NOT NULL CHECK (amount > 0),\n"
+        "  internal_score INT CHECK (internal_score > 0)\n"
+        ");\n",
+        encoding="utf-8",
+    )
+    cands = list(
+        SourceCIngester(config={"exclude_columns": ["internal_score"]})
+        .ingest({"files": [str(sql)]})
+    )
+
+    internal_checks = [
+        c for c in cands
+        if c.artifact_kind == ArtifactKind.RULE
+        and c.rule_payload
+        and c.rule_payload.get("subject_attribute") == "internal_score"
+    ]
+    assert len(internal_checks) == 1
+    assert internal_checks[0].suppressed is True
+    assert "exclude_columns" in (internal_checks[0].suppression_reason or "")
+
+    amount_checks = [
+        c for c in cands
+        if c.artifact_kind == ArtifactKind.RULE
+        and c.rule_payload
+        and c.rule_payload.get("subject_attribute") == "amount"
+        and c.rule_payload.get("predicate") == "gt"
+    ]
+    assert len(amount_checks) == 1
+    assert amount_checks[0].suppressed is False
