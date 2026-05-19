@@ -103,3 +103,20 @@ def test_pipeline_boolean_mask_uses_direct_op_mapping(tmp_path):
         r.subject_attribute == "score" and r.predicate == "lte" and r.object_value == 100
         for r in rules
     ), f"expected score lte 100, got: {[(r.subject_attribute, r.predicate, r.object_value) for r in rules]}"
+
+
+def test_pipeline_embedded_sql_where_emits_rule(tmp_path):
+    f = tmp_path / "sql_embed.py"
+    f.write_text(
+        "import pandas as pd\n"
+        "def load(con):\n"
+        "    return pd.read_sql('SELECT * FROM loan WHERE amount > 0', con)\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_pipeline(pm))
+    rules = [r for r in facts if isinstance(r, RuleFact)]
+    assert any(
+        r.subject_entity == "loan" and r.subject_attribute == "amount"
+        and r.predicate == "gt" and r.object_value == 0
+        for r in rules
+    )

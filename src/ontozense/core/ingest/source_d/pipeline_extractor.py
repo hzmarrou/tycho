@@ -10,6 +10,9 @@ from __future__ import annotations
 import ast
 from collections.abc import Iterable
 
+import sqlglot
+import sqlglot.expressions as exp
+
 from .ir import AttributeFact, EvidenceSpan, RuleFact
 from .parse import ParsedModule
 
@@ -20,6 +23,11 @@ from .parse import ParsedModule
 _CMP = {
     ast.Lt: "lt", ast.LtE: "lte", ast.Gt: "gt", ast.GtE: "gte",
     ast.Eq: "eq", ast.NotEq: "neq",
+}
+
+_SQL_CMP = {
+    exp.GT: "gt", exp.GTE: "gte", exp.LT: "lt", exp.LTE: "lte",
+    exp.EQ: "eq", exp.NEQ: "neq",
 }
 
 
@@ -123,6 +131,56 @@ def _extract_dropna(call: ast.Call, source: str, file: str) -> Iterable[RuleFact
                     )
 
 
+def _looks_like_sql(s: str) -> bool:
+    """Cheap heuristic mirroring the dispatcher: string starts with a
+    top-level SQL keyword. Prevents calling sqlglot.parse_one on every
+    string literal in the module."""
+    head = s.strip().split(None, 1)
+    return bool(head) and head[0].upper() in {"SELECT", "WITH", "CREATE", "INSERT", "UPDATE", "DELETE"}
+
+
+def _extract_embedded_sql(node: ast.Constant, source: str, file: str) -> Iterable[RuleFact]:
+    """String literal -> sqlglot parse -> validation rules from WHERE.
+
+    Subject_entity is the FROM table — unlike the pandas extractors,
+    embedded SQL gives us explicit table anchoring, so the rules
+    emitted here are anchored at IR time.
+    """
+    if not isinstance(node.value, str) or not _looks_like_sql(node.value):
+        return
+    try:
+        parsed = sqlglot.parse_one(node.value)
+    except Exception:
+        return
+    table_name: str | None = None
+    for t in parsed.find_all(exp.Table):
+        table_name = t.name
+        break
+    where = parsed.find(exp.Where)
+    if not where:
+        return
+    for cmp_node in where.find_all(tuple(_SQL_CMP.keys())):
+        left, right = cmp_node.this, cmp_node.expression
+        if not isinstance(left, exp.Column) or not isinstance(right, exp.Literal):
+            continue
+        try:
+            value = int(right.this) if right.is_int else float(right.this)
+        except (TypeError, ValueError):
+            value = right.this
+        yield RuleFact(
+            rule_kind="validation",
+            subject_entity=table_name,
+            subject_attribute=left.name,
+            predicate=_SQL_CMP[type(cmp_node)],
+            object_value=value,
+            expression=cmp_node.sql(),
+            evidence_span=_span(node, file, source),
+            code_context="embedded SQL WHERE",
+            confidence=0.85,
+            extractor_family="pipeline",
+        )
+
+
 def extract_pipeline(pm: ParsedModule) -> Iterable[object]:
     file = str(pm.path)
     for node in ast.walk(pm.tree):
@@ -132,3 +190,5 @@ def extract_pipeline(pm: ParsedModule) -> Iterable[object]:
             yield from _extract_derived_column(node, pm.source, file)
         elif isinstance(node, ast.Call):
             yield from _extract_dropna(node, pm.source, file)
+        elif isinstance(node, ast.Constant):
+            yield from _extract_embedded_sql(node, pm.source, file)
