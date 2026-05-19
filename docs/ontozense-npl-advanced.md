@@ -564,38 +564,113 @@ anchors, corroboration, and profile coverage.
 
 ---
 
-## Part E — Using Source C and Source D (v1.1)
+## Part E — Using Source C and Source D for NPL (v1.1)
 
 As of v1.1, passing `--source-c` (SQL DDL) and `--source-d` (Python files) to
 `survey` makes those sources active participants in the candidate graph rather than
 inert placeholders. Note: `discover` accepts `--source-c` / `--source-d` on the CLI
 for forward-compatibility, but it retains its v1.0 pass-through behaviour — those
-arguments do not affect candidate generation in `discover`. This section shows how to
-configure them and how to read the resulting `audit` block in `candidate-graph.json`.
+arguments do not affect candidate generation in `discover`. This section walks
+through both sources against the NPL fixture, shows the per-domain config files,
+and explains the `audit` block in `candidate-graph.json`.
 
-### E.1 Survey invocation with all four sources
+### E.1 Survey invocation with all four NPL sources
 
-```bash
-ontozense survey \
-  --source-a domain/docs/ \
-  --source-b domain/governance.json \
-  --source-c domain/schemas/core.sql \
-  --source-d domain/code/ \
-  --domain-dir domain/
+The NPL fixture already ships Source A (Basel doc), Source B (governance JSON), and
+Source D (`synthetic_npl_code/`). For Source C, the fixture has no `CREATE TABLE`
+DDL by default — the `loan_constraints.sql` and `finrep_npl_query.sql` files use
+`ALTER TABLE` / `CREATE VIEW`, which the v1.1 Source C ingester does not yet handle.
+Drop a small `CREATE TABLE` file in your workspace to demonstrate Source C — example
+below — then invoke survey with all four:
+
+```powershell
+# Drop a tiny NPL-flavoured DDL so Source C has something to ingest.
+@'
+CREATE TABLE loan (
+    loan_id INT PRIMARY KEY,
+    borrower_id INT,
+    principal_balance DECIMAL(18,2),
+    days_past_due INT,
+    is_non_performing BOOLEAN,
+    default_date DATE,
+    origination_date DATE,
+    created_at TIMESTAMP,
+    FOREIGN KEY (borrower_id) REFERENCES borrower(borrower_id)
+);
+
+CREATE TABLE borrower (
+    borrower_id INT PRIMARY KEY,
+    name VARCHAR(200),
+    industry_segment_code VARCHAR(20)
+);
+
+CREATE TABLE forbearance_event (
+    forbearance_event_id INT PRIMARY KEY,
+    loan_id INT,
+    start_date DATE,
+    end_date DATE,
+    FOREIGN KEY (loan_id) REFERENCES loan(loan_id)
+);
+
+CREATE TABLE loan_status_lookup (
+    code VARCHAR(10) PRIMARY KEY,
+    description VARCHAR(200)
+);
+
+CREATE TABLE loan_audit (
+    audit_id INT PRIMARY KEY,
+    loan_id INT,
+    event VARCHAR(50),
+    occurred_at TIMESTAMP
+);
+'@ | Out-File -Encoding utf8 domains/npl/sources/npl-schema.sql
+
+# Full four-source survey
+ontozense survey `
+  --source-a domains/npl/sources/source-a.json `
+  --source-b domains/npl/sources/governance.json `
+  --source-c domains/npl/sources/npl-schema.sql `
+  --source-d domains/npl/sources/npl-code `
+  --domain-dir domains/npl
 ```
 
 Each source contributes different artifact kinds:
 
-| Source | Input | Candidate kinds |
+| Source | NPL input | Candidate kinds produced |
 |---|---|---|
-| A | `.md` / `.txt` / `.pdf` documents | entities, relationships, rules |
-| B | governance `.json` | authoritative entities, definitions |
-| C | `.sql` DDL files | entities (tables), attributes (columns), relationships (FKs), vocabulary (lookup tables) |
-| D | `.py` files | entities (classes/models), attributes (fields), vocabulary (Enums), rules (validators), behaviours (methods) |
+| A | `npl-basel-guidelines.md` (or `source-a.json`) | entities, relationships, rules from prose |
+| B | `governance.json` | authoritative entities + definitions |
+| C | `npl-schema.sql` (`CREATE TABLE` DDL) | entities (loan, borrower, forbearance_event), attributes (columns), relationships (FKs), vocabulary (loan_status_lookup auto-detected) |
+| D | `npl-code/` Python files | entities (classes/dataclasses), attributes (typed fields), rules (`validate_forbearance_event` etc.), behaviours (methods) |
+
+After the survey, inspect what each source contributed:
+
+```powershell
+@'
+import json
+from collections import Counter
+
+g = json.load(open("domains/npl/discovery/candidate-graph.json"))
+by_source = Counter()
+for c in g["concepts"]:
+    for src, present in c["source_presence"].items():
+        if present:
+            by_source[src] += 1
+for src in "ABCD":
+    print(f"Source {src}: {by_source[src]:>3} candidates attested")
+print(f"audit:    {len(g.get('audit', []))} suppressed")
+'@ | python
+```
+
+✓ **Expected:** all four sources contribute non-zero counts; `loan` and `borrower`
+appear with `source_presence={A:True, B:?, C:True, D:True}` (boosted to
+`strength="strong"` by multi-axis corroboration); `loan_status_lookup` lands as a
+**vocabulary** candidate (Source C code-table detection); `loan_audit` is in the
+audit block (default `*_audit` suppression).
 
 ### E.2 Configuring Source C with `source-c.yaml`
 
-Place this file at `domain/source-c.yaml` (i.e. in the domain workspace folder
+Place this file at `domains/npl/source-c.yaml` (i.e. in the domain workspace folder
 you pass to `--domain-dir`):
 
 ```yaml
@@ -603,48 +678,61 @@ source_c:
   exclude_tables:
     - legacy_*
   include_tables:
-    - customer_audit   # keep this one despite default suppression
+    - loan_audit       # keep this one despite the default *_audit suppression
   force_vocabulary:
-    - loan_status      # treat as code-table even though naming doesn't match heuristic
+    - loan_status_lookup    # belt-and-braces (the naming heuristic already catches it)
+  exclude_columns:
+    - "loan.*_hash"
+  force_entity:
+    - reference_loan_purpose_codes  # this code-table is actually a real domain entity
 ```
 
-- `exclude_tables` — glob patterns matched against table names. Matching tables and
-  all their columns are always suppressed (no override).
+- `exclude_tables` — glob patterns matched against table names (case-insensitive).
+  Matching tables and all their columns are always suppressed (no override).
 - `include_tables` — glob patterns; matching tables are exempted from the default
   `*_audit` / `*_history` / `tmp_*` etc. suppressions. Does NOT exempt from
   `exclude_tables`.
-- `force_vocabulary` — promotes a table to a vocabulary candidate regardless of
-  whether the naming heuristic would have flagged it.
+- `exclude_columns` — glob patterns matched against fully-qualified `table.column`
+  names (also case-insensitive). Always suppress, no override.
+- `force_vocabulary` — case-insensitive globs; promotes matching tables to vocabulary
+  candidates regardless of whether the naming heuristic would have flagged them.
 - `force_entity` — the inverse: demotes a table that the heuristic would have
   classified as a code-table back to a regular entity.
 
 ### E.3 Configuring Source D with `source-d.yaml`
 
-Place this file at `domain/source-d.yaml`:
+Place this file at `domains/npl/source-d.yaml`:
 
 ```yaml
 source_d:
   exclude_paths:
-    - apps/legacy_engine/**
+    - "**/reporting/**"        # skip the reporting subfolder
   exclude_classes:
     - "*Factory"
     - "*Mixin"
   include_classes:
-    - LoanRequest      # force-promote DTO suffix back to canonical entity
+    - LoanRequest              # force-promote DTO suffix back to canonical entity
+  force_vocabulary:
+    - "*Status"                # *Status classes -> vocabulary candidates
 ```
 
-- `exclude_paths` — glob patterns matched against file paths within the directory
-  tree. Files matching any pattern are always suppressed (no override).
-- `exclude_classes` — class-name patterns (supports `*` wildcards). Matching
-  classes are always suppressed (no override).
-- `include_classes` — glob patterns; rescue classes from the DTO-suffix default
+- `exclude_paths` — glob patterns matched (case-insensitively) against file paths
+  within the directory tree. Files matching any pattern are always suppressed
+  (no override).
+- `exclude_classes` — class-name globs. Matching classes are always suppressed
+  (no override).
+- `include_classes` — class-name globs; rescue classes from the DTO-suffix default
   (e.g. `LoanRequest` stays `pydantic_model` instead of being relabelled
   `dto_candidate`). Does NOT rescue from `exclude_classes`.
+- `force_vocabulary` — class-name globs; reclassify matching non-Enum classes to
+  vocabulary at `MEDIUM` strength.
 
 ### E.4 Reading the `audit` block
 
 After `survey` runs with Source C or D active, `candidate-graph.json` contains an
-`audit` array alongside the usual `concepts` and `relationships`:
+`audit` array alongside the usual `concepts` and `relationships`. For the NPL
+example above, the `loan_audit` table is filtered out by the default `*_audit`
+pattern, surfacing in the audit list:
 
 ```json
 {
@@ -652,16 +740,29 @@ After `survey` runs with Source C or D active, `candidate-graph.json` contains a
   "relationships": [...],
   "audit": [
     {
-      "label": "customer_audit",
+      "label": "loan_audit",
       "definition": "",
       "source_type": "C",
-      "source_artifact": "schemas/core.sql",
+      "source_artifact": "domains/npl/sources/npl-schema.sql",
       "raw_type": "table",
       "eid": "",
       "artifact_kind": "entity",
       "strength": "strong",
-      "promotion_reason": "Source C: table 'customer_audit' (deterministic schema attestation).",
+      "promotion_reason": "Source C: table 'loan_audit' (deterministic schema attestation).",
       "suppression_reason": "Default Source C suppression: table name matches pattern '*_audit'.",
+      "suppressed": true
+    },
+    {
+      "label": "test_validators.py",
+      "definition": "",
+      "source_type": "D",
+      "source_artifact": "domains/npl/sources/npl-code/forbearance/test_validators.py",
+      "raw_type": "suppressed_file",
+      "eid": "",
+      "artifact_kind": "entity",
+      "strength": "weak",
+      "promotion_reason": "",
+      "suppression_reason": "Default Source D suppression: path matches pattern '**/test_*.py'.",
       "suppressed": true
     }
   ]
@@ -680,6 +781,11 @@ have, plus the suppression fields:
 - `label`, `source_type`, `source_artifact`, `raw_type`, `eid`, `artifact_kind`,
   `strength` — the same fields the entry would have carried if it had been promoted.
 
+In addition to per-source suppressions, the audit also records **cross-kind
+collisions** — when (for example) an entity and an attribute share the same
+normalised label. Both candidates survive in `concepts`, and a synthetic audit entry
+marked `<kind-conflict:...>` flags the collision for the curator.
+
 ### E.5 Quick reference — default suppression patterns
 
 **Source C (SQL DDL):**
@@ -687,24 +793,32 @@ have, plus the suppression fields:
 Tables suppressed by default:
 - `*_audit`, `*_history`, `*_log`, `*_journal` — operational tracking tables
 - `tmp_*`, `bkp_*`, `bak_*` — temporary and backup tables
+- `vw_*_audit` — audit views
 
 Columns suppressed by default:
-- `created_at`, `updated_at`
+- `created_at`, `updated_at`, `modified_at`
 - `*_at`, `*_ts`, `*_timestamp` — unless the prefix is domain-bearing (e.g.
-  `birth_date`, `expiry_date` are kept)
-- `etag`, `row_version` — optimistic-concurrency bookkeeping columns
+  `birth_date`, `expiry_date`, `valuation_date`, `maturity_date` are kept)
+- `etag`, `row_version`, `version`, `_partition_*` — bookkeeping
+- `tenant_id`, `is_deleted`, `deleted_at` — tenant / soft-delete plumbing
+- `created_by`, `updated_by`, `modified_by` — user attribution
 
 **Source D (Python code):**
 
 Paths suppressed by default:
-- `tests/**`, `mocks/**`, `fixtures/**`, `migrations/**`
-- Files containing `# DO NOT EDIT` or `# AUTOGENERATED` header markers
+- `tests/**`, `mocks/**`, `fixtures/**`, `migrations/**`, `vendor/**`, `examples/**`
+- `**/test_*.py`, `**/*_test.py`, `**/conftest.py`, `**/__pycache__/**`
+- Files containing `# DO NOT EDIT`, `# Generated by`, `# AUTOGENERATED`, or
+  `# This file was automatically generated` in their first 5 lines
 
 Classes suppressed by default:
 - `_*` — private classes (leading underscore)
+- `Meta`, `Config` — Django/Pydantic framework boilerplate
 
 All default suppressions can be overridden via the domain YAML config files
-described in Sections E.2 and E.3.
+described in Sections E.2 and E.3. **Override semantics:** `exclude_*` patterns
+always suppress (no override); `include_*` patterns rescue items from default
+heuristic suppression only.
 
 ---
 

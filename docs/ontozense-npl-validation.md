@@ -101,8 +101,9 @@ ontozense --help
 pytest -q
 ```
 
-✓ **Expected:** `873 passed, 14 skipped` (or higher if commits
-have landed since this tutorial was written). Zero failures.
+✓ **Expected:** `992 passed, 14 skipped` (or higher if commits
+have landed since this tutorial was written — the count grew from
+873 → 992 with the v1.1 Source C/D-as-seeders work). Zero failures.
 
 If you see failures, **stop**. Don't continue with NPL validation
 until the regression suite is clean.
@@ -174,14 +175,17 @@ If you have Azure OpenAI keys in `.env`, skip B.3 and let
 ## Part C — Survey the NPL sources
 
 A single command extracts (or reuses) Source A, merges in Source
-B governance, and writes a candidate graph for inspection.
+B governance, **and (new in v1.1) parses Source D Python code into
+first-class candidates** — all into one candidate graph for
+inspection.
 
-### C.1 Run survey
+### C.1 Run survey (A + B + D)
 
 ```powershell
 ontozense survey `
   --source-a domains/npl/sources/source-a.json `
   --source-b domains/npl/sources/governance.json `
+  --source-d domains/npl/sources/npl-code `
   --domain-dir domains/npl
 ```
 
@@ -190,13 +194,22 @@ ontozense survey `
 `--source-a domains/npl/sources/npl-basel-guidelines.md` to run
 fresh LLM extraction.)
 
-> **Note on `--source-d`:** `survey` accepts a `--source-d` flag, but
-> Source D's code contents don't affect the candidate graph at this
-> stage — the builder stages them as a manifest only. Source D's real
-> contribution to the semantic layer happens inside `draft` (Part D),
-> where the code extractor walks the directory and feeds the fused
-> dictionary. You can pass `--source-d` to survey for forward-compat,
-> but you'll see no difference in the Part C.3 inspection output.
+> **Source D in v1.1 (changed behaviour):** `--source-d` is now an
+> active participant in the candidate graph at the **survey** stage,
+> not just at `draft`. The deterministic AST extractor walks the
+> directory and emits entity candidates for classes / dataclasses /
+> Pydantic models, attribute candidates for typed fields, vocabulary
+> candidates for `Enum` subclasses, rule candidates for validation
+> functions (`validate_*` / `check_*` / `assert_*`), and behaviour
+> candidates for other methods — all at *survey* time. No LLM call
+> involved.
+>
+> **Source C (SQL DDL):** also accepted (`--source-c file.sql`),
+> with the same first-class treatment as Source D. The bundled NPL
+> fixture doesn't ship a `CREATE TABLE` schema, so this tutorial
+> omits Source C. See
+> [`docs/ontozense-npl-advanced.md`](./ontozense-npl-advanced.md)
+> Part E for a worked Source C example.
 
 ✓ **Expected output:**
 
@@ -223,24 +236,55 @@ Get-ChildItem domains/npl/discovery
 @'
 import json
 g = json.load(open("domains/npl/discovery/candidate-graph.json"))
-print(f"concepts: {len(g['concepts'])}")
+print(f"concepts:      {len(g['concepts'])}")
 print(f"relationships: {len(g['relationships'])}")
-both = [c for c in g["concepts"]
-        if c["source_presence"]["A"] and c["source_presence"]["B"]]
-print(f"cross-source matches (A AND B): {len(both)}")
-print("sample cross-source labels:",
-      sorted({c["label"] for c in both})[:10])
+print(f"audit:         {len(g.get('audit', []))}  (v1.1 — suppressed candidates)")
+print()
+
+# Multi-axis attestation: A=docs, B=governance, C=schema, D=code.
+two_axis = [c for c in g["concepts"]
+            if sum(c["source_presence"].values()) >= 2]
+strong = [c for c in g["concepts"] if c.get("strength") == "strong"]
+print(f"multi-axis attested (>= 2 sources):  {len(two_axis)}")
+print(f"strength=strong (boosted or default): {len(strong)}")
+print()
+print("sample multi-axis-attested labels:",
+      sorted({c["label"] for c in two_axis})[:10])
 '@ | python
 ```
 
-✓ **Expected:**
-- `concepts` is at least the union of Source A and Source B's
-  counts (with cross-source merges deduplicated).
-- `cross-source matches (A AND B)` is 3-8 of the governance
-  terms that also appear in the Basel doc — typically `Borrower`,
-  `Collateral`, `Loan`, …
-- Sample labels are NPL business words, not `tmp_*` / `*_id`
-  code-shaped names.
+✓ **Expected (v1.1):**
+- `concepts` is at least the union of A + B + D, with cross-source
+  merges deduplicated by canonical (singularised) label.
+- `audit` is a non-zero number when Source D contains suppressed
+  items (private classes prefixed `_`, classes in `tests/` etc.).
+- `multi-axis attested` includes the concepts attested in at least
+  2 of (semantic A/B, structural C, executable D). These are the
+  highest-confidence concepts — the corroboration tier boost
+  promotes them to `strong`.
+- Sample labels are NPL business words (`Borrower`, `Loan`,
+  `Forbearance`, `Collateral`, …), not `tmp_*` / `*_id`
+  code-shaped names. Suppressed shapes appear in the `audit` block,
+  not the main `concepts` list.
+
+### C.4 (Optional) Inspect what got suppressed
+
+```powershell
+@'
+import json
+g = json.load(open("domains/npl/discovery/candidate-graph.json"))
+for entry in g.get("audit", [])[:5]:
+    print(f"- {entry['label']}  ({entry['source_type']})")
+    print(f"    {entry['suppression_reason']}")
+'@ | python
+```
+
+✓ **Expected:** each entry has a `label`, a `source_type`, and a
+human-readable `suppression_reason` that names the rule which
+filtered it (e.g. *"Default Source D suppression: path matches
+pattern 'tests/**'"*). This is what the curator inspects to decide
+whether to bring something back via a per-domain YAML override
+(see Part D.5 below).
 
 ---
 
@@ -262,10 +306,11 @@ ontozense draft `
 
 > The `--source-b` flag passes the same governance JSON to the
 > fusion engine that survey used for the candidate-graph merge.
-> The `--source-d` flag, by contrast, is **first consumed here** —
-> survey only stages Source D as a manifest; `draft` is the stage
-> where the code extractor actually walks `npl-code/` and
-> contributes Source-D-derived elements to the fused dictionary.
+> The `--source-d` flag re-supplies the code directory to fusion;
+> survey already extracted candidates from it at the candidate-graph
+> stage (v1.1 change — see Part C.1), so fusion receives both the
+> survey-derived candidates AND the raw code path for any
+> deeper extraction the fusion engine performs.
 > Source A is read automatically from
 > `domains/npl/discovery/source-a.json`.
 
@@ -315,6 +360,53 @@ Get-Content domains/npl/draft-summary.md
 validation findings, lint findings, and a "what the curator
 should review first" list.
 
+### D.5 (Optional, v1.1) Tune Source D classification with `source-d.yaml`
+
+If the audit block in C.4 surfaced a class you actually *want* in
+the candidate graph — or a Source D class you want to **demote** to
+a vocabulary candidate — drop a `source-d.yaml` next to your
+domain workspace:
+
+```powershell
+@'
+source_d:
+  # Bring tests back into the candidate graph (overrides default tests/** suppression)
+  exclude_paths: []
+  # Reclassify all *Status classes as vocabulary candidates (not entities)
+  force_vocabulary:
+    - "*Status"
+  # Suppress factory classes (these are usually transport helpers, not domain entities)
+  exclude_classes:
+    - "*Factory"
+'@ | Out-File -Encoding utf8 domains/npl/source-d.yaml
+```
+
+The same idea works for Source C via `source-c.yaml`
+(`exclude_tables`, `include_tables`, `force_vocabulary`,
+`force_entity`, `exclude_columns`). Both files live in the
+domain workspace and are loaded automatically by `survey`.
+
+Re-run survey and inspect the diff — the candidate graph should
+reflect the overrides:
+
+```powershell
+ontozense survey `
+  --source-a domains/npl/sources/source-a.json `
+  --source-b domains/npl/sources/governance.json `
+  --source-d domains/npl/sources/npl-code `
+  --domain-dir domains/npl
+```
+
+✓ **Expected:** the new `candidate-graph.json` has the
+overridden classifications; any forced-vocabulary classes now
+have `"artifact_kind": "vocabulary"`; force-suppressed classes
+move from `concepts` to `audit`.
+
+For a deeper Source C example (with `.sql` DDL) and the full
+default-suppression reference, see
+[`docs/ontozense-npl-advanced.md`](./ontozense-npl-advanced.md)
+Part E.
+
 ---
 
 ## Part E — Hand off to the curator
@@ -359,15 +451,21 @@ it; curators usually don't need to.
 If every box ticks, both stages of the workflow are working on
 NPL data:
 
-- [ ] `pytest -q` reports `873 passed, 14 skipped` (Part A.6)
+- [ ] `pytest -q` reports `992 passed, 14 skipped` (Part A.6)
 - [ ] `ontozense survey` writes three artifacts under
   `domains/npl/discovery/` (Part C.2)
-- [ ] Cross-source matches include real NPL terms (Part C.3)
+- [ ] Multi-axis-attested concepts include real NPL terms,
+  with `source_presence` set across A/B/D (Part C.3)
+- [ ] `candidate-graph.json` has a non-empty `audit` array
+  citing the rules that suppressed each filtered candidate
+  (Part C.4) *(v1.1)*
 - [ ] `ontozense draft` writes `draft.owl` and
   `draft-summary.md` (Part D.2)
 - [ ] `draft.owl` parses as valid OWL/Turtle (Part D.3)
 - [ ] The draft summary lists element counts, validation
   findings, and a curator-review list (Part D.4)
+- [ ] *(Optional)* a `source-d.yaml` override behaves as
+  expected on re-survey (Part D.5) *(v1.1)*
 
 ---
 
