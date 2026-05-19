@@ -425,3 +425,49 @@ def test_normalisation_still_singularises_clean_plurals():
     # Singular forms already correct — pass through unchanged.
     canon, fired = _resolve_alias_with_normalisation("customer", {})
     assert canon == "customer"
+
+
+def test_synthetic_fk_label_bypasses_canonicalisation():
+    """v1.1.1 follow-up #95: Source C FK relationship labels
+    follow the synthetic pattern '<src>__<col>__<ref>'. These are
+    internal IDs, not user-facing entity names, and must NOT flow
+    through alias / prefix-strip / singularisation. Otherwise the
+    trailing segment gets partially singularised, producing
+    asymmetric labels like 'customers__country_code__country'."""
+    from ontozense.core.candidate_graph import _resolve_alias_with_normalisation
+
+    # Plural source AND plural ref — both segments preserved.
+    canon, fired = _resolve_alias_with_normalisation(
+        "customers__country_code__countries", {},
+    )
+    assert canon == "customers__country_code__countries"
+    assert fired is False
+
+    # Mixed case: only the ref segment is plural — still preserved.
+    canon, fired = _resolve_alias_with_normalisation(
+        "loan__customer_id__customers", {},
+    )
+    assert canon == "loan__customer_id__customers"
+
+    # Even when alias_map has an entry — synthetic FK labels still
+    # bypass.  (Edge case: a user wouldn't actually put an FK label in
+    # alias_map, but pinning the behaviour makes the contract explicit.)
+    canon, fired = _resolve_alias_with_normalisation(
+        "customers__country_code__countries",
+        {"customers__country_code__countries": "Something Else"},
+    )
+    # The bypass is unconditional — alias_map doesn't fire for FK labels.
+    assert canon == "customers__country_code__countries"
+    assert fired is False
+
+
+def test_non_synthetic_labels_still_canonicalise_normally():
+    """Sanity check: the FK-bypass must NOT regress regular labels
+    that happen to contain a single double-underscore (rare but
+    possible, e.g. Python's __init__ — though that won't appear at
+    this layer in practice)."""
+    from ontozense.core.candidate_graph import _resolve_alias_with_normalisation
+
+    # Regular plural with no synthetic FK shape.
+    canon, _ = _resolve_alias_with_normalisation("customers", {})
+    assert canon == "customer"

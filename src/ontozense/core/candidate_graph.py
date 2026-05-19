@@ -883,6 +883,15 @@ def _resolve_alias_with_normalisation(
     and the caller should keep the original surface form as the primary
     ``label``.
     """
+    # Synthetic Source C relationship labels follow '<src>__<col>__<ref>'
+    # (two '__' separators). They are internal identifiers, not user-
+    # supplied entity names, and must bypass alias / prefix-strip /
+    # singularisation entirely. Without this bypass, the trailing
+    # segment gets partially singularised, producing asymmetric labels
+    # like 'customers__country_code__country'. See v1.1.1 follow-up #95.
+    if label.count("__") >= 2:
+        return label, False
+
     # Alias map: exact match first, then case-insensitive.
     label_lower = label.lower()
     if label in alias_map:

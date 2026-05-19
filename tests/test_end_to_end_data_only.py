@@ -96,24 +96,11 @@ def test_audit_block_lists_timestamp_without_domain_prefix():
 
 
 def test_foreign_key_relationships_emitted():
-    """The two FKs in the DDL (customers→countries, orders→customers)
+    """The two FKs in the DDL (customers->countries, orders->customers)
     emit as relationship candidates with raw_type='foreign_key'.
-
-    KNOWN LIMITATION (tracked in a separate follow-up): synthetic FK
-    labels emitted by Source C follow the pattern
-    ``<src>__<col>__<ref_table>``, but they currently flow through
-    ``_resolve_alias_with_normalisation`` in ``_upsert``, which
-    partially singularises the trailing segment only — producing
-    asymmetric labels like ``customers__country_code__country``
-    (source stays plural, ref segment is singularised). This is a
-    leaky abstraction: synthetic relationship identifiers should
-    bypass the label canonicaliser entirely. The fix belongs in the
-    merge layer, not in inflection tuning.
-
-    The assertion below pins the weaker, label-agnostic contract:
-    each FK in the DDL emits one relationship candidate, raw_type
-    matches the ingester's output. Exact label spelling is NOT
-    asserted here while the leak persists.
+    Synthetic FK labels follow '<src>__<col>__<ref>' with BOTH
+    endpoints preserved as-is (no partial singularisation), per
+    v1.1.1 follow-up #95.
     """
     graph = _build()
     relationships = [
@@ -123,11 +110,13 @@ def test_foreign_key_relationships_emitted():
     # Two FKs in the fixture -> two relationship candidates.
     assert len(relationships) >= 2
 
-    # Every Source C FK relationship carries raw_type='foreign_key' in
-    # at least one provenance entry (raw_type lives on EvidenceEntry,
-    # not on CandidateConcept directly).
-    fk_relationships = [
-        r for r in relationships
-        if any(e.raw_type == "foreign_key" for e in r.provenance)
-    ]
-    assert len(fk_relationships) >= 2
+    rel_labels = {c.label for c in relationships}
+    # Both source AND ref segments preserved exactly (no singularisation).
+    assert "customers__country_code__countries" in rel_labels
+    assert "orders__customer_id__customers" in rel_labels
+
+    # Each carries raw_type='foreign_key' via its EvidenceEntry provenance.
+    for r in relationships:
+        assert any(
+            e.raw_type == "foreign_key" for e in r.provenance
+        ), f"expected 'foreign_key' in provenance for {r.label!r}"
