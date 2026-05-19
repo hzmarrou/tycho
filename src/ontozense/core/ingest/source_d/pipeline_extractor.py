@@ -50,27 +50,15 @@ def _is_dataframe_annotation(node: ast.expr | None) -> bool:
     return False
 
 
-def _collect_df_names(pm: ParsedModule) -> set[str]:
-    """Build the set of identifiers in the module that are known
-    DataFrame-typed via parameter annotations. Falls back to {"df"}
-    if no annotations are present so the conventional naming still
-    works for unannotated pandas code.
-
-    This is a conservative scope guard: the pipeline extractors only
-    emit facts when the subscript receiver is in this set, preventing
-    `config["x"] = "y"` style dict assignments from being treated as
-    DataFrame derived columns.
-    """
-    names: set[str] = set()
-    for node in ast.walk(pm.tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        for arg in node.args.args:
-            if _is_dataframe_annotation(arg.annotation):
-                names.add(arg.arg)
-    if not names:
-        names.add("df")
-    return names
+def _function_df_names(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    """Return parameter names in ``func`` annotated as ``pd.DataFrame``
+    or bare ``DataFrame``. Empty set means the function has no
+    DataFrame-annotated params — callers should fall back to the
+    enclosing scope."""
+    return {
+        arg.arg for arg in func.args.args
+        if _is_dataframe_annotation(arg.annotation)
+    }
 
 
 def _strict_df_column(node: ast.expr, df_names: set[str]) -> str | None:
@@ -162,9 +150,16 @@ def _extract_derived_column(stmt: ast.Assign, df_names: set[str], source: str, f
     )
 
 
-def _extract_dropna(call: ast.Call, source: str, file: str) -> Iterable[RuleFact]:
-    """df.dropna(subset=["col", ...]) -> validation required rules."""
+def _extract_dropna(call: ast.Call, df_names: set[str], source: str, file: str) -> Iterable[RuleFact]:
+    """df.dropna(subset=["col", ...]) -> validation required rules.
+
+    Receiver must be a tracked DataFrame name — otherwise a custom
+    class that happens to expose `.dropna(subset=...)` would leak
+    required rules into the candidate graph.
+    """
     if not (isinstance(call.func, ast.Attribute) and call.func.attr == "dropna"):
+        return
+    if not (isinstance(call.func.value, ast.Name) and call.func.value.id in df_names):
         return
     for kw in call.keywords:
         if kw.arg == "subset" and isinstance(kw.value, ast.List):
@@ -283,16 +278,48 @@ def _extract_apply_lambda(call: ast.Call, df_names: set[str], source: str, file:
     )
 
 
+def _walk_with_scope(
+    node: ast.AST,
+    df_names: set[str],
+    source: str,
+    file: str,
+) -> Iterable[object]:
+    """Recursively walk ``node``, switching ``df_names`` scope on
+    function entry. Function-scoped tracking prevents cross-function
+    name collisions (one function's annotated ``frame: DataFrame``
+    must not pollute another function's local ``frame`` dict).
+    """
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        local = _function_df_names(node)
+        # No DataFrame-annotated params → inherit parent scope.
+        # Empty inherited scope is fine; the receiver check still fails.
+        scope = local if local else df_names
+        for stmt in node.body:
+            yield from _walk_with_scope(stmt, scope, source, file)
+        return
+
+    if isinstance(node, ast.Subscript):
+        yield from _extract_boolean_mask(node, df_names, source, file)
+    elif isinstance(node, ast.Assign):
+        yield from _extract_derived_column(node, df_names, source, file)
+    elif isinstance(node, ast.Call):
+        yield from _extract_dropna(node, df_names, source, file)
+        yield from _extract_apply_lambda(node, df_names, source, file)
+    elif isinstance(node, ast.Constant):
+        yield from _extract_embedded_sql(node, source, file)
+
+    for child in ast.iter_child_nodes(node):
+        yield from _walk_with_scope(child, df_names, source, file)
+
+
 def extract_pipeline(pm: ParsedModule) -> Iterable[object]:
+    """Walk the module recursively, tracking DataFrame names per function.
+
+    Module-level scope falls back to the ``"df"`` convention so bare-
+    pandas code (no type annotations) still produces extractions.
+    Function-scoped overrides happen inside ``_walk_with_scope``.
+    """
     file = str(pm.path)
-    df_names = _collect_df_names(pm)
-    for node in ast.walk(pm.tree):
-        if isinstance(node, ast.Subscript):
-            yield from _extract_boolean_mask(node, df_names, pm.source, file)
-        elif isinstance(node, ast.Assign):
-            yield from _extract_derived_column(node, df_names, pm.source, file)
-        elif isinstance(node, ast.Call):
-            yield from _extract_dropna(node, pm.source, file)
-            yield from _extract_apply_lambda(node, df_names, pm.source, file)
-        elif isinstance(node, ast.Constant):
-            yield from _extract_embedded_sql(node, pm.source, file)
+    initial = {"df"}
+    for stmt in pm.tree.body:
+        yield from _walk_with_scope(stmt, initial, pm.source, file)

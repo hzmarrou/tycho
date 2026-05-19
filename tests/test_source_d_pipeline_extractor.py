@@ -309,3 +309,94 @@ def test_pipeline_apply_lambda_non_param_lhs_emits_nothing(tmp_path):
         and r.code_context.startswith("apply lambda")
     ]
     assert rules == [], f"non-param-LHS lambda must not emit: {rules}"
+
+
+def test_pipeline_dropna_on_non_dataframe_receiver_is_skipped(tmp_path):
+    """A custom class that happens to expose .dropna(subset=...) must
+    NOT emit required rules — only tracked DataFrame names qualify."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "import pandas as pd\n"
+        "class FakeCleaner:\n"
+        "    def dropna(self, subset=None):\n"
+        "        return self\n"
+        "def run(df: pd.DataFrame):\n"
+        "    fc = FakeCleaner()\n"
+        "    fc.dropna(subset=['borrower_id'])\n"
+        "    return df\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_pipeline(pm))
+    rules = [
+        r for r in facts
+        if isinstance(r, RuleFact)
+        and r.predicate == "required"
+        and r.subject_attribute == "borrower_id"
+    ]
+    assert rules == [], f"non-DataFrame dropna leaked required rule: {rules}"
+
+
+def test_pipeline_df_names_are_function_scoped_not_module_global(tmp_path):
+    """One function annotating `frame: DataFrame` must NOT leak into
+    another function's local use of `frame` as a dict."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "import pandas as pd\n"
+        "from pandas import DataFrame\n"
+        "def transform_frame(frame: DataFrame):\n"
+        "    frame['risk_band'] = 'high'\n"
+        "def use_dict(frame):\n"
+        "    frame['risk_band'] = 'low'\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_pipeline(pm))
+    # transform_frame's frame IS tracked — must emit.
+    # use_dict's frame is NOT tracked (no DataFrame annotation in its
+    # own scope, and parent scope is the module-level {"df"} fallback).
+    # We expect exactly ONE risk_band AttributeFact.
+    risk_band_attrs = [
+        a for a in facts
+        if isinstance(a, AttributeFact) and a.name == "risk_band"
+    ]
+    assert len(risk_band_attrs) == 1, (
+        f"expected 1 risk_band AttributeFact from transform_frame only, "
+        f"got {len(risk_band_attrs)}: {risk_band_attrs}"
+    )
+
+
+def test_pipeline_nested_function_inherits_parent_df_scope(tmp_path):
+    """A nested function with no annotations inherits its enclosing
+    function's DataFrame scope (closure semantics)."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "import pandas as pd\n"
+        "def outer(df: pd.DataFrame):\n"
+        "    def inner():\n"
+        "        df['x'] = 1\n"
+        "    inner()\n"
+        "    return df\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_pipeline(pm))
+    # Inner's `df['x'] = 1` should still emit because df is inherited
+    # from the outer scope.
+    x_attrs = [a for a in facts if isinstance(a, AttributeFact) and a.name == "x"]
+    assert x_attrs, "expected inner function to inherit outer's df scope"
+
+
+def test_pipeline_function_with_non_dataframe_annotated_param_does_not_track_it(tmp_path):
+    """A param annotated as something OTHER than DataFrame must NOT be
+    tracked, even if a sibling param is a DataFrame."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "import pandas as pd\n"
+        "def f(a: pd.DataFrame, b: str):\n"
+        "    a['x'] = 1\n"
+        "    b_dict = {}\n"
+        "    b_dict['y'] = 2\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_pipeline(pm))
+    attr_names = {a.name for a in facts if isinstance(a, AttributeFact)}
+    assert "x" in attr_names, "a's DataFrame derived column must emit"
+    assert "y" not in attr_names, "b_dict's keyed assign must not emit"
