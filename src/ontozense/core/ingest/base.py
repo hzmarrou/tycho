@@ -67,6 +67,7 @@ class IntermediateCandidate:
     promotion_reason: str
     suppression_reason: str | None = None
     suppressed: bool = False
+    rule_payload: dict | None = None
 
 
 class IngestionPolicy(ABC):

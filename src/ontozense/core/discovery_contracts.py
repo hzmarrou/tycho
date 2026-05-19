@@ -83,6 +83,7 @@ class CandidateConcept:
     promotion_reason: str = ""
     suppression_reason: str | None = None
     suppressed: bool = False
+    rule_payload: dict | None = None
 
     def to_dict(self) -> dict[str, Any]:
         raw = asdict(self)
