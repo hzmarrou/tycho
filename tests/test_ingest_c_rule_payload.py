@@ -194,3 +194,52 @@ def test_check_constraint_on_excluded_column_is_suppressed(tmp_path: Path):
     ]
     assert len(amount_checks) == 1
     assert amount_checks[0].suppressed is False
+
+
+def test_check_with_non_literal_rhs_is_suppressed(tmp_path: Path):
+    """CHECK with non-literal RHS (e.g. column-vs-column comparison) is
+    audit-only. Confirms the non_literal_rhs suppression reason path."""
+    sql = tmp_path / "loans.sql"
+    sql.write_text(
+        "CREATE TABLE loan (\n"
+        "  amount NUMERIC,\n"
+        "  minimum NUMERIC,\n"
+        "  CHECK (amount > minimum)\n"
+        ");\n",
+        encoding="utf-8",
+    )
+    cands = _ingest(sql)
+    suppressed = [
+        c for c in cands
+        if c.suppressed and c.raw_type == "check_constraint"
+    ]
+    assert len(suppressed) == 1
+    assert suppressed[0].suppression_reason
+    assert suppressed[0].suppression_reason.startswith(
+        "non_trivial_check_constraint:non_literal_rhs"
+    )
+
+
+def test_inline_complex_check_on_excluded_column_combines_reasons(tmp_path: Path):
+    """When an inline CHECK is BOTH complex AND on an exclude_columns
+    column, the audit shell must record both attribution paths."""
+    sql = tmp_path / "loans.sql"
+    sql.write_text(
+        "CREATE TABLE loan (\n"
+        "  internal_calc NUMERIC NOT NULL CHECK (internal_calc * 2 > 0)\n"
+        ");\n",
+        encoding="utf-8",
+    )
+    cands = list(
+        SourceCIngester(config={"exclude_columns": ["internal_calc"]})
+        .ingest({"files": [str(sql)]})
+    )
+    check_audits = [
+        c for c in cands
+        if c.suppressed and c.raw_type == "check_constraint"
+    ]
+    assert len(check_audits) == 1
+    reason = check_audits[0].suppression_reason or ""
+    assert reason.startswith("non_trivial_check_constraint:")
+    assert "column also excluded" in reason
+    assert "exclude_columns" in reason

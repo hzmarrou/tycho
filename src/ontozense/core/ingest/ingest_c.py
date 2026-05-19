@@ -341,6 +341,10 @@ class SourceCIngester(IngestionPolicy):
         # All three share the column's suppression decision.
         constraints = tdata["constraints"]
         column_decisions: dict[str, tuple[bool, str | None]] = {}
+        # CHECK dedup key uses sqlglot's .sql() output — same logical
+        # predicate produces the same string within a dialect, but
+        # different source quoting/casing can render differently. Safe
+        # for single-dialect DDL parsing, which is the v1.1+ contract.
         seen_check_sql: set[str] = set()
 
         for col_name, col_type in columns:
@@ -432,6 +436,12 @@ class SourceCIngester(IngestionPolicy):
                         rule_payload=payload,
                     )
                 else:
+                    # Combine the technical (non-trivial) reason with the
+                    # column's exclusion reason when both fire. The audit
+                    # consumer needs to see both attribution paths.
+                    combined_reason = suppress_reason
+                    if final_suppressed and final_reason and final_reason != suppress_reason:
+                        combined_reason = f"{suppress_reason}; column also excluded: {final_reason}"
                     yield IntermediateCandidate(
                         label=f"complex check on {tname}: {check_expr.sql()[:80]}",
                         definition=f"Non-trivial CHECK constraint on {tname}",
@@ -441,8 +451,8 @@ class SourceCIngester(IngestionPolicy):
                         eid="",
                         artifact_kind=ArtifactKind.RULE,
                         strength=Strength.WEAK,
-                        promotion_reason=f"Source C: complex CHECK ({check_expr.sql()[:80]}) on {tname} — audit only.",
-                        suppression_reason=suppress_reason,
+                        promotion_reason=f"Source C: non-trivial inline CHECK on {tname}.{col_name}.",
+                        suppression_reason=combined_reason,
                         suppressed=True,
                     )
 
