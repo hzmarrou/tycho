@@ -1,0 +1,122 @@
+"""Procedural family — module-level functions, guard clauses, defaults.
+
+Three patterns (spec §6.3, §9.1):
+  - if <param>["<key>"] <op> <literal>: raise  ->  validation rule
+  - if <param>.get("<key>") is None: <param>["<key>"] = <literal>  ->  defaulting rule
+  - validate_*/check_*/assert_* functions with no extractable body  ->  weak rule
+
+subject_entity is intentionally None at IR time; the anchor layer
+(Task 13) resolves or suppresses. Bare ast.Name comparisons are NOT
+extracted — that would over-promote local temporaries (same discipline
+as model_extractor after Task 9 fix 82d5e12).
+"""
+from __future__ import annotations
+
+import ast
+from collections.abc import Iterable
+
+from .ir import EvidenceSpan, RuleFact
+from .parse import ParsedModule
+
+_CMP_INVERSE = {
+    ast.Lt: "gte",
+    ast.LtE: "gt",
+    ast.Gt: "lte",
+    ast.GtE: "lt",
+    ast.Eq: "neq",
+    ast.NotEq: "eq",
+}
+
+_VALIDATE_PREFIXES = ("validate_", "check_", "assert_")
+
+
+def _span(node: ast.AST, file: str, source: str) -> EvidenceSpan:
+    start = getattr(node, "lineno", 1)
+    end = getattr(node, "end_lineno", start)
+    snippet = ast.get_source_segment(source, node) or ""
+    return EvidenceSpan(file=file, start_line=start, end_line=end, snippet=snippet[:200])
+
+
+def _key_from_subscript(node: ast.expr) -> str | None:
+    """Extract the string key from `<obj>["<key>"]`. Returns None if shape
+    doesn't match or the slice isn't a string literal."""
+    if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
+        return node.slice.value if isinstance(node.slice.value, str) else None
+    return None
+
+
+def _is_get_is_none(test: ast.expr) -> str | None:
+    """Detect `<obj>.get("<key>") is None`. Return "<key>" or None."""
+    if not (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.Is)):
+        return None
+    left, right = test.left, test.comparators[0]
+    if not (isinstance(right, ast.Constant) and right.value is None):
+        return None
+    if isinstance(left, ast.Call) and isinstance(left.func, ast.Attribute) and left.func.attr == "get":
+        if left.args and isinstance(left.args[0], ast.Constant) and isinstance(left.args[0].value, str):
+            return left.args[0].value
+    return None
+
+
+def _extract_function_rules(func: ast.FunctionDef, source: str, file: str) -> Iterable[RuleFact]:
+    for node in ast.walk(func):
+        if isinstance(node, ast.If) and node.body:
+            test = node.test
+            if isinstance(test, ast.Compare) and len(test.ops) == 1 and type(test.ops[0]) in _CMP_INVERSE:
+                attr = _key_from_subscript(test.left)
+                if attr is None:
+                    continue
+                rhs = test.comparators[0]
+                if not isinstance(rhs, ast.Constant):
+                    continue
+                if isinstance(node.body[0], ast.Raise):
+                    yield RuleFact(
+                        rule_kind="validation",
+                        subject_entity=None,
+                        subject_attribute=attr,
+                        predicate=_CMP_INVERSE[type(test.ops[0])],
+                        object_value=rhs.value,
+                        expression=ast.unparse(test),
+                        evidence_span=_span(node, file, source),
+                        code_context=f"def {func.name}",
+                        confidence=0.8,
+                        extractor_family="procedural",
+                    )
+            attr = _is_get_is_none(test)
+            if attr is not None and node.body:
+                first = node.body[0]
+                if isinstance(first, ast.Assign) and isinstance(first.value, ast.Constant):
+                    yield RuleFact(
+                        rule_kind="defaulting",
+                        subject_entity=None,
+                        subject_attribute=attr,
+                        predicate="default_to",
+                        object_value=first.value.value,
+                        expression=ast.unparse(first),
+                        evidence_span=_span(node, file, source),
+                        code_context=f"def {func.name}",
+                        confidence=0.85,
+                        extractor_family="procedural",
+                    )
+
+
+def extract_procedural(pm: ParsedModule) -> Iterable[RuleFact]:
+    file = str(pm.path)
+    for name, func in pm.functions.items():
+        yielded_any = False
+        for r in _extract_function_rules(func, pm.source, file):
+            yielded_any = True
+            yield r
+        if not yielded_any and name.startswith(_VALIDATE_PREFIXES):
+            yield RuleFact(
+                rule_kind="validation",
+                subject_entity=None,
+                subject_attribute=None,
+                predicate="required",
+                object_value=name,
+                expression=name,
+                evidence_span=_span(func, file, pm.source),
+                code_context=f"def {name}",
+                confidence=0.4,
+                extractor_family="procedural",
+            )
