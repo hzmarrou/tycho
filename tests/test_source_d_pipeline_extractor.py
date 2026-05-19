@@ -34,3 +34,72 @@ def test_pipeline_dropna_subset_emits_required_rule():
         r.subject_attribute == "borrower_id" and r.predicate == "required"
         for r in rules
     )
+
+
+def test_pipeline_dropna_multi_column_emits_one_rule_per_column(tmp_path):
+    """dropna(subset=[multiple]) must emit one required-rule per column."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "import pandas as pd\n"
+        "def clean(df):\n"
+        "    return df.dropna(subset=['a', 'b', 'c'])\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_pipeline(pm))
+    rules = [r for r in facts if isinstance(r, RuleFact) and r.predicate == "required"]
+    assert {r.subject_attribute for r in rules} == {"a", "b", "c"}, (
+        f"expected one required rule per column, got: {[r.subject_attribute for r in rules]}"
+    )
+
+
+def test_pipeline_non_dataframe_assign_does_not_trigger_derived_column(tmp_path):
+    """Plain Python assignments like `x = 5` must not be interpreted as
+    derived-column patterns."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "import pandas as pd\n"
+        "def helper():\n"
+        "    x = 5\n"
+        "    counter = x + 1\n"
+        "    return counter\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_pipeline(pm))
+    attrs = [f for f in facts if isinstance(f, AttributeFact)]
+    rules = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "derivation"]
+    assert attrs == [], f"plain assign should not produce AttributeFact: {attrs}"
+    assert rules == [], f"plain assign should not produce derivation rule: {rules}"
+
+
+def test_pipeline_dropna_without_subset_produces_no_rules(tmp_path):
+    """df.dropna() without an explicit subset= kwarg has no column-level
+    semantic -- must produce no rules."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "import pandas as pd\n"
+        "def clean(df):\n"
+        "    return df.dropna()\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_pipeline(pm))
+    rules = [r for r in facts if isinstance(r, RuleFact)]
+    assert rules == [], f"dropna without subset must produce no rules: {rules}"
+
+
+def test_pipeline_boolean_mask_uses_direct_op_mapping(tmp_path):
+    """Confirm pipeline_extractor's _CMP is NOT inverted: a `<= 100`
+    mask must produce predicate 'lte', not 'gt' (which is what the
+    model/procedural inverted mapping would emit)."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "import pandas as pd\n"
+        "def cap(df):\n"
+        "    return df[df['score'] <= 100]\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_pipeline(pm))
+    rules = [r for r in facts if isinstance(r, RuleFact)]
+    assert any(
+        r.subject_attribute == "score" and r.predicate == "lte" and r.object_value == 100
+        for r in rules
+    ), f"expected score lte 100, got: {[(r.subject_attribute, r.predicate, r.object_value) for r in rules]}"
