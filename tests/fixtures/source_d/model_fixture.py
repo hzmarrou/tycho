@@ -1,4 +1,7 @@
-"""Model-family fixture: classes, dataclasses, pydantic, enum, validator."""
+"""Model-family fixture: classes, dataclasses, pydantic, enum, validator.
+
+Uses Pydantic v2's ``field_validator`` API (project requires Pydantic >= 2).
+"""
 from dataclasses import dataclass
 from enum import Enum
 
