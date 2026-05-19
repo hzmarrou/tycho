@@ -45,6 +45,33 @@ def _is_enum(cls: ast.ClassDef) -> bool:
     return any(b in ENUM_BASES for b in _base_names(cls))
 
 
+def _has_decorator(cls: ast.ClassDef, name: str) -> bool:
+    """True if cls is decorated with @<name> or @<name>(...)."""
+    for deco in cls.decorator_list:
+        if isinstance(deco, ast.Name) and deco.id == name:
+            return True
+        if isinstance(deco, ast.Call) and isinstance(deco.func, ast.Name) and deco.func.id == name:
+            return True
+        if isinstance(deco, ast.Attribute) and deco.attr == name:
+            return True
+    return False
+
+
+def _classify_class(cls: ast.ClassDef) -> str:
+    """Return the v1.1-compatible raw_type label for a class:
+    'dataclass' | 'pydantic_model' | 'sqlalchemy_model' | 'class'.
+    Enums are handled separately by extract_model (they become VocabularyFact).
+    """
+    if _has_decorator(cls, "dataclass"):
+        return "dataclass"
+    bases = _base_names(cls)
+    if any(b in PYDANTIC_BASES for b in bases):
+        return "pydantic_model"
+    if any(b in ORM_BASES for b in bases):
+        return "sqlalchemy_model"
+    return "class"
+
+
 def _enum_members(cls: ast.ClassDef) -> list[str]:
     members: list[str] = []
     for stmt in cls.body:
@@ -73,7 +100,7 @@ def extract_model(pm: ParsedModule) -> Iterable[object]:
             extractor_family="model",
             docstring=ast.get_docstring(cls),
             bases=_base_names(cls),
-            raw_type="class",
+            raw_type=_classify_class(cls),
         )
 
         for stmt in cls.body:

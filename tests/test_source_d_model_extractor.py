@@ -75,3 +75,53 @@ def test_model_extractor_extracts_init_guard(tmp_path):
         and r.predicate == "gte" and r.object_value == 0
         for r in rules
     )
+
+
+def test_model_extractor_classifies_dataclass_raw_type():
+    pm = parse_module(FIXTURES / "model_fixture.py")
+    facts = list(extract_model(pm))
+    borrower = next(
+        f for f in facts
+        if isinstance(f, EntityFact) and f.name == "Borrower"
+    )
+    assert borrower.raw_type == "dataclass"
+
+
+def test_model_extractor_classifies_pydantic_raw_type():
+    pm = parse_module(FIXTURES / "model_fixture.py")
+    facts = list(extract_model(pm))
+    loan = next(
+        f for f in facts
+        if isinstance(f, EntityFact) and f.name == "Loan"
+    )
+    assert loan.raw_type == "pydantic_model"
+
+
+def test_model_extractor_classifies_sqlalchemy_raw_type(tmp_path):
+    f = tmp_path / "orm.py"
+    f.write_text(
+        "from sqlalchemy.orm import declarative_base\n"
+        "Base = declarative_base()\n"
+        "class Account(Base):\n"
+        "    pass\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_model(pm))
+    account = next(
+        x for x in facts if isinstance(x, EntityFact) and x.name == "Account"
+    )
+    assert account.raw_type == "sqlalchemy_model"
+
+
+def test_model_extractor_classifies_plain_class_raw_type(tmp_path):
+    f = tmp_path / "plain.py"
+    f.write_text(
+        "class Plain:\n"
+        "    x: int = 0\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_model(pm))
+    plain = next(
+        x for x in facts if isinstance(x, EntityFact) and x.name == "Plain"
+    )
+    assert plain.raw_type == "class"
