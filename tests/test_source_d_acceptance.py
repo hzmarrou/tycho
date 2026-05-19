@@ -264,3 +264,35 @@ def test_ac8_provenance_points_to_exact_line(tmp_path):
     assert rule.source_artifact.endswith(":L4")
     assert rule.rule_payload["evidence_span"]["file"].endswith("m.py")
     assert rule.rule_payload["evidence_span"]["start_line"] == 4
+
+
+# ---------------------------------------------------------------------------
+# Task 21 — AC9: LLM-off behavior parity
+# ---------------------------------------------------------------------------
+
+class _NoopLLM:
+    def rephrase(self, label, payload):
+        return f"[REPHRASED] {label}"
+
+
+def test_ac9_llm_off_preserves_rule_set():
+    """AC9: Disabling the LLM normalize pass must leave the set of
+    promoted (non-suppressed) rules unchanged. Identity is the
+    structured merge_key, not the surface label."""
+    cands_off = _run_hybrid()
+    cands_on = list(normalize_labels(_run_hybrid(), llm=_NoopLLM()))
+
+    def rule_keys(cands):
+        return {
+            _mk(c.rule_payload)
+            for c in cands
+            if c.artifact_kind == ArtifactKind.RULE and c.rule_payload and not c.suppressed
+        }
+
+    assert rule_keys(cands_off) == rule_keys(cands_on), (
+        "LLM must not change merge identity — only labels"
+    )
+    on_labels = {c.label for c in cands_on if c.artifact_kind == ArtifactKind.RULE and not c.suppressed}
+    assert any(l.startswith("[REPHRASED]") for l in on_labels), (
+        "LLM was supposed to rephrase at least one label"
+    )
