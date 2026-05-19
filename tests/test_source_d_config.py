@@ -105,6 +105,36 @@ def test_exclude_functions_takes_precedence_over_force_rule(tmp_path):
     assert rules == [], f"exclude_functions must win over force_rule: {rules}"
 
 
+def test_rule_extractors_empty_list_runs_no_families(tmp_path):
+    """An explicitly empty rule_extractors list means 'run nothing',
+    not 'run everything'. The allowlist contract is key-presence based:
+    if the user sets the key, the filter applies — even if the list
+    is empty (which is a sharp 'opt out of all extraction' signal)."""
+    p = _write(tmp_path,
+        "class Loan:\n"
+        "    amount: float\n"
+        "def validate_amount(x):\n"
+        "    if x['amount'] <= 0:\n"
+        "        raise ValueError\n"
+    )
+    out = list(run(p, config={"rule_extractors": []}))
+    assert out == [], (
+        f"empty rule_extractors must run no families; got {len(out)} candidates: "
+        f"{[(c.label, c.artifact_kind) for c in out]}"
+    )
+
+
+def test_rule_extractors_none_value_runs_no_families(tmp_path):
+    """rule_extractors: None is normalized to empty allowlist — same
+    semantics as explicit empty list."""
+    p = _write(tmp_path,
+        "class Loan:\n"
+        "    amount: float\n"
+    )
+    out = list(run(p, config={"rule_extractors": None}))
+    assert out == []
+
+
 def test_exclude_functions_case_insensitive(tmp_path):
     """glob_match is case-insensitive; exclude_functions: ["*_Internal"]
     must match validate_internal regardless of platform (was a Linux

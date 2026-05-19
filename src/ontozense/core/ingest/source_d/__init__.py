@@ -55,8 +55,9 @@ def run(
         logger.warning("Source D: skipping %s (%s)", path, exc)
         return
     families = select_families(pm)
-    if config.get("rule_extractors"):
-        families = [f for f in families if f in set(config["rule_extractors"])]
+    if "rule_extractors" in config:
+        allowed = set(config["rule_extractors"] or [])
+        families = [f for f in families if f in allowed]
     facts: list[object] = []
     for fam in families:
         if fam == "model":
