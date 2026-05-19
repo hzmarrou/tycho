@@ -67,7 +67,7 @@ def _emit_vocabulary(f: VocabularyFact) -> IntermediateCandidate:
         eid="",
         artifact_kind=ArtifactKind.VOCABULARY,
         strength=Strength.MEDIUM,
-        promotion_reason="model: enum class",
+        promotion_reason=f"{f.extractor_family}: enum class",
     )
 
 
@@ -82,7 +82,7 @@ def _emit_behavior(f: BehaviorFact) -> IntermediateCandidate:
         eid="",
         artifact_kind=ArtifactKind.BEHAVIOR,
         strength=Strength.WEAK,
-        promotion_reason="model: non-private method",
+        promotion_reason=f"{f.extractor_family}: non-private method",
     )
 
 
@@ -126,5 +126,10 @@ def emit_candidates(
             yield _emit_behavior(f)
         elif isinstance(f, RuleFact):
             yield _emit_rule(f)
+        else:
+            raise TypeError(
+                f"emit_candidates: unknown IR fact type {type(f).__name__!r}. "
+                "Did a new IR class get added without updating the emit dispatch?"
+            )
     for rule, reason in suppressed:
         yield _emit_rule(rule, suppressed=True, reason=reason)

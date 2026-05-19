@@ -61,7 +61,7 @@ class IntermediateCandidate:
     source_type: str            # "A" | "B" | "C" | "D"
     source_artifact: str        # file path + locator
     raw_type: str               # source-native type hint
-    eid: str                    # optional profile-mode id (default "")
+    eid: str                    # profile-mode id; pass "" when not in profile mode
     artifact_kind: ArtifactKind
     strength: Strength
     promotion_reason: str
