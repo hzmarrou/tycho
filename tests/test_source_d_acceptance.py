@@ -1,6 +1,7 @@
 """Acceptance regressions for Task 15 — production-path Source D pipeline."""
 from pathlib import Path
 
+from ontozense.core.ingest.base import ArtifactKind
 from ontozense.core.ingest.ingest_d import SourceDIngester
 
 
@@ -42,9 +43,6 @@ def test_run_skips_unparseable_python_without_raising(tmp_path: Path):
     assert "Baz" in labels
 
 
-from ontozense.core.ingest.base import ArtifactKind
-
-
 REPO = Path(__file__).parent / "fixtures" / "source_d" / "hybrid_repo"
 
 
@@ -81,6 +79,20 @@ def test_ac5_pipeline_entities_attributes_rules_without_classes():
     )
     assert any(r.rule_payload["subject_attribute"] == "borrower_id" for r in pipe_rules), (
         f"missing borrower_id rule from dropna; got: {[r.rule_payload['subject_attribute'] for r in pipe_rules]}"
+    )
+
+    # AC5 also requires pipeline extractor to seed ATTRIBUTES.
+    # `df["risk_band"] = df["score"]` is a derived-column assignment
+    # that emits an AttributeFact for `risk_band`.
+    pipe_attrs = [
+        c for c in cands
+        if c.artifact_kind == ArtifactKind.ATTRIBUTE
+        and c.label == "risk_band"
+    ]
+    assert pipe_attrs, (
+        "expected risk_band AttributeFact from pipeline derived-column "
+        f"`df['risk_band'] = df['score']`; got attribute labels: "
+        f"{[c.label for c in cands if c.artifact_kind == ArtifactKind.ATTRIBUTE]}"
     )
 
 
