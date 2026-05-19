@@ -19,7 +19,13 @@ from .ir import AttributeFact, RuleFact
 
 def anchor_facts(facts: Iterable[object]) -> tuple[list[object], list[tuple[object, str]]]:
     """Resolve or suppress RuleFacts. Returns (anchored, suppressed) where
-    suppressed is a list of (rule, reason) tuples for the audit block."""
+    suppressed is a list of (rule, reason) tuples for the audit block.
+
+    Note: single-match RuleFacts are mutated in-place — ``subject_entity``
+    is set on the original ``RuleFact`` object. The IR is mutable by
+    design (Task 5); callers that hold references to these facts will
+    see the resolved subject_entity after this function returns.
+    """
     facts = list(facts)
     attr_index: dict[str, list[str]] = {}
     for f in facts:
