@@ -146,7 +146,66 @@ Expected output includes:
 - `governance.json` (18 NPL governance terms)
 - `npl-code/` (Source D code fixtures organised by topic)
 
-### B.3 *(Skip-the-LLM shortcut)* — provide a pre-extracted Source A
+### B.3 *(v1.1)* Drop a small NPL DDL fixture for Source C
+
+The bundled NPL data doesn't ship a `CREATE TABLE` schema (only
+`ALTER TABLE` constraint files and a `CREATE VIEW` regulatory
+query, which v1.1's sqlglot-based Source C ingester doesn't yet
+handle). Drop a minimal NPL-flavoured DDL into the workspace so
+Source C has real input for this walkthrough:
+
+```powershell
+@'
+CREATE TABLE loan (
+    loan_id INT PRIMARY KEY,
+    borrower_id INT,
+    principal_balance DECIMAL(18,2),
+    days_past_due INT,
+    is_non_performing BOOLEAN,
+    default_date DATE,
+    origination_date DATE,
+    created_at TIMESTAMP,
+    FOREIGN KEY (borrower_id) REFERENCES borrower(borrower_id)
+);
+
+CREATE TABLE borrower (
+    borrower_id INT PRIMARY KEY,
+    name VARCHAR(200),
+    industry_segment_code VARCHAR(20)
+);
+
+CREATE TABLE forbearance_event (
+    forbearance_event_id INT PRIMARY KEY,
+    loan_id INT,
+    start_date DATE,
+    end_date DATE,
+    FOREIGN KEY (loan_id) REFERENCES loan(loan_id)
+);
+
+CREATE TABLE loan_status_lookup (
+    code VARCHAR(10) PRIMARY KEY,
+    description VARCHAR(200)
+);
+
+CREATE TABLE loan_audit (
+    audit_id INT PRIMARY KEY,
+    loan_id INT,
+    event VARCHAR(50),
+    occurred_at TIMESTAMP
+);
+'@ | Out-File -Encoding utf8 domains/npl/sources/npl-schema.sql
+```
+
+You can adapt these tables to your own schema later — the key
+shapes this fixture demonstrates are: regular tables (`loan`,
+`borrower`, `forbearance_event`) → entity candidates; a code-table
+(`loan_status_lookup` — 2-col code+description) → vocabulary
+candidate via the auto-detector; an audit table (`loan_audit`) →
+suppressed entry in the new `audit` block; a `created_at` column
+→ suppressed; a domain-bearing `default_date` / `origination_date`
+→ kept; two foreign keys → relationship candidates.
+
+### B.4 *(Skip-the-LLM shortcut)* — provide a pre-extracted Source A
 
 If you don't have Azure OpenAI configured yet, you can hand the
 tutorial a pre-extracted `source-a.json` so the survey step
@@ -170,7 +229,7 @@ doesn't need to call an LLM:
 '@ | Out-File -Encoding utf8 domains/npl/sources/source-a.json
 ```
 
-If you have Azure OpenAI keys in `.env`, skip B.3 and let
+If you have Azure OpenAI keys in `.env`, skip B.4 and let
 `survey` extract from the markdown directly.
 
 ---
@@ -178,25 +237,38 @@ If you have Azure OpenAI keys in `.env`, skip B.3 and let
 ## Part C — Survey the NPL sources
 
 A single command extracts (or reuses) Source A, merges in Source
-B governance, **and (new in v1.1) parses Source D Python code into
-first-class candidates** — all into one candidate graph for
-inspection.
+B governance, **(new in v1.1) parses Source C SQL DDL into
+entity / attribute / relationship / vocabulary candidates, AND
+parses Source D Python code into first-class candidates** — all
+into one candidate graph for inspection.
 
-### C.1 Run survey (A + B + D)
+### C.1 Run survey (A + B + C + D)
 
 ```powershell
 ontozense survey `
   --source-a domains/npl/sources/source-a.json `
   --source-b domains/npl/sources/governance.json `
+  --source-c domains/npl/sources/npl-schema.sql `
   --source-d domains/npl/sources/npl-code `
   --domain-dir domains/npl
 ```
 
-(If you skipped B.3 and have Azure OpenAI configured, replace
+(If you skipped B.4 and have Azure OpenAI configured, replace
 `--source-a domains/npl/sources/source-a.json` with
 `--source-a domains/npl/sources/npl-basel-guidelines.md` to run
 fresh LLM extraction.)
 
+> **Source C in v1.1 (new):** `--source-c .sql` is parsed via
+> sqlglot. Each `CREATE TABLE` becomes an entity candidate; columns
+> become attributes (PK columns demoted, FK columns route through
+> the FK relationship instead); foreign keys emit relationship
+> candidates with synthetic labels of the form
+> `<src>__<col>__<ref>`; tables matching the code-table heuristic
+> (e.g. `loan_status_lookup`) classify as vocabulary candidates
+> instead of entities. Tables matching audit / timestamp / system
+> patterns are routed to the new `audit` block. Mixed `.sql` +
+> `.json` in one `--source-c` invocation is rejected.
+>
 > **Source D in v1.1 (changed behaviour):** `--source-d` is now an
 > active participant in the candidate graph at the **survey** stage,
 > not just at `draft`. The deterministic AST extractor walks the
@@ -206,13 +278,6 @@ fresh LLM extraction.)
 > functions (`validate_*` / `check_*` / `assert_*`), and behaviour
 > candidates for other methods — all at *survey* time. No LLM call
 > involved.
->
-> **Source C (SQL DDL):** also accepted (`--source-c file.sql`),
-> with the same first-class treatment as Source D. The bundled NPL
-> fixture doesn't ship a `CREATE TABLE` schema, so this tutorial
-> omits Source C. See
-> [`docs/ontozense-npl-advanced.md`](./ontozense-npl-advanced.md)
-> Part E for a worked Source C example.
 
 ✓ **Expected output:**
 
@@ -238,18 +303,30 @@ Get-ChildItem domains/npl/discovery
 ```powershell
 @'
 import json
+from collections import Counter
+
 g = json.load(open("domains/npl/discovery/candidate-graph.json"))
 print(f"concepts:      {len(g['concepts'])}")
 print(f"relationships: {len(g['relationships'])}")
 print(f"audit:         {len(g.get('audit', []))}  (v1.1 — suppressed candidates)")
 print()
 
+# Per-source attestation counts (one concept can attest in multiple sources).
+by_source = Counter()
+for c in g["concepts"]:
+    for src, present in c["source_presence"].items():
+        if present:
+            by_source[src] += 1
+for src in "ABCD":
+    print(f"Source {src}: {by_source[src]:>3} candidates attested")
+print()
+
 # Multi-axis attestation: A=docs, B=governance, C=schema, D=code.
 two_axis = [c for c in g["concepts"]
             if sum(c["source_presence"].values()) >= 2]
 strong = [c for c in g["concepts"] if c.get("strength") == "strong"]
-print(f"multi-axis attested (>= 2 sources):  {len(two_axis)}")
-print(f"strength=strong (boosted or default): {len(strong)}")
+print(f"multi-axis attested (>= 2 sources):    {len(two_axis)}")
+print(f"strength=strong (boosted or default):  {len(strong)}")
 print()
 print("sample multi-axis-attested labels:",
       sorted({c["label"] for c in two_axis})[:10])
@@ -257,14 +334,17 @@ print("sample multi-axis-attested labels:",
 ```
 
 ✓ **Expected (v1.1):**
-- `concepts` is at least the union of A + B + D, with cross-source
+- `concepts` is at least the union of A + B + C + D, with cross-source
   merges deduplicated by canonical (singularised) label.
-- `audit` is a non-zero number when Source D contains suppressed
-  items (private classes prefixed `_`, classes in `tests/` etc.).
+- All four `Source A/B/C/D` lines show non-zero counts.
+- `audit` is a non-zero number — Source C's `loan_audit` table
+  (from the B.3 fixture) appears here along with any private
+  classes / test files from Source D.
 - `multi-axis attested` includes the concepts attested in at least
   2 of (semantic A/B, structural C, executable D). These are the
   highest-confidence concepts — the corroboration tier boost
-  promotes them to `strong`.
+  promotes them to `strong`. Expect `loan` and `borrower` here
+  (attested in A + C + D from the fixtures).
 - Sample labels are NPL business words (`Borrower`, `Loan`,
   `Forbearance`, `Collateral`, …), not `tmp_*` / `*_id`
   code-shaped names. Suppressed shapes appear in the `audit` block,
@@ -276,18 +356,24 @@ print("sample multi-axis-attested labels:",
 @'
 import json
 g = json.load(open("domains/npl/discovery/candidate-graph.json"))
-for entry in g.get("audit", [])[:5]:
-    print(f"- {entry['label']}  ({entry['source_type']})")
+for entry in g.get("audit", [])[:10]:
+    print(f"- {entry['label']:<40} ({entry['source_type']})")
     print(f"    {entry['suppression_reason']}")
 '@ | python
 ```
 
 ✓ **Expected:** each entry has a `label`, a `source_type`, and a
 human-readable `suppression_reason` that names the rule which
-filtered it (e.g. *"Default Source D suppression: path matches
-pattern 'tests/**'"*). This is what the curator inspects to decide
-whether to bring something back via a per-domain YAML override
-(see Part D.5 below).
+filtered it. From the B.3 fixture you should see at minimum:
+
+- `loan_audit  (C)` — *Default Source C suppression: table name
+  matches pattern '\*_audit'.*
+- `created_at  (C)` — *Default Source C suppression: column
+  'created_at' matches a noise filter pattern.*
+
+Plus any Source D suppressions (private classes, test files, etc.).
+This is what the curator inspects to decide whether to bring
+something back via a per-domain YAML override (see Part D.5 below).
 
 ---
 
@@ -303,6 +389,7 @@ draft OWL ontology.
 ontozense draft `
   --domain-dir domains/npl `
   --source-b domains/npl/sources/governance.json `
+  --source-c domains/npl/sources/npl-schema.sql `
   --source-d domains/npl/sources/npl-code `
   --output domains/npl/draft.owl
 ```
@@ -458,7 +545,7 @@ NPL data:
 - [ ] `ontozense survey` writes three artifacts under
   `domains/npl/discovery/` (Part C.2)
 - [ ] Multi-axis-attested concepts include real NPL terms,
-  with `source_presence` set across A/B/D (Part C.3)
+  with `source_presence` set across A/B/C/D (Part C.3)
 - [ ] `candidate-graph.json` has a non-empty `audit` array
   citing the rules that suppressed each filtered candidate
   (Part C.4) *(v1.1)*
