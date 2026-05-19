@@ -124,6 +124,9 @@ New-Item -ItemType Directory -Path domains/npl/sources -Force | Out-Null
 ### B.2 Copy the NPL fixtures into the workspace
 
 ```powershell
+# Idempotent: re-creates the workspace directory if B.1 was skipped.
+New-Item -ItemType Directory -Path domains/npl/sources -Force | Out-Null
+
 Copy-Item tests/fixtures/npl-basel-guidelines.md `
   -Destination domains/npl/sources/npl-basel-guidelines.md
 Copy-Item docs/governance_example.json `
