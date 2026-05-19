@@ -37,8 +37,13 @@ GENERATED_MARKERS: tuple[str, ...] = (
 class SourceDIngester(IngestionPolicy):
     """Source D ingester — Python AST via the source_d package."""
 
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        llm: Any | None = None,
+    ) -> None:
         self.config = config or {}
+        self.llm = llm
 
     def ingest(self, raw_input: Any) -> Iterable[IntermediateCandidate]:
         if not isinstance(raw_input, dict):
@@ -112,4 +117,4 @@ class SourceDIngester(IngestionPolicy):
                 )
                 continue
 
-            yield from source_d.run(path, config=self.config)
+            yield from source_d.run(path, config=self.config, llm=self.llm)

@@ -28,13 +28,21 @@ _EXTRACTORS = {
 }
 
 
-def run(path: Path, config: dict | None = None) -> Iterable[IntermediateCandidate]:
+def run(
+    path: Path,
+    config: dict | None = None,
+    llm=None,
+) -> Iterable[IntermediateCandidate]:
     """Run the six-stage Source D pipeline against a single Python file.
 
-    parse -> dispatch -> extract per family -> anchor -> emit.
+    parse -> dispatch -> extract per family -> anchor -> emit -> optional LLM normalize.
 
-    SyntaxError (unparseable Python) is caught and the file is silently
-    skipped (preserves v1.1 ``test_unparseable_python_skipped`` behavior).
+    ``llm`` is the optional rephraser. When None (the default),
+    normalize_labels is a no-op and the deterministic extraction
+    is unchanged (AC9).
+
+    SyntaxError or UnicodeDecodeError on parse: log a warning and skip
+    the file (matches v1.1 SourceDIngester tolerance).
     """
     config = config or {}
     try:
@@ -57,4 +65,6 @@ def run(path: Path, config: dict | None = None) -> Iterable[IntermediateCandidat
         else:
             facts.extend(_EXTRACTORS[fam](pm))
     anchored, suppressed = anchor_facts(facts)
-    yield from emit_candidates(anchored, suppressed)
+    candidates = emit_candidates(anchored, suppressed)
+    from .normalize import normalize_labels
+    yield from normalize_labels(candidates, llm=llm)

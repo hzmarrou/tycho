@@ -173,6 +173,7 @@ def build_candidate_graph(
     alias_map: dict[str, str] | None = None,
     source_c_config: dict[str, Any] | None = None,
     source_d_config: dict[str, Any] | None = None,
+    source_d_llm: Any | None = None,
 ) -> CandidateGraph:
     """Build a merged candidate graph from raw source outputs.
 
@@ -295,7 +296,7 @@ def build_candidate_graph(
     if source_c:
         _dispatch(SourceCIngester(config=source_c_config), source_c)
     if source_d:
-        _dispatch(SourceDIngester(config=source_d_config), source_d)
+        _dispatch(SourceDIngester(config=source_d_config, llm=source_d_llm), source_d)
 
     # Relationship ingestion stays in the orchestrator — it requires
     # post-merge candidate-id resolution that's only available now.
