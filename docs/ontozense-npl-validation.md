@@ -453,10 +453,19 @@ draft OWL ontology.
 ontozense draft `
   --domain-dir domains/npl `
   --source-b domains/npl/sources/governance.json `
-  --source-c domains/npl/sources/npl-schema.sql `
   --source-d domains/npl/sources/npl-code `
   --output domains/npl/draft.owl
 ```
+
+> **Note — Source C at draft time:** v1.1 wired `.sql` parsing into
+> `survey` (Task 16) but **not** into `draft`. The draft command's
+> `--source-c` flag still expects v1.0 JSON passthrough; passing the
+> `.sql` file here triggers a JSON parse error. Source C's
+> contribution to the final OWL flows through the candidate graph
+> that `survey` already produced — `draft` reads
+> `discovery/candidate-graph.json` automatically, which carries the
+> Source C entities, attributes, and FK relationships. Wiring
+> `.sql` into `draft`'s `--source-c` path is a v1.1.x follow-up.
 
 > The `--source-b` flag passes the same governance JSON to the
 > fusion engine that survey used for the candidate-graph merge.
