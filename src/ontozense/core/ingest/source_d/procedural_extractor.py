@@ -119,7 +119,7 @@ def _extract_function_rules(func: ast.FunctionDef, source: str, file: str) -> It
                         )
 
 
-def extract_procedural(pm: ParsedModule) -> Iterable[RuleFact]:
+def extract_procedural(pm: ParsedModule, config: dict | None = None) -> Iterable[RuleFact]:  # noqa: ARG001
     file = str(pm.path)
     for name, func in pm.functions.items():
         yielded_any = False

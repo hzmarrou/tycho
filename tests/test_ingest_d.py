@@ -129,12 +129,13 @@ def test_class_fields_yield_attribute_candidates(tmp_path):
     cands = list(SourceDIngester().ingest({"files": [str(f)]}))
     attrs = [c for c in cands if c.artifact_kind == ArtifactKind.ATTRIBUTE]
     labels = sorted(c.label for c in attrs)
-    assert labels == ["credit_score", "email", "name"]
+    # v1.2 wire format: attribute labels are entity-prefixed (Customer.<field>).
+    assert labels == ["Customer.credit_score", "Customer.email", "Customer.name"]
 
     for a in attrs:
         assert a.source_type == "D"
-        # raw_type carries the Python type annotation
-        assert a.raw_type in ("str", "int")
+        # v1.2 wire format: raw_type is always "attribute" (not the Python annotation).
+        assert a.raw_type == "attribute"
 
 
 def test_dataclass_fields_yield_attribute_candidates(tmp_path):
@@ -150,7 +151,8 @@ def test_dataclass_fields_yield_attribute_candidates(tmp_path):
     cands = list(SourceDIngester().ingest({"files": [str(f)]}))
     attrs = [c for c in cands if c.artifact_kind == ArtifactKind.ATTRIBUTE]
     labels = sorted(c.label for c in attrs)
-    assert labels == ["amount", "term_months"]
+    # v1.2 wire format: attribute labels are entity-prefixed (Loan.<field>).
+    assert labels == ["Loan.amount", "Loan.term_months"]
 
 
 def test_enum_subclass_is_vocabulary(tmp_path):
@@ -202,12 +204,15 @@ def test_validation_function_is_rule(tmp_path):
     cands = list(SourceDIngester().ingest({"files": [str(f)]}))
     rules = [c for c in cands if c.artifact_kind == ArtifactKind.RULE]
     rule_labels = {c.label for c in rules}
-    assert "validate_amount" in rule_labels
-    assert "check_credit_score" in rule_labels
+    # v1.2 wire format: canonical_rule_label produces "required <func_name>"
+    # for unanchored validate_*/check_* functions with no extractable body.
+    assert any("validate_amount" in lbl for lbl in rule_labels)
+    assert any("check_credit_score" in lbl for lbl in rule_labels)
 
     for r in rules:
         assert r.strength == Strength.WEAK
-        assert r.raw_type == "validation_function"
+        # v1.2 wire format: raw_type is "rule:<kind>" not "validation_function".
+        assert r.raw_type == "rule:validation"
 
 
 def test_dto_classes_flagged_with_raw_type(tmp_path):

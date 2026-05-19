@@ -26,6 +26,8 @@ class EntityFact:
     docstring: str | None = None
     bases: list[str] = field(default_factory=list)
     raw_type: str = "class"
+    suppressed: bool = False
+    suppression_reason: str | None = None
 
 
 @dataclass

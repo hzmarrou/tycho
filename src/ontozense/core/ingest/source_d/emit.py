@@ -39,6 +39,8 @@ def _emit_entity(f: EntityFact) -> IntermediateCandidate:
         artifact_kind=ArtifactKind.ENTITY,
         strength=Strength.STRONG,
         promotion_reason=f"{f.extractor_family}: class/dataclass/model",
+        suppression_reason=f.suppression_reason,
+        suppressed=f.suppressed,
     )
 
 

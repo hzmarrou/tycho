@@ -9,6 +9,11 @@ from __future__ import annotations
 import ast
 from collections.abc import Iterable
 
+from ontozense.core.ingest.filters import (
+    DEFAULT_SOURCE_D_CLASS_SUPPRESSIONS,
+    glob_match,
+)
+
 from .ir import (
     AttributeFact,
     BehaviorFact,
@@ -22,6 +27,11 @@ from .parse import ParsedModule
 ENUM_BASES = {"Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"}
 PYDANTIC_BASES = {"BaseModel", "GenericModel"}
 ORM_BASES = {"Base", "Document"}
+
+# DTO suffixes: a Pydantic model whose name ends in one of these is classified
+# as 'dto_candidate' unless include_classes overrides. This is the v1.1
+# convention preserved for downstream consumers.
+_DTO_SUFFIXES: tuple[str, ...] = ("DTO", "Request", "Response", "Schema", "Model")
 
 
 def _span(node: ast.AST, file: str, source: str) -> EvidenceSpan:
@@ -59,13 +69,20 @@ def _has_decorator(cls: ast.ClassDef, name: str) -> bool:
 
 def _classify_class(cls: ast.ClassDef) -> str:
     """Return the v1.1-compatible raw_type label for a class:
-    'dataclass' | 'pydantic_model' | 'sqlalchemy_model' | 'class'.
+    'dataclass' | 'pydantic_model' | 'dto_candidate' | 'sqlalchemy_model' | 'class'.
+
     Enums are handled separately by extract_model (they become VocabularyFact).
+
+    DTO detection: a Pydantic model whose name ends in one of the DTO
+    suffixes is classified as 'dto_candidate'. This is the v1.1
+    convention preserved for downstream consumers.
     """
     if _has_decorator(cls, "dataclass"):
         return "dataclass"
     bases = _base_names(cls)
     if any(b in PYDANTIC_BASES for b in bases):
+        if any(cls.name.endswith(s) for s in _DTO_SUFFIXES):
+            return "dto_candidate"
         return "pydantic_model"
     if any(b in ORM_BASES for b in bases):
         return "sqlalchemy_model"
@@ -82,9 +99,59 @@ def _enum_members(cls: ast.ClassDef) -> list[str]:
     return members
 
 
-def extract_model(pm: ParsedModule) -> Iterable[object]:
+def extract_model(pm: ParsedModule, config: dict | None = None) -> Iterable[object]:
+    """Extract entity, attribute, vocabulary, behavior, and inline rule facts
+    from class definitions in a parsed module.
+
+    Config keys honored (all optional):
+      - ``exclude_classes``: glob patterns (case-insensitive). Matching
+        classes are emitted as suppressed EntityFacts unless overridden by
+        ``include_classes``.
+      - ``include_classes``: glob patterns (case-insensitive). Overrides
+        both default suppressions and ``exclude_classes``. When a class
+        matches ``include_classes``, its raw_type is restored to the
+        real classifier result (never 'dto_candidate').
+      - ``force_vocabulary``: glob patterns. Matching classes emit as
+        VocabularyFact (VOCABULARY kind) at MEDIUM strength instead of
+        EntityFact.
+
+    Default class suppressions (from ``DEFAULT_SOURCE_D_CLASS_SUPPRESSIONS``):
+      Private classes (``_*``) and ``Meta`` / ``Config`` are silently
+      skipped UNLESS ``include_classes`` overrides.
+    """
+    config = config or {}
+    user_exclude: list[str] = list(config.get("exclude_classes", []) or [])
+    user_include: list[str] = list(config.get("include_classes", []) or [])
+    user_force_vocab: list[str] = list(config.get("force_vocabulary", []) or [])
     file = str(pm.path)
+
     for cls_name, cls in pm.classes.items():
+        # ── Private-class skip ────────────────────────────────────────────
+        if cls_name.startswith("_") and not glob_match(cls_name, user_include):
+            continue
+
+        # ── Resolve include/exclude/default suppression status ────────────
+        force_included = glob_match(cls_name, user_include)
+
+        # Default class suppressions (Meta, Config; also _* but handled above).
+        if not force_included and glob_match(cls_name, DEFAULT_SOURCE_D_CLASS_SUPPRESSIONS):
+            continue
+
+        # User exclude_classes: emit as suppressed EntityFact (not skipped)
+        # so downstream audit / tests can see the suppression decision.
+        class_suppressed = False
+        class_suppression_reason: str | None = None
+        if not force_included and glob_match(cls_name, user_exclude):
+            class_suppressed = True
+            for p in user_exclude:
+                if glob_match(cls_name, [p]):
+                    class_suppression_reason = (
+                        f"Per-domain config: class '{cls_name}' matches "
+                        f"exclude_classes pattern '{p}'."
+                    )
+                    break
+
+        # ── Enum → VocabularyFact ─────────────────────────────────────────
         if _is_enum(cls):
             yield VocabularyFact(
                 name=cls_name,
@@ -94,15 +161,51 @@ def extract_model(pm: ParsedModule) -> Iterable[object]:
             )
             continue
 
+        # ── Classify the class ────────────────────────────────────────────
+        raw_type = _classify_class(cls)
+
+        # include_classes overrides dto_candidate flagging: restore to base type.
+        if force_included and raw_type == "dto_candidate":
+            raw_type = "pydantic_model"
+
+        # ── force_vocabulary override ─────────────────────────────────────
+        if not class_suppressed and user_force_vocab and glob_match(cls_name, user_force_vocab):
+            yield VocabularyFact(
+                name=cls_name,
+                members=[],          # class-based vocab: no Enum members
+                evidence_span=_span(cls, file, pm.source),
+                extractor_family="model",
+            )
+            # Also emit fields as AttributeFacts (v1.1 force_vocabulary contract).
+            for stmt in cls.body:
+                if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                    yield AttributeFact(
+                        name=stmt.target.id,
+                        subject_entity=cls_name,
+                        evidence_span=_span(stmt, file, pm.source),
+                        extractor_family="model",
+                        annotation=ast.unparse(stmt.annotation) if stmt.annotation else None,
+                        has_default=stmt.value is not None,
+                    )
+            continue
+
+        # ── Emit entity ───────────────────────────────────────────────────
         yield EntityFact(
             name=cls_name,
             evidence_span=_span(cls, file, pm.source),
             extractor_family="model",
             docstring=ast.get_docstring(cls),
             bases=_base_names(cls),
-            raw_type=_classify_class(cls),
+            raw_type=raw_type,
+            suppressed=class_suppressed,
+            suppression_reason=class_suppression_reason,
         )
 
+        # Skip children when the class is user-suppressed.
+        if class_suppressed:
+            continue
+
+        # ── Class fields → AttributeFact ──────────────────────────────────
         for stmt in cls.body:
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
                 yield AttributeFact(
