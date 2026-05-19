@@ -98,13 +98,16 @@ def extract_model(pm: ParsedModule) -> Iterable[object]:
                 yield from _extract_inline_rules(cls_name, stmt, pm.source, file)
 
 
-_CMP_INVERSE = {
-    ast.Lt: ("gte", lambda v: v),       # if x < c: raise  =>  promote x >= c
-    ast.LtE: ("gt", lambda v: v),       # if x <= c: raise =>  promote x > c
-    ast.Gt: ("lte", lambda v: v),
-    ast.GtE: ("lt", lambda v: v),
-    ast.Eq: ("neq", lambda v: v),
-    ast.NotEq: ("eq", lambda v: v),
+# Predicate inversion: detect a guard `if <bad>: raise` and promote
+# the positive constraint that must hold for the code to pass.
+# Example: `if x <= 0: raise` -> emit `x gt 0` (LtE -> gt).
+_CMP_INVERSE: dict[type, str] = {
+    ast.Lt: "gte",
+    ast.LtE: "gt",
+    ast.Gt: "lte",
+    ast.GtE: "lt",
+    ast.Eq: "neq",
+    ast.NotEq: "eq",
 }
 
 
@@ -160,7 +163,7 @@ def _extract_inline_rules(cls_name: str, method: ast.FunctionDef, source: str, f
         val = _literal_value(rhs)
         if val is None:
             continue
-        predicate, _ = _CMP_INVERSE[op_type]
+        predicate = _CMP_INVERSE[op_type]
         yield RuleFact(
             rule_kind="validation",
             subject_entity=cls_name,
