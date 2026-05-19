@@ -374,3 +374,139 @@ def test_alias_map_relabels_existing_candidate_on_merge():
 
     # Original surface forms preserved in aliases.
     assert "customers" in c.aliases or "client" in c.aliases
+
+
+def test_normalisation_keeps_compound_us_suffix_words():
+    """v1.1.1 follow-up #94: inflect mangles 'loan_status' to
+    'loan_statu' and 'CustomerStatus' to 'CustomerStatu'. The
+    round-trip guard didn't catch these (the s->s round-trip is
+    reversible). Forward suffix-denylist for 'us'/'ss'/'is'
+    closes the gap."""
+    from ontozense.core.candidate_graph import _resolve_alias_with_normalisation
+
+    # Underscore-compound -us suffix
+    canon, fired = _resolve_alias_with_normalisation("loan_status", {})
+    assert canon == "loan_status", f"got {canon!r}"
+    assert fired is False
+
+    # Camel-case <word>Status
+    canon, fired = _resolve_alias_with_normalisation("CustomerStatus", {})
+    assert canon == "CustomerStatus", f"got {canon!r}"
+    assert fired is False
+
+    # -ss suffix (was already guarded by round-trip; pin it explicitly)
+    canon, fired = _resolve_alias_with_normalisation("Address", {})
+    assert canon == "Address", f"got {canon!r}"
+    assert fired is False
+
+    # -is suffix (analysis, basis, …)
+    canon, fired = _resolve_alias_with_normalisation("analysis", {})
+    assert canon == "analysis", f"got {canon!r}"
+    assert fired is False
+
+
+def test_normalisation_still_singularises_clean_plurals():
+    """The denylist must NOT regress clean plural cases."""
+    from ontozense.core.candidate_graph import _resolve_alias_with_normalisation
+
+    canon, fired = _resolve_alias_with_normalisation("customers", {})
+    assert canon == "customer"
+    assert fired is False
+
+    canon, fired = _resolve_alias_with_normalisation("countries", {})
+    assert canon == "country"
+
+    canon, fired = _resolve_alias_with_normalisation("addresses", {})
+    assert canon == "address"
+
+    canon, fired = _resolve_alias_with_normalisation("orders", {})
+    assert canon == "order"
+
+    # Singular forms already correct — pass through unchanged.
+    canon, fired = _resolve_alias_with_normalisation("customer", {})
+    assert canon == "customer"
+
+
+def test_synthetic_fk_label_bypasses_canonicalisation_only_for_source_c():
+    """v1.1.1 follow-up #95 (corrected): the synthetic FK bypass
+    applies ONLY when source_type=='C'. A non-Source-C label that
+    happens to contain '__' twice (e.g. iso__20022__message from a
+    governance source) must still flow through alias_map and
+    singularisation."""
+    from ontozense.core.candidate_graph import _resolve_alias_with_normalisation
+
+    # Source C synthetic FK label: bypass applies.
+    canon, fired = _resolve_alias_with_normalisation(
+        "customers__country_code__countries", {}, source_type="C",
+    )
+    assert canon == "customers__country_code__countries"
+    assert fired is False
+
+    # Mixed-case Source C label: bypass applies.
+    canon, fired = _resolve_alias_with_normalisation(
+        "loan__customer_id__customers", {}, source_type="C",
+    )
+    assert canon == "loan__customer_id__customers"
+
+    # Source C synthetic FK with alias_map: bypass still applies.
+    # Source C ingester emits these as synthetic IDs, never as
+    # user-facing labels, so alias_map must not fire for them.
+    canon, fired = _resolve_alias_with_normalisation(
+        "customers__country_code__countries",
+        {"customers__country_code__countries": "Something Else"},
+        source_type="C",
+    )
+    assert canon == "customers__country_code__countries"
+    assert fired is False
+
+
+def test_double_underscore_label_from_non_c_source_canonicalises():
+    """A label with the '__' shape from any source OTHER than C
+    must flow through normalisation normally. iso__20022__message
+    (a real ISO 20022 identifier shape that a governance term might
+    legitimately use) must still respect alias_map and the rest of
+    the pipeline."""
+    from ontozense.core.candidate_graph import _resolve_alias_with_normalisation
+
+    # Source A/B/D with double-underscores: NO bypass. alias_map fires.
+    canon, fired = _resolve_alias_with_normalisation(
+        "iso__20022__message",
+        {"iso__20022__message": "ISO 20022 Message"},
+        source_type="B",
+    )
+    assert canon == "ISO 20022 Message"
+    assert fired is True
+
+    # Source D: no bypass either.
+    canon, fired = _resolve_alias_with_normalisation(
+        "iso__20022__message",
+        {"iso__20022__message": "ISO 20022 Message"},
+        source_type="D",
+    )
+    assert canon == "ISO 20022 Message"
+    assert fired is True
+
+    # Empty source_type (back-compat default): NO bypass.
+    # Non-C callers like _resolve_endpoint_to_candidate_id (which
+    # doesn't know the source of the endpoint label) pass empty.
+    canon, fired = _resolve_alias_with_normalisation(
+        "iso__20022__message", {},
+    )
+    # Without source_type="C", the double-underscore shape carries
+    # no special meaning. Falls through normal canonicalisation.
+    # 'iso__20022__message' has no plural-suffix issue, no alias map
+    # match, no prefix -> returned as-is.
+    assert canon == "iso__20022__message"
+    assert fired is False
+
+
+def test_non_synthetic_labels_still_canonicalise_normally():
+    """Sanity check: the FK-bypass must NOT regress regular labels
+    that happen to contain a single double-underscore (rare but
+    possible, e.g. Python's __init__ — though that won't appear at
+    this layer in practice)."""
+    from ontozense.core.candidate_graph import _resolve_alias_with_normalisation
+
+    # Regular plural with no synthetic FK shape.
+    canon, _ = _resolve_alias_with_normalisation("customers", {})
+    assert canon == "customer"

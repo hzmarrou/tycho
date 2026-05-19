@@ -424,7 +424,9 @@ def _upsert(
     # singularization). With no alias_map the resolver strips prefixes
     # and singularizes before normalisation; with an alias_map the map
     # wins first. Behaviour is a strict superset of the pre-alias baseline.
-    canonical_label, alias_fired = _resolve_alias_with_normalisation(label, alias_map or {})
+    canonical_label, alias_fired = _resolve_alias_with_normalisation(
+        label, alias_map or {}, source_type=source_type,
+    )
     norm = normalize_label(canonical_label)
     if not norm:
         return
@@ -859,7 +861,10 @@ def _resolve_alias(label: str, alias_map: dict[str, str]) -> str:
 
 
 def _resolve_alias_with_normalisation(
-    label: str, alias_map: dict[str, str],
+    label: str,
+    alias_map: dict[str, str],
+    *,
+    source_type: str = "",
 ) -> tuple[str, bool]:
     """Apply alias_map first (case-insensitive lookup); then strip
     table-name prefixes and singularize plurals before normalisation.
@@ -882,7 +887,29 @@ def _resolve_alias_with_normalisation(
     and prefix-strip affect only the merge key (``normalized_label``)
     and the caller should keep the original surface form as the primary
     ``label``.
+
+    ``source_type`` (optional, keyword-only) — when set to ``"C"``,
+    enables the synthetic-FK bypass (see below). Defaults to empty
+    string for back-compat with callers that don't know the source
+    (e.g. ``_resolve_endpoint_to_candidate_id``).
     """
+    # Synthetic Source C relationship labels follow '<src>__<col>__<ref>'
+    # (two '__' separators). They are internal identifiers, not user-
+    # supplied entity names, and must bypass alias / prefix-strip /
+    # singularisation entirely. Without this bypass, the trailing
+    # segment gets partially singularised, producing asymmetric labels
+    # like 'customers__country_code__country'. See v1.1.1 follow-up #95.
+    #
+    # IMPORTANT: the bypass is Source-C-specific. A non-C label that
+    # happens to share the '__' shape (e.g. a governance term like
+    # 'iso__20022__message' from Source B) must still flow through
+    # alias_map and singularisation normally. Requiring source_type=="C"
+    # prevents the bypass from silently swallowing legitimate alias
+    # entries for non-Source-C labels (Codex Medium finding, v1.1.1
+    # follow-up #95 correction).
+    if source_type == "C" and label.count("__") >= 2:
+        return label, False
+
     # Alias map: exact match first, then case-insensitive.
     label_lower = label.lower()
     if label in alias_map:
@@ -901,23 +928,35 @@ def _resolve_alias_with_normalisation(
             work = work[len(prefix):]
             break
 
-    # English singularization via inflect; safe-fallback to chop trailing 's'.
-    # Guard: only accept the singularized form when the round-trip
-    # plural(singular) matches the original (case-insensitive).  This
-    # rejects inflect false-positives such as "Address" → "Addres".
-    try:
-        import inflect
-        engine = inflect.engine()
-        singular = engine.singular_noun(work)
-        if singular and isinstance(singular, str):
-            # Round-trip check: plural of the candidate singular should
-            # equal the original word (case-insensitive).
-            round_trip = engine.plural(singular)
-            if isinstance(round_trip, str) and round_trip.lower() == work.lower():
-                work = singular
-    except ImportError:
-        if work.lower().endswith("s") and len(work) > 1:
-            work = work[:-1]
+    # Forward denylist: words whose lowercased form ends in -us / -ss /
+    # -is are almost never plurals (status, address, analysis, ...). The
+    # inflect round-trip guard happens to pass these because the s->s
+    # add/remove is reversible (e.g. plural('loan_statu') == 'loan_status'
+    # round-trips to itself), so the guard alone leaves a mangled
+    # singular. Skip singularisation entirely for these suffixes.
+    work_lower = work.lower()
+    NON_PLURAL_SUFFIXES = ("us", "ss", "is")
+    if any(work_lower.endswith(suf) for suf in NON_PLURAL_SUFFIXES):
+        # Skip inflect; keep `work` as-is.
+        pass
+    else:
+        # English singularization via inflect; safe-fallback to chop trailing 's'.
+        # Guard: only accept the singularized form when the round-trip
+        # plural(singular) matches the original (case-insensitive).  This
+        # rejects inflect false-positives such as "Address" → "Addres".
+        try:
+            import inflect
+            engine = inflect.engine()
+            singular = engine.singular_noun(work)
+            if singular and isinstance(singular, str):
+                # Round-trip check: plural of the candidate singular should
+                # equal the original word (case-insensitive).
+                round_trip = engine.plural(singular)
+                if isinstance(round_trip, str) and round_trip.lower() == work.lower():
+                    work = singular
+        except ImportError:
+            if work.lower().endswith("s") and len(work) > 1:
+                work = work[:-1]
 
     # alias_fired is False: only singularisation/prefix-strip ran.
     return work, False
