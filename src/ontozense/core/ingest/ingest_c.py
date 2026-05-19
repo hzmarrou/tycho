@@ -283,6 +283,9 @@ class SourceCIngester(IngestionPolicy):
         )
 
         # Columns → attributes (each may be individually suppressed).
+        # NOT NULL columns also produce a required-rule candidate (AC1a)
+        # which inherits the column's suppression decision.
+        constraints = tdata["constraints"]
         for col_name, col_type in columns:
             if col_name in pk:
                 continue
@@ -327,31 +330,25 @@ class SourceCIngester(IngestionPolicy):
                 suppressed=final_suppressed,
             )
 
-        # ─── NOT NULL columns → required-rule candidates (AC1a) ──────
-        constraints = tdata["constraints"]
-        for col_name, _col_type in columns:
-            if col_name in pk:
-                continue
-            if any(fk["column"] == col_name for fk in fks):
-                continue
+            # NOT NULL on this column → required-rule candidate (AC1a),
+            # carrying the same suppression decision as the attribute.
             col_constraints = constraints.get(col_name, {"nullable": True, "checks": []})
-            if col_constraints["nullable"]:
-                continue
-            payload = _build_required_rule_payload(tname, col_name, source_path)
-            yield IntermediateCandidate(
-                label=canonical_rule_label(payload),
-                definition=f"{tname}.{col_name} must not be null.",
-                source_type="C",
-                source_artifact=f"{source_path}#{tname}.{col_name}",
-                raw_type="not_null_constraint",
-                eid="",
-                artifact_kind=ArtifactKind.RULE,
-                strength=Strength.STRONG,
-                promotion_reason=f"Source C: NOT NULL constraint on {tname}.{col_name}.",
-                suppression_reason=table_suppression_reason,
-                suppressed=table_suppressed,
-                rule_payload=payload,
-            )
+            if not col_constraints["nullable"]:
+                payload = _build_required_rule_payload(tname, col_name, source_path)
+                yield IntermediateCandidate(
+                    label=canonical_rule_label(payload),
+                    definition=f"{tname}.{col_name} must not be null.",
+                    source_type="C",
+                    source_artifact=f"{source_path}#{tname}.{col_name}",
+                    raw_type="not_null_constraint",
+                    eid="",
+                    artifact_kind=ArtifactKind.RULE,
+                    strength=Strength.STRONG,
+                    promotion_reason=f"Source C: NOT NULL constraint on {tname}.{col_name}.",
+                    suppression_reason=final_reason,
+                    suppressed=final_suppressed,
+                    rule_payload=payload,
+                )
 
         # FKs → relationships.
         for fk in fks:

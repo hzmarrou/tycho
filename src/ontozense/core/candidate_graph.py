@@ -151,8 +151,14 @@ def _rule_store_key(rule_key_tuple: tuple) -> str:
     Rule candidates use this format so they bypass label-based lookup
     (spec §11.1 / planning decision #5). The tuple comes from
     ``source_d.rule_payload.merge_key``.
+
+    Uses ``repr(...)`` for collision-safety: any two distinct tuples
+    produce distinct strings (Python's repr is unambiguous for
+    hashable types). A naive ``":".join(str(p) for p in ...)`` would
+    collide whenever any tuple component contained the separator
+    character.
     """
-    return "rule:" + ":".join(str(p) for p in rule_key_tuple)
+    return f"rule:{rule_key_tuple!r}"
 
 
 # ─── Builder ────────────────────────────────────────────────────────────────

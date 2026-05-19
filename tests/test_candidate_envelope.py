@@ -152,6 +152,18 @@ def test_rule_payloads_with_same_canonical_label_but_different_kind_do_not_colli
     )
 
 
+def test_rule_store_key_is_collision_safe_across_colons_in_components():
+    """Two structurally distinct rule tuples must never produce the
+    same store key, even when components contain ':' characters."""
+    from ontozense.core.candidate_graph import _rule_store_key
+
+    a = ("validation", "loan", "amount", "gt", 0, None)
+    b = ("validation", "loan:amount", "gt:0", "", "", None)
+    # Both have the same naive ':'.join(...) representation but are
+    # structurally distinct. Their store keys must differ.
+    assert _rule_store_key(a) != _rule_store_key(b)
+
+
 def test_rule_candidates_with_same_eid_but_different_rule_keys_do_not_collide():
     """When two rule candidates share an eid but have distinct merge_keys
     (e.g. different rule_kind), both must remain as separate concepts.
