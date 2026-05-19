@@ -235,6 +235,54 @@ def _extract_embedded_sql(node: ast.Constant, source: str, file: str) -> Iterabl
         )
 
 
+def _extract_apply_lambda(call: ast.Call, df_names: set[str], source: str, file: str) -> Iterable[RuleFact]:
+    """``df["<col>"].apply(lambda p: <a> if <cond> else <b>)`` -> validation rule.
+
+    The lambda's condition is interpreted as a domain-meaningful
+    threshold on the source column (the lambda param is implicitly
+    bound to the column's values). Confidence is intentionally lower
+    than the boolean-mask path (0.7 vs 0.85) because the lambda's
+    semantic intent is inferred, not stated.
+    """
+    if not (isinstance(call.func, ast.Attribute) and call.func.attr == "apply"):
+        return
+    col = _strict_df_column(call.func.value, df_names)
+    if col is None:
+        return
+    if not (call.args and isinstance(call.args[0], ast.Lambda)):
+        return
+    lam = call.args[0]
+    if not lam.args.args:
+        return
+    param_name = lam.args.args[-1].arg
+    if not isinstance(lam.body, ast.IfExp):
+        return
+    cond = lam.body.test
+    if not (isinstance(cond, ast.Compare) and len(cond.ops) == 1):
+        return
+    op = type(cond.ops[0])
+    if op not in _CMP:
+        return
+    lhs = cond.left
+    if not (isinstance(lhs, ast.Name) and lhs.id == param_name):
+        return
+    rhs = cond.comparators[0]
+    if not isinstance(rhs, ast.Constant):
+        return
+    yield RuleFact(
+        rule_kind="validation",
+        subject_entity=None,
+        subject_attribute=col,
+        predicate=_CMP[op],
+        object_value=rhs.value,
+        expression=ast.unparse(cond),
+        evidence_span=_span(call, file, source),
+        code_context=f"apply lambda on {col}",
+        confidence=0.7,
+        extractor_family="pipeline",
+    )
+
+
 def extract_pipeline(pm: ParsedModule) -> Iterable[object]:
     file = str(pm.path)
     df_names = _collect_df_names(pm)
@@ -245,5 +293,6 @@ def extract_pipeline(pm: ParsedModule) -> Iterable[object]:
             yield from _extract_derived_column(node, df_names, pm.source, file)
         elif isinstance(node, ast.Call):
             yield from _extract_dropna(node, pm.source, file)
+            yield from _extract_apply_lambda(node, df_names, pm.source, file)
         elif isinstance(node, ast.Constant):
             yield from _extract_embedded_sql(node, pm.source, file)

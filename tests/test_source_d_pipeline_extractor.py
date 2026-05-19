@@ -255,3 +255,57 @@ def test_pipeline_annotated_dataframe_param_is_tracked(tmp_path):
     attr_names = {f.name for f in facts if isinstance(f, AttributeFact)}
     assert "new" in attr_names, "step_a's frame should be tracked"
     assert "other" in attr_names, "step_b's my_df should be tracked"
+
+
+def test_pipeline_apply_lambda_emits_validation_rule_from_fixture():
+    """The existing pipeline_fixture has
+    `df["credit_score"].apply(lambda s: "high" if s < 500 else "low")` —
+    must emit a validation rule on credit_score with predicate lt, 500."""
+    pm = parse_module(FIXTURES / "pipeline_fixture.py")
+    facts = list(extract_pipeline(pm))
+    rules = [r for r in facts if isinstance(r, RuleFact)]
+    assert any(
+        r.subject_attribute == "credit_score" and r.predicate == "lt" and r.object_value == 500
+        for r in rules
+    ), f"expected credit_score lt 500 rule, got: {[(r.subject_attribute, r.predicate, r.object_value) for r in rules]}"
+
+
+def test_pipeline_apply_lambda_without_ifexp_emits_nothing(tmp_path):
+    """An apply lambda whose body is NOT a ternary IfExp must not
+    produce a rule."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "import pandas as pd\n"
+        "def transform(df: pd.DataFrame):\n"
+        "    df['squared'] = df['amount'].apply(lambda s: s * s)\n"
+        "    return df\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_pipeline(pm))
+    rules = [
+        r for r in facts
+        if isinstance(r, RuleFact)
+        and r.code_context.startswith("apply lambda")
+    ]
+    assert rules == [], f"non-ternary lambda must not emit: {rules}"
+
+
+def test_pipeline_apply_lambda_non_param_lhs_emits_nothing(tmp_path):
+    """If the lambda's condition LHS is not the bound parameter,
+    skip — we can't safely bind it to the column."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "import pandas as pd\n"
+        "threshold = 100\n"
+        "def transform(df: pd.DataFrame):\n"
+        "    df['flag'] = df['x'].apply(lambda v: True if threshold > 0 else False)\n"
+        "    return df\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_pipeline(pm))
+    rules = [
+        r for r in facts
+        if isinstance(r, RuleFact)
+        and r.code_context.startswith("apply lambda")
+    ]
+    assert rules == [], f"non-param-LHS lambda must not emit: {rules}"
