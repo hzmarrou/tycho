@@ -1,8 +1,15 @@
 """Acceptance regressions for Task 15 — production-path Source D pipeline."""
+import re
 from pathlib import Path
 
+from ontozense.core.candidate_graph import build_candidate_graph
 from ontozense.core.ingest.base import ArtifactKind
 from ontozense.core.ingest.ingest_d import SourceDIngester
+from ontozense.core.ingest.source_d.normalize import normalize_labels
+from ontozense.core.ingest.source_d.rule_payload import canonical_rule_label, merge_key
+from ontozense.core.ingest.source_d.rule_payload import merge_key as _mk
+
+CD = Path(__file__).parent / "fixtures" / "source_d" / "cd_fusion"
 
 
 def test_run_skips_non_utf8_python_file_without_raising(tmp_path: Path):
@@ -132,3 +139,82 @@ def test_ac7_procedural_rules_without_classes():
     kinds = {r.rule_payload["rule_kind"] for r in proc_rules}
     assert "validation" in kinds, f"missing validation rule_kind; got: {kinds}"
     assert "defaulting" in kinds, f"missing defaulting rule_kind; got: {kinds}"
+
+
+# ---------------------------------------------------------------------------
+# Task 19 — AC1a, AC10: C/D rule merge through structured identity
+# ---------------------------------------------------------------------------
+
+def test_ac1a_ac10_c_and_d_check_rules_merge_into_one_concept():
+    """SQL `CHECK (amount > 0)` and Pydantic `if v <= 0: raise` must produce
+    a single CandidateConcept with both C and D attribution."""
+    graph = build_candidate_graph(
+        source_c={"files": [str(CD / "schema.sql")]},
+        source_d={"files": [str(CD / "models.py")]},
+    )
+
+    target_payload = {
+        "rule_kind": "validation",
+        "subject_entity": "loan",
+        "subject_attribute": "amount",
+        "predicate": "gt",
+        "object_value": 0,
+        "condition": None,
+    }
+    target_label = canonical_rule_label(target_payload)
+    target_key = merge_key(target_payload)
+
+    matches = [
+        c for c in graph.concepts
+        if c.artifact_kind == "rule"
+        and c.rule_payload
+        and merge_key(c.rule_payload) == target_key
+    ]
+    assert len(matches) == 1, (
+        f"expected exactly one merged rule for {target_label!r}; "
+        f"got {len(matches)}: {[(c.label, c.rule_payload) for c in matches]}"
+    )
+    concept = matches[0]
+    assert concept.source_presence["C"] is True
+    assert concept.source_presence["D"] is True
+    assert concept.source_counts["C"] >= 1
+    assert concept.source_counts["D"] >= 1
+    assert concept.rule_payload["predicate"] == "gt"
+
+
+def test_ac1a_anchored_c_rule_does_not_swallow_unanchored_d_rule(tmp_path):
+    """Anchoring is a fusion precondition. A C-derived NOT NULL rule
+    (anchored to the `loan` table) must NOT silently fuse with a
+    D-derived `required` rule from a procedural `dropna(subset=[...])`
+    call that has no enclosing entity (subject_entity=None). Their
+    merge_keys differ on subject_entity, so structured identity keeps
+    them as two distinct concepts."""
+    schema = tmp_path / "s.sql"
+    schema.write_text(
+        "CREATE TABLE loan (\n"
+        "  loan_id VARCHAR(32) PRIMARY KEY,\n"
+        "  borrower_id VARCHAR(32) NOT NULL\n"
+        ");\n",
+        encoding="utf-8",
+    )
+    code = tmp_path / "p.py"
+    code.write_text(
+        "import pandas as pd\n"
+        "def clean(df):\n"
+        "    return df.dropna(subset=['borrower_id'])\n",
+        encoding="utf-8",
+    )
+    graph = build_candidate_graph(
+        source_c={"files": [str(schema)]},
+        source_d={"files": [str(code)]},
+    )
+    rule_concepts = [
+        c for c in graph.concepts
+        if c.artifact_kind == "rule"
+        and c.rule_payload
+        and c.rule_payload.get("subject_attribute") == "borrower_id"
+        and c.rule_payload.get("predicate") == "required"
+    ]
+    by_entity = {c.rule_payload.get("subject_entity") for c in rule_concepts}
+    assert "loan" in by_entity, "expected C-derived rule anchored to loan"
+    assert None in by_entity, "expected D-derived unanchored rule preserved separately"
