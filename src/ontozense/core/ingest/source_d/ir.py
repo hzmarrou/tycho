@@ -31,9 +31,9 @@ class EntityFact:
 @dataclass
 class AttributeFact:
     name: str
-    subject_entity: str | None
     evidence_span: EvidenceSpan
     extractor_family: str
+    subject_entity: str | None = None
     annotation: str | None = None
     has_default: bool = False
 
@@ -41,6 +41,7 @@ class AttributeFact:
 @dataclass
 class VocabularyFact:
     name: str
+    # members can be str (Enum), int (IntEnum), or other literals; Any is intentional.
     members: list[Any]
     evidence_span: EvidenceSpan
     extractor_family: str
@@ -49,9 +50,9 @@ class VocabularyFact:
 @dataclass
 class BehaviorFact:
     name: str
-    subject_entity: str | None
     evidence_span: EvidenceSpan
     extractor_family: str
+    subject_entity: str | None = None
 
 
 @dataclass
