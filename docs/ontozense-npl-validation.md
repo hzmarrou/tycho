@@ -286,7 +286,41 @@ ontozense survey `
 (If you skipped B.4 and have Azure OpenAI configured, replace
 `--source-a domains/npl/sources/source-a.json` with
 `--source-a domains/npl/sources/npl-basel-guidelines.md` to run
-fresh LLM extraction.)
+fresh LLM extraction. That gives 20-50 concepts from the real
+Basel document instead of the 5 stubs in `source-a.json`.)
+
+#### Choosing the extraction model (optional)
+
+When Source A is a `.md` / `.txt` / `.pdf` document, `survey`
+invokes `extract-a` under the hood and the `--model` flag picks
+which LLM does the extraction. Default is `azure/gpt-5.4`.
+
+| Model identifier | Credentials needed (in `.env`) | Cost (approx) | Notes |
+|---|---|---|---|
+| `azure/gpt-5.4` *(default)* | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_VERSION` | $$$ | Highest quality on regulatory text (PLAYBOOK §12); the recommended default. |
+| `azure/gpt-5.2` | same Azure keys | $$ | Cheaper, faster; ~2.4× fewer validated concepts on regulatory text per PLAYBOOK §12. |
+| `openrouter/deepseek/deepseek-v4-pro` | `OPENROUTER_API_KEY` | $ (10-20× cheaper than gpt-5.4) | Comparable extraction quality on regulatory text per the session-internal comparison; widest reasoning budget. |
+| `openrouter/deepseek/deepseek-r1` | `OPENROUTER_API_KEY` | $ | DeepSeek's reasoning model; slower per call but very strong on inference-heavy prose. |
+| `openrouter/anthropic/claude-sonnet-4-5` | `OPENROUTER_API_KEY` | $$ | Strong general extraction; useful when you want a third opinion vs gpt / deepseek. |
+
+To override the default:
+
+```powershell
+ontozense survey `
+  --source-a domains/npl/sources/npl-basel-guidelines.md `
+  --source-b domains/npl/sources/governance.json `
+  --source-c domains/npl/sources/npl-schema.sql `
+  --source-d domains/npl/sources/npl-code `
+  --domain-dir domains/npl `
+  --model openrouter/deepseek/deepseek-v4-pro
+```
+
+LiteLLM (the routing layer under `extract-a`) supports any of
+its ~100 provider model identifiers. The `--model` flag accepts
+whatever string LiteLLM accepts — see
+[litellm.ai/docs/providers](https://docs.litellm.ai/docs/providers).
+Source B/C/D never call an LLM; they're deterministic, so
+`--model` only affects Source A's extraction quality.
 
 > **Source C in v1.1 (new):** `--source-c .sql` is parsed via
 > sqlglot. Each `CREATE TABLE` becomes an entity candidate; columns
