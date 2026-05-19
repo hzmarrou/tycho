@@ -218,3 +218,49 @@ def test_ac1a_anchored_c_rule_does_not_swallow_unanchored_d_rule(tmp_path):
     by_entity = {c.rule_payload.get("subject_entity") for c in rule_concepts}
     assert "loan" in by_entity, "expected C-derived rule anchored to loan"
     assert None in by_entity, "expected D-derived unanchored rule preserved separately"
+
+
+# ---------------------------------------------------------------------------
+# Task 20 — AC4, AC8: Provenance and suppression audit
+# ---------------------------------------------------------------------------
+
+def test_ac4_unanchored_rules_go_to_audit_with_reason(tmp_path):
+    """AC4: Rules with both subject_entity and subject_attribute = None
+    are suppressed by the anchor layer with a 'unanchored:' reason."""
+    f = tmp_path / "m.py"
+    f.write_text(
+        "def validate_thing():\n"
+        "    return True\n",
+        encoding="utf-8",
+    )
+    cands = list(SourceDIngester().ingest({"files": [str(f)]}))
+    suppressed_rules = [c for c in cands if c.suppressed and c.artifact_kind == ArtifactKind.RULE]
+    assert suppressed_rules, "expected at least one suppressed unanchored rule"
+    assert suppressed_rules[0].suppression_reason
+    assert "unanchored" in suppressed_rules[0].suppression_reason
+
+
+def test_ac8_provenance_points_to_exact_line(tmp_path):
+    """AC8: Rule candidates carry evidence_span with the exact line
+    where the guard appears. The class body starts at line 1, the
+    `if amount <= 0:` is at line 4."""
+    f = tmp_path / "m.py"
+    f.write_text(
+        "class Loan:\n"
+        "    amount: float\n"
+        "    def __init__(self, amount):\n"
+        "        if amount <= 0:\n"
+        "            raise ValueError('positive')\n"
+        "        self.amount = amount\n",
+        encoding="utf-8",
+    )
+    cands = list(SourceDIngester().ingest({"files": [str(f)]}))
+    rule = next(
+        c for c in cands
+        if c.artifact_kind == ArtifactKind.RULE
+        and c.rule_payload and c.rule_payload["subject_attribute"] == "amount"
+        and not c.suppressed
+    )
+    assert rule.source_artifact.endswith(":L4")
+    assert rule.rule_payload["evidence_span"]["file"].endswith("m.py")
+    assert rule.rule_payload["evidence_span"]["start_line"] == 4
