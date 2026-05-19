@@ -120,3 +120,83 @@ def test_pipeline_embedded_sql_where_emits_rule(tmp_path):
         and r.predicate == "gt" and r.object_value == 0
         for r in rules
     )
+
+
+def test_pipeline_non_sql_string_produces_no_rule(tmp_path):
+    """A plain string literal that doesn't look like SQL must be
+    silently skipped by the heuristic before sqlglot is called."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "def greet():\n"
+        "    msg = 'hello world this is not sql'\n"
+        "    return msg\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_pipeline(pm))
+    rules = [r for r in facts if isinstance(r, RuleFact)]
+    assert rules == []
+
+
+def test_pipeline_malformed_sql_produces_no_rule(tmp_path):
+    """A string that passes the keyword heuristic but fails sqlglot
+    parsing must be silently skipped via the try/except guard."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "def broken(con):\n"
+        "    return con.execute('SELECT garbage no really not valid')\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_pipeline(pm))
+    rules = [r for r in facts if isinstance(r, RuleFact)]
+    # No rules — extractor silently skips, doesn't crash.
+    assert all(r.code_context != "embedded SQL WHERE" for r in rules)
+
+
+def test_pipeline_sql_without_where_produces_no_rule(tmp_path):
+    """SELECT with no WHERE clause has no extractable predicates."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "def load(con):\n"
+        "    return con.execute('SELECT amount FROM loan')\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_pipeline(pm))
+    rules = [r for r in facts if isinstance(r, RuleFact)]
+    assert rules == []
+
+
+def test_pipeline_sql_with_non_column_lhs_is_skipped(tmp_path):
+    """WHERE 1 = 1 has a Literal LHS, not a Column — must be skipped
+    (not silently converted into a phantom rule on a numeric column)."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "def load(con):\n"
+        "    return con.execute('SELECT * FROM loan WHERE 1 = 1')\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_pipeline(pm))
+    rules = [r for r in facts if isinstance(r, RuleFact)]
+    assert all(r.code_context != "embedded SQL WHERE" for r in rules)
+
+
+def test_pipeline_sql_with_multiple_where_predicates_emits_one_rule_per_predicate(tmp_path):
+    """A WHERE clause with multiple simple comparisons (joined by AND/OR)
+    must emit one rule per comparison."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "def load(con):\n"
+        "    return con.execute("
+        "        'SELECT * FROM loan WHERE amount > 0 AND amount < 1000000'"
+        "    )\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_pipeline(pm))
+    rules = [
+        r for r in facts
+        if isinstance(r, RuleFact)
+        and r.subject_entity == "loan"
+        and r.subject_attribute == "amount"
+    ]
+    predicates = {(r.predicate, r.object_value) for r in rules}
+    assert ("gt", 0) in predicates, f"expected amount > 0, got {predicates}"
+    assert ("lt", 1000000) in predicates, f"expected amount < 1000000, got {predicates}"

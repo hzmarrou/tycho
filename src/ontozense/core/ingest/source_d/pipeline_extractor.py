@@ -136,6 +136,7 @@ def _looks_like_sql(s: str) -> bool:
     top-level SQL keyword. Prevents calling sqlglot.parse_one on every
     string literal in the module."""
     head = s.strip().split(None, 1)
+    # Must stay in sync with dispatch._SQL_KEYWORDS.
     return bool(head) and head[0].upper() in {"SELECT", "WITH", "CREATE", "INSERT", "UPDATE", "DELETE"}
 
 
