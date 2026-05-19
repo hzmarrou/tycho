@@ -3,6 +3,7 @@ import pytest
 from ontozense.core.ingest.source_d.rule_payload import (
     ALLOWED_PREDICATES,
     RuleKind,
+    canonical_rule_label,
     merge_key,
     validate_rule_payload,
 )
@@ -92,3 +93,14 @@ def test_validate_rejects_evidence_span_missing_end_line():
             "evidence_span": {"file": "loans.py", "start_line": 1},  # missing end_line + snippet
             "normalization_status": "deterministic",
         })
+
+
+def test_canonical_rule_label_matches_for_equivalent_payloads():
+    a = {"subject_entity": "loan", "subject_attribute": "amount", "predicate": "gt", "object_value": 0}
+    b = {"subject_entity": "loan", "subject_attribute": "amount", "predicate": "gt", "object_value": 0}
+    assert canonical_rule_label(a) == canonical_rule_label(b) == "loan.amount gt 0"
+
+
+def test_canonical_rule_label_without_subject_entity():
+    p = {"subject_entity": None, "subject_attribute": "amount", "predicate": "gt", "object_value": 0}
+    assert canonical_rule_label(p) == "amount gt 0"

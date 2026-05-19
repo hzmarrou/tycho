@@ -28,6 +28,31 @@ from .base import (
 logger = logging.getLogger(__name__)
 
 
+def _build_required_rule_payload(
+    table_name: str, column_name: str, source_path: Path
+) -> dict:
+    return {
+        "rule_kind": "validation",
+        "subject_entity": table_name,
+        "subject_attribute": column_name,
+        "predicate": "required",
+        "object_value": True,
+        "condition": None,
+        "depends_on": [],
+        "expression": f"{column_name} IS NOT NULL",
+        "evidence_span": {
+            "file": str(source_path),
+            "start_line": 0,
+            "end_line": 0,
+            "snippet": f"{column_name} NOT NULL",
+        },
+        "code_context": f"CREATE TABLE {table_name}",
+        "confidence": 1.0,
+        "extractor_family": "source_c_ddl",
+        "normalization_status": "deterministic",
+    }
+
+
 class SourceCIngester(IngestionPolicy):
     """Ingester for Source C — SQL DDL files via sqlglot.
 
@@ -73,6 +98,7 @@ class SourceCIngester(IngestionPolicy):
                     "columns": self._extract_columns(stmt),
                     "pk": self._extract_pk_columns(stmt),
                     "fks": self._extract_foreign_keys(stmt, name),
+                    "constraints": self._extract_column_constraints(stmt),
                 }
 
         # ── Compute FK-in counts for code-table detection ──
@@ -298,6 +324,33 @@ class SourceCIngester(IngestionPolicy):
                 suppressed=final_suppressed,
             )
 
+        # ─── NOT NULL columns → required-rule candidates (AC1a) ──────
+        from .source_d.rule_payload import canonical_rule_label
+        constraints = tdata.get("constraints", {})
+        for col_name, _col_type in columns:
+            if col_name in pk:
+                continue
+            if any(fk["column"] == col_name for fk in fks):
+                continue
+            col_constraints = constraints.get(col_name, {"nullable": True, "checks": []})
+            if col_constraints["nullable"]:
+                continue
+            payload = _build_required_rule_payload(tname, col_name, source_path)
+            yield IntermediateCandidate(
+                label=canonical_rule_label(payload),
+                definition=f"{tname}.{col_name} must not be null.",
+                source_type="C",
+                source_artifact=f"{source_path}#{tname}.{col_name}",
+                raw_type="not_null_constraint",
+                eid="",
+                artifact_kind=ArtifactKind.RULE,
+                strength=Strength.STRONG,
+                promotion_reason=f"Source C: NOT NULL constraint on {tname}.{col_name}.",
+                suppression_reason=table_suppression_reason,
+                suppressed=table_suppressed,
+                rule_payload=payload,
+            )
+
         # FKs → relationships.
         for fk in fks:
             yield IntermediateCandidate(
@@ -369,6 +422,34 @@ class SourceCIngester(IngestionPolicy):
                 for col in expression.expressions or []:
                     pk.add(col.name)
         return pk
+
+    @staticmethod
+    def _extract_column_constraints(stmt: exp.Create) -> dict[str, dict]:
+        """Return {col_name: {"nullable": bool, "checks": list[exp.Expression]}}.
+
+        Mirrors the walk pattern used by _extract_pk_columns. Default
+        nullable=True; flip to False when a NotNullColumnConstraint is
+        present on the column. ``checks`` collects any
+        CheckColumnConstraint expression nodes for the column for
+        downstream rule emission (Task 4).
+        """
+        out: dict[str, dict] = {}
+        this = stmt.this
+        if not isinstance(this, exp.Schema):
+            return out
+        for expression in this.expressions or []:
+            if not isinstance(expression, exp.ColumnDef):
+                continue
+            col_name = expression.name
+            entry: dict = {"nullable": True, "checks": []}
+            for constraint in expression.args.get("constraints") or []:
+                kind = constraint.args.get("kind")
+                if isinstance(kind, exp.NotNullColumnConstraint):
+                    entry["nullable"] = False
+                elif isinstance(kind, exp.CheckColumnConstraint):
+                    entry["checks"].append(kind.this)
+            out[col_name] = entry
+        return out
 
     @staticmethod
     def _extract_foreign_keys(

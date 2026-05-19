@@ -78,3 +78,18 @@ def _normalize_value(v):
     if isinstance(v, dict):
         return tuple(sorted((k, _normalize_value(val)) for k, val in v.items()))
     return v
+
+
+def canonical_rule_label(payload: dict) -> str:
+    """Deterministic surface label derived from rule_payload.
+
+    Both Source C and Source D use this so equivalent rules normalise
+    to the same merge key in candidate_graph._merge_into via the
+    existing normalized_label path. No new index is required.
+    """
+    subject_entity = payload.get("subject_entity") or ""
+    subject_attribute = payload.get("subject_attribute") or ""
+    predicate = payload.get("predicate") or ""
+    object_value = payload.get("object_value")
+    head = f"{subject_entity}.{subject_attribute}" if subject_entity else subject_attribute
+    return f"{head} {predicate} {object_value}".strip()
