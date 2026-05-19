@@ -24,6 +24,7 @@ from .base import (
     IntermediateCandidate,
     Strength,
 )
+from .source_d.rule_payload import canonical_rule_label
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,8 @@ def _build_required_rule_payload(
         "condition": None,
         "depends_on": [],
         "expression": f"{column_name} IS NOT NULL",
+        # sqlglot does not surface per-column line numbers reliably;
+        # the file-level provenance is in source_artifact.
         "evidence_span": {
             "file": str(source_path),
             "start_line": 0,
@@ -325,8 +328,7 @@ class SourceCIngester(IngestionPolicy):
             )
 
         # ─── NOT NULL columns → required-rule candidates (AC1a) ──────
-        from .source_d.rule_payload import canonical_rule_label
-        constraints = tdata.get("constraints", {})
+        constraints = tdata["constraints"]
         for col_name, _col_type in columns:
             if col_name in pk:
                 continue

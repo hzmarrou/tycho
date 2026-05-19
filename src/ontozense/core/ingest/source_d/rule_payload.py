@@ -83,9 +83,19 @@ def _normalize_value(v):
 def canonical_rule_label(payload: dict) -> str:
     """Deterministic surface label derived from rule_payload.
 
-    Both Source C and Source D use this so equivalent rules normalise
-    to the same merge key in candidate_graph._merge_into via the
-    existing normalized_label path. No new index is required.
+    Both Source C and Source D use this so rule candidates carry a
+    consistent display label. The label is display-only — fusion
+    identity is the structured ``merge_key`` (spec §11.1).
+
+    Notes:
+    - ``object_value=None`` renders as the string ``"None"`` (Python's
+      default). Two payloads that produce the same label-string but
+      have different structured ``object_value`` will NOT merge,
+      because ``merge_key`` preserves the typed value. Callers who
+      need a distinct sentinel for null/absent should normalize
+      ``object_value`` before display.
+    - ``subject_entity`` of ``None`` or ``""`` is treated identically:
+      the entity prefix is omitted.
     """
     subject_entity = payload.get("subject_entity") or ""
     subject_attribute = payload.get("subject_attribute") or ""

@@ -30,6 +30,9 @@ def test_not_null_column_emits_rule_candidate(tmp_path: Path):
     assert rp["normalization_status"] == "deterministic"
     # Canonical label drives the merge identity.
     assert rule_cands[0].label == "loan.amount required True"
+    assert rp["extractor_family"] == "source_c_ddl"
+    assert set(rp["evidence_span"].keys()) == {"file", "start_line", "end_line", "snippet"}
+    assert rp["evidence_span"]["snippet"] == "amount NOT NULL"
 
 
 def test_nullable_column_emits_no_rule(tmp_path: Path):
