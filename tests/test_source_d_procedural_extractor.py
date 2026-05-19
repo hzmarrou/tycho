@@ -95,3 +95,36 @@ def test_procedural_non_validate_function_with_no_body_yields_no_rule(tmp_path):
     facts = list(extract_procedural(pm))
     rules = [r for r in facts if isinstance(r, RuleFact)]
     assert rules == [], f"expected zero rules from non-validate functions: {rules}"
+
+
+def test_procedural_defaulting_skips_mismatched_key(tmp_path):
+    """`if p.get("currency") is None: p["country"] = "NL"` must NOT
+    emit a defaulting rule on `currency` — the assignment targets a
+    different key."""
+    f = tmp_path / "v.py"
+    f.write_text(
+        "def normalize(payment):\n"
+        "    if payment.get('currency') is None:\n"
+        "        payment['country'] = 'NL'\n"
+        "    return payment\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_procedural(pm))
+    rules = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "defaulting"]
+    assert rules == [], f"mismatched-key default must not emit: {rules}"
+
+
+def test_procedural_defaulting_skips_mismatched_object(tmp_path):
+    """`if a.get("x") is None: b["x"] = 1` must NOT emit — the
+    assignment targets a different object."""
+    f = tmp_path / "v.py"
+    f.write_text(
+        "def normalize(a, b):\n"
+        "    if a.get('x') is None:\n"
+        "        b['x'] = 1\n"
+        "    return a, b\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_procedural(pm))
+    rules = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "defaulting"]
+    assert rules == [], f"mismatched-object default must not emit: {rules}"

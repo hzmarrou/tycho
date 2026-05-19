@@ -45,8 +45,11 @@ def _key_from_subscript(node: ast.expr) -> str | None:
     return None
 
 
-def _is_get_is_none(test: ast.expr) -> str | None:
-    """Detect `<obj>.get("<key>") is None`. Return "<key>" or None."""
+def _is_get_is_none(test: ast.expr) -> tuple[str, str] | None:
+    """Detect `<obj>.get("<key>") is None`. Return ``(obj_repr, key)``
+    or ``None``. The ``obj_repr`` is the ``ast.unparse`` of the receiver
+    so the consumer can verify the assignment target is the SAME
+    object indexed at the SAME key."""
     if not (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.Is)):
         return None
     left, right = test.left, test.comparators[0]
@@ -54,7 +57,8 @@ def _is_get_is_none(test: ast.expr) -> str | None:
         return None
     if isinstance(left, ast.Call) and isinstance(left.func, ast.Attribute) and left.func.attr == "get":
         if left.args and isinstance(left.args[0], ast.Constant) and isinstance(left.args[0].value, str):
-            return left.args[0].value
+            obj_repr = ast.unparse(left.func.value)
+            return obj_repr, left.args[0].value
     return None
 
 
@@ -82,22 +86,37 @@ def _extract_function_rules(func: ast.FunctionDef, source: str, file: str) -> It
                         confidence=0.8,
                         extractor_family="procedural",
                     )
-            attr = _is_get_is_none(test)
-            if attr is not None and node.body:
+            detected = _is_get_is_none(test)
+            if detected is not None and node.body:
+                obj_repr, key = detected
                 first = node.body[0]
-                if isinstance(first, ast.Assign) and isinstance(first.value, ast.Constant):
-                    yield RuleFact(
-                        rule_kind="defaulting",
-                        subject_entity=None,
-                        subject_attribute=attr,
-                        predicate="default_to",
-                        object_value=first.value.value,
-                        expression=ast.unparse(first),
-                        evidence_span=_span(node, file, source),
-                        code_context=f"def {func.name}",
-                        confidence=0.85,
-                        extractor_family="procedural",
-                    )
+                if (
+                    isinstance(first, ast.Assign)
+                    and len(first.targets) == 1
+                    and isinstance(first.value, ast.Constant)
+                ):
+                    tgt = first.targets[0]
+                    # Assignment target must be <same_obj>["<same_key>"]
+                    # — otherwise the if-block is doing something other
+                    # than defaulting the field that was tested.
+                    if (
+                        isinstance(tgt, ast.Subscript)
+                        and isinstance(tgt.slice, ast.Constant)
+                        and tgt.slice.value == key
+                        and ast.unparse(tgt.value) == obj_repr
+                    ):
+                        yield RuleFact(
+                            rule_kind="defaulting",
+                            subject_entity=None,
+                            subject_attribute=key,
+                            predicate="default_to",
+                            object_value=first.value.value,
+                            expression=ast.unparse(first),
+                            evidence_span=_span(node, file, source),
+                            code_context=f"def {func.name}",
+                            confidence=0.85,
+                            extractor_family="procedural",
+                        )
 
 
 def extract_procedural(pm: ParsedModule) -> Iterable[RuleFact]:
