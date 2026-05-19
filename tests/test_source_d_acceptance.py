@@ -296,3 +296,62 @@ def test_ac9_llm_off_preserves_rule_set():
     assert any(l.startswith("[REPHRASED]") for l in on_labels), (
         "LLM was supposed to rephrase at least one label"
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 22 — AC11: draft.owl emission untouched (structural pin)
+# ---------------------------------------------------------------------------
+
+def _resolve_owl_emitter_paths() -> list[Path]:
+    """Return paths of modules in core/ that participate in OWL emission.
+
+    Detected by an import or call referencing rdflib or the literal
+    ``draft.owl``. The list is recomputed on each run so the test
+    survives module moves.
+    """
+    core = Path(__file__).resolve().parents[1] / "src" / "ontozense" / "core"
+    hits: list[Path] = []
+    pat = re.compile(r"\bimport rdflib\b|\bfrom rdflib\b|draft\.owl")
+    for p in core.rglob("*.py"):
+        if pat.search(p.read_text(encoding="utf-8", errors="replace")):
+            hits.append(p)
+    assert hits, "expected at least one OWL emitter module under core/"
+    return hits
+
+
+def test_ac11_owl_emitter_modules_do_not_reference_rule_payload():
+    """AC11: v1.2 must not extend draft.owl serialization. Any reference
+    to rule_payload from an OWL-emitting module would mean the rule
+    contract is leaking into ontology axioms, violating §11.2."""
+    offenders: list[tuple[Path, int, str]] = []
+    for p in _resolve_owl_emitter_paths():
+        for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith("#") or stripped.startswith('"""') or stripped.startswith("'''"):
+                continue
+            if "rule_payload" in stripped:
+                offenders.append((p, i, stripped))
+    assert not offenders, (
+        "AC11 violation — rule_payload referenced in OWL emitter module(s):\n"
+        + "\n".join(f"  {p}:L{ln}: {src}" for p, ln, src in offenders)
+    )
+
+
+def test_ac11_no_shacl_or_swrl_emitter_added():
+    """AC11: v1.2 must not add a SHACL or SWRL emitter (§11.2)."""
+    core = Path(__file__).resolve().parents[1] / "src" / "ontozense" / "core"
+    banned = ("shacl", "swrl", "NodeShape", "PropertyShape", "swrl:Imp")
+    offenders: list[tuple[Path, int, str]] = []
+    for p in core.rglob("*.py"):
+        for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            for tok in banned:
+                if tok in stripped:
+                    offenders.append((p, i, stripped))
+                    break
+    assert not offenders, (
+        "AC11 violation — SHACL/SWRL token introduced in core/:\n"
+        + "\n".join(f"  {p}:L{ln}: {src}" for p, ln, src in offenders)
+    )
