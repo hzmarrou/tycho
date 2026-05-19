@@ -427,37 +427,76 @@ def test_normalisation_still_singularises_clean_plurals():
     assert canon == "customer"
 
 
-def test_synthetic_fk_label_bypasses_canonicalisation():
-    """v1.1.1 follow-up #95: Source C FK relationship labels
-    follow the synthetic pattern '<src>__<col>__<ref>'. These are
-    internal IDs, not user-facing entity names, and must NOT flow
-    through alias / prefix-strip / singularisation. Otherwise the
-    trailing segment gets partially singularised, producing
-    asymmetric labels like 'customers__country_code__country'."""
+def test_synthetic_fk_label_bypasses_canonicalisation_only_for_source_c():
+    """v1.1.1 follow-up #95 (corrected): the synthetic FK bypass
+    applies ONLY when source_type=='C'. A non-Source-C label that
+    happens to contain '__' twice (e.g. iso__20022__message from a
+    governance source) must still flow through alias_map and
+    singularisation."""
     from ontozense.core.candidate_graph import _resolve_alias_with_normalisation
 
-    # Plural source AND plural ref — both segments preserved.
+    # Source C synthetic FK label: bypass applies.
     canon, fired = _resolve_alias_with_normalisation(
-        "customers__country_code__countries", {},
+        "customers__country_code__countries", {}, source_type="C",
     )
     assert canon == "customers__country_code__countries"
     assert fired is False
 
-    # Mixed case: only the ref segment is plural — still preserved.
+    # Mixed-case Source C label: bypass applies.
     canon, fired = _resolve_alias_with_normalisation(
-        "loan__customer_id__customers", {},
+        "loan__customer_id__customers", {}, source_type="C",
     )
     assert canon == "loan__customer_id__customers"
 
-    # Even when alias_map has an entry — synthetic FK labels still
-    # bypass.  (Edge case: a user wouldn't actually put an FK label in
-    # alias_map, but pinning the behaviour makes the contract explicit.)
+    # Source C synthetic FK with alias_map: bypass still applies.
+    # Source C ingester emits these as synthetic IDs, never as
+    # user-facing labels, so alias_map must not fire for them.
     canon, fired = _resolve_alias_with_normalisation(
         "customers__country_code__countries",
         {"customers__country_code__countries": "Something Else"},
+        source_type="C",
     )
-    # The bypass is unconditional — alias_map doesn't fire for FK labels.
     assert canon == "customers__country_code__countries"
+    assert fired is False
+
+
+def test_double_underscore_label_from_non_c_source_canonicalises():
+    """A label with the '__' shape from any source OTHER than C
+    must flow through normalisation normally. iso__20022__message
+    (a real ISO 20022 identifier shape that a governance term might
+    legitimately use) must still respect alias_map and the rest of
+    the pipeline."""
+    from ontozense.core.candidate_graph import _resolve_alias_with_normalisation
+
+    # Source A/B/D with double-underscores: NO bypass. alias_map fires.
+    canon, fired = _resolve_alias_with_normalisation(
+        "iso__20022__message",
+        {"iso__20022__message": "ISO 20022 Message"},
+        source_type="B",
+    )
+    assert canon == "ISO 20022 Message"
+    assert fired is True
+
+    # Source D: no bypass either.
+    canon, fired = _resolve_alias_with_normalisation(
+        "iso__20022__message",
+        {"iso__20022__message": "ISO 20022 Message"},
+        source_type="D",
+    )
+    assert canon == "ISO 20022 Message"
+    assert fired is True
+
+    # Empty source_type (back-compat default): NO bypass.
+    # Non-C callers like _resolve_endpoint_to_candidate_id (which
+    # doesn't know the source of the endpoint label) pass empty.
+    canon, fired = _resolve_alias_with_normalisation(
+        "iso__20022__message", {},
+    )
+    # Without source_type="C", the double-underscore shape carries
+    # no special meaning. Falls through normal canonicalisation.
+    # 'iso__20022__message' has no plural-suffix issue, no alias map
+    # match, no prefix -> returned as-is.
+    assert canon == "iso__20022__message"
     assert fired is False
 
 
