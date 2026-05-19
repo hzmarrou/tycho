@@ -125,3 +125,66 @@ def test_model_extractor_classifies_plain_class_raw_type(tmp_path):
         x for x in facts if isinstance(x, EntityFact) and x.name == "Plain"
     )
     assert plain.raw_type == "class"
+
+
+def test_model_extractor_does_not_extract_bare_name_in_regular_method(tmp_path):
+    """A bare ast.Name comparison in a non-__init__, non-validator
+    method is a local temporary — must NOT produce a rule, or the
+    anchor layer will promote a pseudo-attribute as ontology-grade."""
+    f = tmp_path / "regular.py"
+    f.write_text(
+        "class Calculator:\n"
+        "    def compute(self):\n"
+        "        threshold = 5\n"
+        "        if threshold <= 0:\n"
+        "            raise ValueError('bad')\n"
+        "        return threshold\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_model(pm))
+    rules = [r for r in facts if isinstance(r, RuleFact)]
+    # No rule should be emitted — `threshold` is a local, not an attribute.
+    assert all(r.subject_attribute != "threshold" for r in rules), (
+        f"unexpected rule on local temp 'threshold': {rules}"
+    )
+
+
+def test_model_extractor_still_extracts_self_attr_in_regular_method(tmp_path):
+    """self.<attr> guards remain valid in any method (not just __init__)."""
+    f = tmp_path / "self_attr.py"
+    f.write_text(
+        "class Account:\n"
+        "    def withdraw(self, amount):\n"
+        "        if self.balance < amount:\n"
+        "            raise ValueError('insufficient funds')\n"
+        "        self.balance -= amount\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_model(pm))
+    rules = [r for r in facts if isinstance(r, RuleFact)]
+    # The guard is `if self.balance < amount:` — LHS is self.balance,
+    # RHS is the bare name `amount` (not a literal), so this entire
+    # pattern is skipped by _literal_value=None — no rule. That's
+    # also correct: comparisons against non-literals are out of scope.
+    assert not any(r.subject_attribute == "balance" for r in rules)
+
+
+def test_model_extractor_extracts_self_attr_against_literal(tmp_path):
+    """self.<attr> compared to a literal in a regular method DOES
+    emit a rule."""
+    f = tmp_path / "self_attr_literal.py"
+    f.write_text(
+        "class Account:\n"
+        "    def reset(self):\n"
+        "        if self.balance < 0:\n"
+        "            raise ValueError('negative')\n"
+        "        return self.balance\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_model(pm))
+    rules = [r for r in facts if isinstance(r, RuleFact)]
+    assert any(
+        r.subject_entity == "Account" and r.subject_attribute == "balance"
+        and r.predicate == "gte" and r.object_value == 0
+        for r in rules
+    )

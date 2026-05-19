@@ -138,14 +138,6 @@ _CMP_INVERSE: dict[type, str] = {
 }
 
 
-def _attr_target(node: ast.expr) -> str | None:
-    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "self":
-        return node.attr
-    if isinstance(node, ast.Name):
-        return node.id
-    return None
-
-
 def _literal_value(node: ast.expr):
     if isinstance(node, ast.Constant):
         return node.value
@@ -160,6 +152,19 @@ def _decorator_field_name(deco: ast.expr) -> str | None:
 
 
 def _extract_inline_rules(cls_name: str, method: ast.FunctionDef, source: str, file: str):
+    """Yield RuleFacts for `if <cond>: raise` patterns inside ``method``.
+
+    Subject-attribute resolution depends on context:
+      - ``self.attr`` is always accepted (any method).
+      - A bare ``ast.Name`` is accepted only when:
+          * it matches a Pydantic ``@field_validator("...")``-bound
+            param (rebound via ``arg_to_attr``), OR
+          * the method is ``__init__`` (convention: param name doubles
+            as attribute name).
+      - Any other LHS shape is skipped — a bare name in a regular
+        method is almost always a local temporary and would produce
+        a false-positive ontology rule.
+    """
     bound: str | None = None
     for deco in method.decorator_list:
         bound = _decorator_field_name(deco)
@@ -170,6 +175,8 @@ def _extract_inline_rules(cls_name: str, method: ast.FunctionDef, source: str, f
     if bound and method.args.args:
         param_name = method.args.args[-1].arg
         arg_to_attr[param_name] = bound
+
+    is_init = method.name == "__init__"
 
     for node in ast.walk(method):
         if not (isinstance(node, ast.If) and node.body and isinstance(node.body[0], ast.Raise)):
@@ -182,11 +189,21 @@ def _extract_inline_rules(cls_name: str, method: ast.FunctionDef, source: str, f
             continue
         lhs = test.left
         rhs = test.comparators[0]
-        attr = _attr_target(lhs)
+
+        # Resolve subject_attribute based on LHS shape and context.
+        attr: str | None = None
+        if isinstance(lhs, ast.Attribute) and isinstance(lhs.value, ast.Name) and lhs.value.id == "self":
+            attr = lhs.attr
+        elif isinstance(lhs, ast.Name):
+            name = lhs.id
+            if name in arg_to_attr:
+                attr = arg_to_attr[name]
+            elif is_init:
+                attr = name
+            # else: bare name in a regular method — skip.
         if attr is None:
             continue
-        if attr in arg_to_attr:
-            attr = arg_to_attr[attr]
+
         val = _literal_value(rhs)
         if val is None:
             continue
