@@ -19,6 +19,7 @@ from .anchor import anchor_facts
 from .dispatch import select_families
 from .emit import emit_candidates
 from .model_extractor import extract_model
+from .normalize import normalize_labels
 from .parse import parse_module
 from .pipeline_extractor import extract_pipeline
 from .procedural_extractor import extract_procedural
@@ -66,5 +67,4 @@ def run(
             facts.extend(_EXTRACTORS[fam](pm))
     anchored, suppressed = anchor_facts(facts)
     candidates = emit_candidates(anchored, suppressed)
-    from .normalize import normalize_labels
     yield from normalize_labels(candidates, llm=llm)
