@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Iterable
+from fnmatch import fnmatch
 
 from .ir import EvidenceSpan, RuleFact
 from .parse import ParsedModule
@@ -119,14 +120,24 @@ def _extract_function_rules(func: ast.FunctionDef, source: str, file: str) -> It
                         )
 
 
-def extract_procedural(pm: ParsedModule, config: dict | None = None) -> Iterable[RuleFact]:  # noqa: ARG001
+def extract_procedural(pm: ParsedModule, config: dict | None = None) -> Iterable[RuleFact]:
+    config = config or {}
+    exclude = list(config.get("exclude_functions", []) or [])
+    force = list(config.get("force_rule", []) or [])
     file = str(pm.path)
     for name, func in pm.functions.items():
+        # Skip excluded functions entirely.
+        if any(fnmatch(name, pat) for pat in exclude):
+            continue
         yielded_any = False
         for r in _extract_function_rules(func, pm.source, file):
             yielded_any = True
             yield r
-        if not yielded_any and name.startswith(_VALIDATE_PREFIXES):
+        # Weak-rule fallback: validate_*/check_*/assert_* OR force_rule glob.
+        if not yielded_any and (
+            name.startswith(_VALIDATE_PREFIXES)
+            or any(fnmatch(name, pat) for pat in force)
+        ):
             yield RuleFact(
                 rule_kind="validation",
                 subject_entity=None,
