@@ -142,6 +142,19 @@ class _CandidateIndex:
         return list(self.by_key.values())
 
 
+# ─── Rule-identity helpers ──────────────────────────────────────────────────
+
+
+def _rule_store_key(rule_key_tuple: tuple) -> str:
+    """Render the canonical _CandidateIndex.by_key for a rule identity tuple.
+
+    Rule candidates use this format so they bypass label-based lookup
+    (spec §11.1 / planning decision #5). The tuple comes from
+    ``source_d.rule_payload.merge_key``.
+    """
+    return "rule:" + ":".join(str(p) for p in rule_key_tuple)
+
+
 # ─── Builder ────────────────────────────────────────────────────────────────
 
 
@@ -471,7 +484,7 @@ def _upsert(
         # paths and seed a new candidate immediately. Two rules that share
         # a surface label but differ in rule_kind / condition must NOT merge
         # (spec §11.1, planning decision #5).
-        rule_norm_key = f"rule:{':'.join(str(p) for p in rule_key_tuple)}"
+        rule_norm_key = _rule_store_key(rule_key_tuple)
         new_rule = _new_candidate(
             norm=norm, label=label, definition=definition,
             raw_type=raw_type, source_type=source_type,
@@ -483,11 +496,11 @@ def _upsert(
             suppression_reason=suppression_reason, suppressed=suppressed,
             rule_payload=rule_payload,
         )
-        if eid:
-            rule_norm_key = f"id:{eid}"
-            index.by_id[eid] = rule_norm_key
         index.by_key[rule_norm_key] = new_rule
         index.by_rule_key[rule_key_tuple] = rule_norm_key
+        if eid:
+            # Secondary alias only — rule_norm_key is the canonical store key.
+            index.by_id[eid] = rule_norm_key
         _record_attestation_and_boost(index, rule_norm_key, source_type, strength)
         return
 

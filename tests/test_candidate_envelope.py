@@ -147,3 +147,45 @@ def test_rule_payloads_with_same_canonical_label_but_different_kind_do_not_colli
     )
     rule_kinds = {c.rule_payload["rule_kind"] for c in rule_concepts}
     assert rule_kinds == {"validation", "defaulting"}
+    assert len(index.by_rule_key) == 2, (
+        f"by_rule_key should have two distinct entries; got {dict(index.by_rule_key)}"
+    )
+
+
+def test_rule_candidates_with_same_eid_but_different_rule_keys_do_not_collide():
+    """When two rule candidates share an eid but have distinct merge_keys
+    (e.g. different rule_kind), both must remain as separate concepts.
+    The store key is rule-derived; eid is only a secondary alias."""
+    from ontozense.core.candidate_graph import _CandidateIndex, _upsert
+    from ontozense.core.ingest.base import ArtifactKind, IntermediateCandidate, Strength
+
+    def _payload(kind):
+        return {
+            "rule_kind": kind, "subject_entity": "loan",
+            "subject_attribute": "amount", "predicate": "gt", "object_value": 0,
+            "condition": None, "expression": "amount > 0",
+            "evidence_span": {"file": "x.py", "start_line": 1, "end_line": 1, "snippet": ""},
+            "normalization_status": "deterministic",
+        }
+
+    index = _CandidateIndex()
+    # Both rule candidates share eid="loan-rule" but have distinct rule_kinds.
+    for kind in ("validation", "defaulting"):
+        _upsert(
+            index,
+            label="loan.amount gt 0",
+            definition="amount > 0",
+            source_type="D",
+            source_artifact=f"{kind}.py:L1",
+            raw_type=f"rule:{kind}",
+            eid="loan-rule",
+            artifact_kind="rule",
+            strength="strong",
+            promotion_reason="test",
+            rule_payload=_payload(kind),
+        )
+
+    assert len(index.by_rule_key) == 2
+    assert len(index.values()) == 2
+    rule_kinds = {c.rule_payload["rule_kind"] for c in index.values()}
+    assert rule_kinds == {"validation", "defaulting"}
