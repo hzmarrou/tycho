@@ -148,11 +148,33 @@ Expected output includes:
 
 ### B.3 *(v1.1)* Drop a small NPL DDL fixture for Source C
 
+> **⚠ This is a synthetic smoke-test schema, not a real reference
+> model.** The DDL below was written for this tutorial. The
+> terminology is NPL-flavoured (Basel D403 / EBA NPE concepts —
+> `default_date`, `forbearance_event`, `days_past_due`,
+> `industry_segment_code`), but it is **not lifted** from any real
+> bank, **not** from FIBO / BIAN / ACORD / FINREP, and **not** from
+> an anonymised production schema. Its purpose is to **exercise
+> each v1.1 Source C classification path** (entity, attribute, FK
+> relationship, vocabulary auto-detection, audit-table suppression,
+> domain-bearing date column preservation) so you can confirm the
+> pipeline works as designed.
+>
+> **For higher-signal validation**, substitute your own banking
+> schema in place of this file — even a 5-10 table slice from a
+> real (anonymised) production DDL will surface heuristic gaps and
+> real-world dialect issues that a synthetic schema never will.
+> Codex's whole-branch v1.1 review explicitly flagged real-schema
+> validation as the highest-value mitigation against heuristic
+> overfit: *"Default heuristics overfit to one schema style and
+> miss real concepts in others — validate against two real schemas
+> (one banking, one ESG-ish) before merging."*
+
 The bundled NPL data doesn't ship a `CREATE TABLE` schema (only
 `ALTER TABLE` constraint files and a `CREATE VIEW` regulatory
 query, which v1.1's sqlglot-based Source C ingester doesn't yet
-handle). Drop a minimal NPL-flavoured DDL into the workspace so
-Source C has real input for this walkthrough:
+handle). Drop the minimal smoke-test DDL into the workspace so
+Source C has input for this walkthrough:
 
 ```powershell
 @'
@@ -196,14 +218,22 @@ CREATE TABLE loan_audit (
 '@ | Out-File -Encoding utf8 domains/npl/sources/npl-schema.sql
 ```
 
-You can adapt these tables to your own schema later — the key
-shapes this fixture demonstrates are: regular tables (`loan`,
-`borrower`, `forbearance_event`) → entity candidates; a code-table
-(`loan_status_lookup` — 2-col code+description) → vocabulary
-candidate via the auto-detector; an audit table (`loan_audit`) →
-suppressed entry in the new `audit` block; a `created_at` column
-→ suppressed; a domain-bearing `default_date` / `origination_date`
-→ kept; two foreign keys → relationship candidates.
+**What this synthetic fixture demonstrates** (each table maps to
+a v1.1 classification path you'll see fire in Part C):
+
+| Table | v1.1 classification path it exercises |
+|---|---|
+| `loan`, `borrower`, `forbearance_event` | Standard tables → entity candidates with FK relationships |
+| `loan_status_lookup` | 2-col `code + description` + `_lookup` naming → vocabulary auto-detection |
+| `loan_audit` | `*_audit` naming pattern → default suppression / audit-block entry |
+| `created_at` column | Timestamp without domain-bearing prefix → column-level suppression |
+| `default_date`, `origination_date` | Domain-bearing date prefixes → **kept** (not suppressed) |
+| FK to `borrower` / `loan` | Foreign-key constraints → relationship candidates |
+
+If you replace `npl-schema.sql` with a real schema, the expected
+counts and labels in Parts C.3 and C.4 below will differ — but the
+**shape** of what's exercised (per-source attestation, multi-axis
+corroboration, audit block, suppression reasons) stays the same.
 
 ### B.4 *(Skip-the-LLM shortcut)* — provide a pre-extracted Source A
 
