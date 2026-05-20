@@ -285,3 +285,98 @@ class TestExistingCommandsPointAtNewOrchestrators:
     def test_lint_help_mentions_draft(self):
         result = runner.invoke(app, ["lint", "--help"])
         assert "draft" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# Task #96 (v1.1.x patch) – SQL guard regression tests
+# ---------------------------------------------------------------------------
+
+def test_draft_source_c_sql_fails_with_actionable_message(tmp_path: Path):
+    """`draft --source-c schema.sql` must fail fast with an actionable
+    error pointing users to `survey`, NOT crash with a JSON parse
+    traceback (the pre-patch behavior).
+    """
+    domain_dir = tmp_path / "demo"
+    discovery_dir = domain_dir / "discovery"
+    discovery_dir.mkdir(parents=True)
+    (discovery_dir / "candidate-graph.json").write_text(
+        '{"concepts": [], "relationships": [], "audit": []}',
+        encoding="utf-8",
+    )
+    (discovery_dir / "source-a.json").write_text(
+        '{"concepts": [], "relationships": []}',
+        encoding="utf-8",
+    )
+
+    sql_path = tmp_path / "schema.sql"
+    sql_path.write_text(
+        "CREATE TABLE loan (\n"
+        "  loan_id VARCHAR(32) PRIMARY KEY,\n"
+        "  amount NUMERIC NOT NULL\n"
+        ");\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--source-c", str(sql_path),
+        ],
+    )
+
+    # Exit code must be 2 (user error / actionable failure).
+    assert result.exit_code == 2, (
+        f"expected exit code 2; got {result.exit_code}\n"
+        f"stdout: {result.stdout}\n"
+    )
+    # Actionable message present.
+    out = result.stdout
+    assert "Source C SQL is not accepted by `draft`" in out
+    assert "ontozense survey" in out
+    assert "candidate-graph.json" in out
+    # Critically: NO cryptic JSON parse traceback wording.
+    assert "JSON parse error" not in out, (
+        "draft should fail with the actionable SQL guard, not the "
+        "legacy JSON parse error path."
+    )
+    assert "Expecting value" not in out
+    assert "JSONDecodeError" not in out
+
+
+def test_draft_source_c_json_path_still_handled(tmp_path: Path):
+    """A .json source-c path that doesn't actually exist still surfaces
+    via the JSON parse error code path — confirms the SQL guard didn't
+    accidentally short-circuit the legacy handler. The exact error
+    message isn't pinned here; we just verify the SQL guard is
+    selective (only fires on .sql)."""
+    domain_dir = tmp_path / "demo"
+    discovery_dir = domain_dir / "discovery"
+    discovery_dir.mkdir(parents=True)
+    (discovery_dir / "candidate-graph.json").write_text(
+        '{"concepts": [], "relationships": [], "audit": []}',
+        encoding="utf-8",
+    )
+    (discovery_dir / "source-a.json").write_text(
+        '{"concepts": [], "relationships": []}',
+        encoding="utf-8",
+    )
+
+    # A .json file that doesn't conform to SchemaResult — just to
+    # trigger the legacy code path, NOT the new SQL guard.
+    json_path = tmp_path / "schema.json"
+    json_path.write_text('{"not": "a schemaresult"}', encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--source-c", str(json_path),
+        ],
+    )
+    # Must NOT trigger the SQL guard.
+    assert "Source C SQL is not accepted by `draft`" not in result.stdout

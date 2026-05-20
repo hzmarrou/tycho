@@ -3442,7 +3442,13 @@ def draft(
     ),
     source_c: Path = typer.Option(
         None, "--source-c", "-c",
-        help="Optional Source C schema input (single path).",
+        help=(
+            "Optional Source C input — legacy SchemaResult JSON only "
+            "(produced by an adapter; see adapters/django/README.md). "
+            "Raw .sql schema files belong in `ontozense survey`, not "
+            "`draft`. If you already ran survey, Source C is reflected "
+            "in discovery/candidate-graph.json and this flag can be omitted."
+        ),
     ),
     source_d: Path = typer.Option(
         None, "--source-d", "-d",
@@ -3661,6 +3667,24 @@ def _run_fuse_for_draft(
         )
 
     if source_c is not None:
+        # v1.1.x: raw .sql schema files belong in `survey`, not `draft`.
+        # `draft` is still on the v1.0 FusionEngine path which consumes
+        # SchemaResult JSON. Fail fast with an actionable message rather
+        # than the cryptic JSON parse error users hit before this guard.
+        if source_c.suffix.lower() == ".sql":
+            console.print(
+                f"[bold red][x] Source C SQL is not accepted by `draft`:[/] {source_c}\n"
+                "  `draft --source-c` still consumes legacy SchemaResult JSON "
+                "on the FusionEngine path.\n"
+                "  In v1.1+, raw `.sql` schema files are ingested by "
+                "`ontozense survey`, not by `draft`.\n"
+                "  If you already ran `survey`, drop `--source-c` here; "
+                "Source C is already reflected in "
+                "`discovery/candidate-graph.json`.\n"
+                "  If you need direct Source C input to `draft`, provide "
+                "an adapter-produced SchemaResult JSON instead."
+            )
+            raise typer.Exit(code=2)
         # Tycho 1.0+: Source C is a JSON file conforming to the
         # SchemaResult contract in ontozense.core.source_c. Mirrors
         # the loader used by the existing ``fuse`` CLI command.
