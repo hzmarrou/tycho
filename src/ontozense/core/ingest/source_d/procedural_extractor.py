@@ -33,6 +33,11 @@ _VALIDATE_PREFIXES = ("validate_", "check_", "assert_")
 
 _ELIGIBILITY_PREFIXES = ("is_", "can_", "may_", "should_", "must_")
 
+_MULTI_ELIGIBILITY_PREFIXES = (
+    "is_", "can_", "may_", "should_", "must_",
+    "classify_", "determine_", "predict_", "decide_", "evaluate_",
+)
+
 # Direct (NOT inverted) op mapping for eligibility return predicates.
 # The function returns True when the comparison holds — that IS the
 # eligibility condition. Same convention as pipeline boolean masks.
@@ -198,6 +203,155 @@ def _extract_eligibility_return(func: ast.FunctionDef, source: str, file: str) -
     )
 
 
+def _extract_multi_condition_returns(
+    func: ast.FunctionDef,
+    constants: dict[str, object],
+    source: str,
+    file: str,
+) -> Iterable[RuleFact]:
+    """Pattern A + B: multi-condition bool-returning functions.
+
+    Walks ONLY top-level `if` statements (direct children of func.body)
+    to avoid nested-under-guard false promotion (spec §10).
+
+    Pattern A (conjunction): function body ends with `return True`.
+    Each top-level `if X: return False` is a required condition.
+
+    Pattern B (disjunction): function body ends with `return False`.
+    Each top-level `if X: return True` is a sufficient trigger.
+
+    Both patterns require the function name to start with one of
+    _MULTI_ELIGIBILITY_PREFIXES.
+    """
+    if not func.name.startswith(_MULTI_ELIGIBILITY_PREFIXES):
+        return
+    if not func.body:
+        return
+    # Determine pattern direction from the terminal return.
+    last = func.body[-1]
+    if not isinstance(last, ast.Return) or not isinstance(last.value, ast.Constant):
+        return
+    if last.value.value is True:
+        target_return = False   # Pattern A: if X -> return False
+    elif last.value.value is False:
+        target_return = True    # Pattern B: if X -> return True
+    else:
+        return
+
+    param_names = {a.arg for a in func.args.args}
+
+    for stmt in func.body:  # TOP-LEVEL ONLY — no ast.walk()
+        if not isinstance(stmt, ast.If):
+            continue
+        if len(stmt.body) != 1:
+            continue
+        inner = stmt.body[0]
+        if not isinstance(inner, ast.Return):
+            continue
+        if not isinstance(inner.value, ast.Constant) or inner.value.value is not target_return:
+            continue
+
+        # Extract subject + predicate + object_value from stmt.test.
+        rule = _multi_condition_rule_from_test(
+            stmt.test, target_return, param_names, constants, stmt, func, source, file,
+        )
+        if rule is not None:
+            yield rule
+
+
+def _multi_condition_rule_from_test(
+    test: ast.expr,
+    target_return: bool,
+    param_names: set[str],
+    constants: dict[str, object],
+    if_node: ast.If,
+    func: ast.FunctionDef,
+    source: str,
+    file: str,
+) -> "RuleFact | None":
+    """Turn a single top-level `if <test>: return <target_return>` into a RuleFact.
+
+    Polarity table for target_return=False (Pattern A, conjunction):
+      - `if X: return False`         -> (required, False) on X (must be falsy)
+      - `if not X: return False`     -> (required, True)  on X (must be truthy)
+      - `if X <op> lit: return False` -> (inverted(op), lit) on X
+
+    For target_return=True (Pattern B, disjunction):
+      - `if X: return True`          -> (required, True)
+      - `if X <op> lit: return True` -> (op, lit) direct
+    """
+    # Handle `if not X:` by stripping UnaryOp(Not, ...).
+    negated = False
+    raw = test
+    if isinstance(raw, ast.UnaryOp) and isinstance(raw.op, ast.Not):
+        negated = True
+        raw = raw.operand
+
+    # Case 1: bare subject (truthiness check).
+    if not isinstance(raw, ast.Compare):
+        subject = _resolve_subject(raw, param_names)
+        if subject is None:
+            return None
+        # target_return=False, negated: `if not X: return False` -> X must be True
+        # target_return=False, plain  : `if X: return False`     -> X must be False
+        # target_return=True,  plain  : `if X: return True`      -> X must be True
+        # target_return=True,  negated: `if not X: return True`  -> X must be False
+        if target_return is False:
+            object_value = True if negated else False
+        else:
+            object_value = False if negated else True
+        return RuleFact(
+            rule_kind="eligibility",
+            subject_entity=None,
+            subject_attribute=subject,
+            predicate="required",
+            object_value=object_value,
+            expression=ast.unparse(test),
+            evidence_span=_span(if_node, file, source),
+            code_context=f"def {func.name}",
+            confidence=0.75,
+            extractor_family="procedural",
+        )
+
+    # Case 2: comparison <subject> <op> <lit>.
+    if negated:
+        # `if not (X <op> lit): return ...` — rare pattern, defer.
+        return None
+    if len(raw.ops) != 1:
+        return None
+    op_type = type(raw.ops[0])
+    subject = _resolve_subject(raw.left, param_names)
+    if subject is None:
+        return None
+    rhs_value = _resolve_constant(raw.comparators[0], constants)
+    if rhs_value is _UNRESOLVED:
+        return None
+
+    if target_return is False:
+        # Conjunction: if X <op> lit triggers FAIL, so X must satisfy NOT(op).
+        if op_type not in _CMP_INVERSE:
+            return None
+        predicate = _CMP_INVERSE[op_type]
+    else:
+        # Disjunction: if X <op> lit triggers SUCCESS, so X satisfies (op) directly.
+        if op_type not in _DIRECT_CMP:
+            return None
+        predicate = _DIRECT_CMP[op_type]
+
+    return RuleFact(
+        rule_kind="eligibility",
+        subject_entity=None,
+        subject_attribute=subject,
+        predicate=predicate,
+        object_value=rhs_value,
+        expression=ast.unparse(test),
+        evidence_span=_span(if_node, file, source),
+        code_context=f"def {func.name}",
+        confidence=0.75,
+        extractor_family="procedural",
+    )
+
+
 def _extract_function_rules(
     func: ast.FunctionDef,
     constants: dict[str, object],
@@ -313,6 +467,12 @@ def extract_procedural(pm: ParsedModule, config: dict | None = None) -> Iterable
         # Skip excluded functions entirely (consistent case-insensitive
         # glob behavior with other Source D config keys).
         if exclude and glob_match(name, exclude):
+            continue
+        # Pattern A + B: multi-condition bool-returning function.
+        multi = list(_extract_multi_condition_returns(func, constants, pm.source, file))
+        if multi:
+            yield from multi
+            yield from _extract_transition_assigns_procedural(func, pm.source, file)
             continue
         # Eligibility path: is_*/can_*/may_*/should_*/must_* with
         # simple `return <Compare>` body.

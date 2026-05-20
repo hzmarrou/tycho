@@ -148,3 +148,161 @@ def test_pattern_d_skips_when_constant_unknown(tmp_path):
     # No structured rule; only the weak validate_* fallback fires.
     structured = [r for r in rules if r.subject_attribute == "amount"]
     assert structured == []
+
+
+# ---------------------------------------------------------------------------
+# Task 4 — Pattern A (multi-condition eligibility, conjunction)
+# ---------------------------------------------------------------------------
+
+
+def test_pattern_a_emits_eligibility_per_required_condition(tmp_path):
+    """`if not X: return False` chain → one eligibility rule per condition
+    with (required, True) polarity."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def is_forbearance(loan_modification, counterparty_status):\n"
+        "    if not counterparty_status.is_in_financial_difficulty:\n"
+        "        return False\n"
+        "    if not loan_modification.is_concessionary:\n"
+        "        return False\n"
+        "    return True\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    assert len(elig) == 2
+    subjects = {(r.subject_attribute, r.predicate, r.object_value) for r in elig}
+    assert ("is_in_financial_difficulty", "required", True) in subjects
+    assert ("is_concessionary", "required", True) in subjects
+
+
+def test_pattern_a_bare_param_truthiness_polarity(tmp_path):
+    """`if has_X: return False` (no `not`) → bare-param subject with
+    (required, False) polarity."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def can_upgrade(loan, has_active_forbearance):\n"
+        "    if has_active_forbearance:\n"
+        "        return False\n"
+        "    if not loan.is_non_performing:\n"
+        "        return False\n"
+        "    return True\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    triples = {(r.subject_attribute, r.predicate, r.object_value) for r in elig}
+    assert ("has_active_forbearance", "required", False) in triples
+    assert ("is_non_performing", "required", True) in triples
+
+
+def test_pattern_a_skips_nested_ifs(tmp_path):
+    """Nested `if/if return False` patterns must NOT contribute rules
+    — outer-guard context can't be serialised faithfully."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def is_eligible(loan):\n"
+        "    if loan.flag_a:\n"
+        "        if loan.flag_b:\n"
+        "            return False\n"
+        "    return True\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    # The OUTER if doesn't have `return False` directly; its body has
+    # only a nested if. Neither layer should emit a standalone rule.
+    assert elig == []
+
+
+def test_pattern_a_skips_when_lhs_is_method_call(tmp_path):
+    """`if not payment_history.continuous_repayments(): return False`
+    must be skipped — method call LHS is not a subject-bearing
+    reference."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def can_upgrade(loan, payment_history):\n"
+        "    if not payment_history.continuous_repayments():\n"
+        "        return False\n"
+        "    return True\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    assert elig == []
+
+
+def test_pattern_a_skips_when_rhs_is_local_variable(tmp_path):
+    """`if loan.dpd < threshold: return False` where `threshold` is a
+    local must be skipped — dataflow is out of scope."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def can_upgrade(loan):\n"
+        "    threshold = 90\n"
+        "    if loan.dpd < threshold:\n"
+        "        return False\n"
+        "    return True\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    assert elig == []
+
+
+# ---------------------------------------------------------------------------
+# Task 4 — Pattern B (multi-condition classification, disjunction)
+# ---------------------------------------------------------------------------
+
+
+def test_pattern_b_emits_eligibility_per_sufficient_trigger(tmp_path):
+    """`if X: return True; ...; return False` → one eligibility rule
+    per trigger with direct (not inverted) polarity."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def classify_loan_as_npe(loan):\n"
+        "    if loan.ifrs_stage == 'ifrs_stage_3_impaired':\n"
+        "        return True\n"
+        "    if loan.is_defaulted:\n"
+        "        return True\n"
+        "    return False\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    triples = {(r.subject_attribute, r.predicate, r.object_value) for r in elig}
+    assert ("ifrs_stage", "eq", "ifrs_stage_3_impaired") in triples
+    assert ("is_defaulted", "required", True) in triples
+
+
+def test_pattern_b_resolves_constant_rhs(tmp_path):
+    """Pattern B + Pattern D: `if X == IFRS_STAGE_IMPAIRED` resolves
+    the constant to its literal value."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "IFRS_STAGE_IMPAIRED = 'ifrs_stage_3_impaired'\n"
+        "def classify_loan(loan):\n"
+        "    if loan.ifrs_stage == IFRS_STAGE_IMPAIRED:\n"
+        "        return True\n"
+        "    return False\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    assert len(elig) == 1
+    assert elig[0].object_value == "ifrs_stage_3_impaired"
+
+
+def test_pattern_b_only_fires_on_extended_prefix_set(tmp_path):
+    """`classify_*`, `determine_*`, etc. trigger Pattern B; plain
+    function names don't."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def helper(loan):\n"  # not a recognised prefix
+        "    if loan.is_defaulted:\n"
+        "        return True\n"
+        "    return False\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    assert elig == []
