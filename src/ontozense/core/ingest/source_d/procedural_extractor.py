@@ -44,6 +44,36 @@ _DIRECT_CMP = {
 _TRANSITION_FIELD_NAMES = frozenset({"status", "state", "phase", "stage", "lifecycle_state"})
 
 
+def _resolve_subject(expr: ast.expr, param_names: set[str]) -> str | None:
+    """Return the subject_attribute name for a valid LHS shape, else None.
+
+    Accepts:
+      - <param>.<attr>        -> returns <attr>
+      - <param>["<key>"]      -> returns <key>
+      - bare <param>          -> returns <param>
+
+    Rejects everything else, including chained attribute access,
+    method calls, module-level constants, and subscripts on non-param
+    receivers. The receiver must be a direct ast.Name in param_names.
+    """
+    if isinstance(expr, ast.Attribute):
+        if isinstance(expr.value, ast.Name) and expr.value.id in param_names:
+            return expr.attr
+        return None
+    if isinstance(expr, ast.Subscript):
+        if not isinstance(expr.value, ast.Name) or expr.value.id not in param_names:
+            return None
+        slice_node = expr.slice
+        if isinstance(slice_node, ast.Constant) and isinstance(slice_node.value, str):
+            return slice_node.value
+        return None
+    if isinstance(expr, ast.Name):
+        if expr.id in param_names:
+            return expr.id
+        return None
+    return None
+
+
 def _span(node: ast.AST, file: str, source: str) -> EvidenceSpan:
     start = getattr(node, "lineno", 1)
     end = getattr(node, "end_lineno", start)
