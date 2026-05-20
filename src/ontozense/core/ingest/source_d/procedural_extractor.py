@@ -414,19 +414,31 @@ def _validation_rule_from_test(
 
     Polarity (validation = the negation must hold):
       - `if X: errors.append(...)`          -> (required, False) on X
+      - `if not X: errors.append(...)`      -> (required, True)  on X
       - `if X <op> lit: errors.append(...)` -> (inverted(op), lit) on X
     """
+    # Handle `if not X: errors.append(...)` by stripping UnaryOp(Not, ...).
+    negated = False
+    raw = test
+    if isinstance(raw, ast.UnaryOp) and isinstance(raw.op, ast.Not):
+        negated = True
+        raw = raw.operand
+
     # Bare-subject truthiness branch.
-    if not isinstance(test, ast.Compare):
-        subject = _resolve_subject(test, param_names)
+    if not isinstance(raw, ast.Compare):
+        subject = _resolve_subject(raw, param_names)
         if subject is None:
             return None
+        # Polarity:
+        #   `if X: errors.append(...)`     -> X is a violation -> required, False
+        #   `if not X: errors.append(...)` -> not-X is a violation -> required, True
+        object_value = True if negated else False
         return RuleFact(
             rule_kind="validation",
             subject_entity=None,
             subject_attribute=subject,
             predicate="required",
-            object_value=False,
+            object_value=object_value,
             expression=ast.unparse(test),
             evidence_span=_span(if_node, file, source),
             code_context=f"def {func.name}",
@@ -435,15 +447,18 @@ def _validation_rule_from_test(
         )
 
     # Comparison branch.
-    if len(test.ops) != 1:
+    if negated:
+        # `if not (X <op> lit): errors.append(...)` — rare pattern, defer.
         return None
-    op_type = type(test.ops[0])
+    if len(raw.ops) != 1:
+        return None
+    op_type = type(raw.ops[0])
     if op_type not in _CMP_INVERSE:
         return None
-    subject = _resolve_subject(test.left, param_names)
+    subject = _resolve_subject(raw.left, param_names)
     if subject is None:
         return None
-    rhs_value = _resolve_constant(test.comparators[0], constants)
+    rhs_value = _resolve_constant(raw.comparators[0], constants)
     if rhs_value is _UNRESOLVED:
         return None
     return RuleFact(

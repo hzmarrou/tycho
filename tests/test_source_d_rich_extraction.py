@@ -425,3 +425,26 @@ def test_pattern_c_skips_non_validate_function_name(tmp_path):
     facts = list(extract_procedural(pm))
     vals = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "validation"]
     assert vals == []
+
+
+def test_pattern_c_handles_negated_bare_attribute(tmp_path):
+    """`if not event.is_valid: errors.append(...)` must emit a
+    validation rule with (required, True) — i.e. is_valid must be
+    truthy for the entity to pass validation. Without the not-strip
+    fix, this case was silently dropped."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def validate_event(event):\n"
+        "    errors = []\n"
+        "    if not event.is_valid:\n"
+        "        errors.append('invalid')\n"
+        "    return errors\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    vals = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "validation"]
+    assert len(vals) == 1
+    r = vals[0]
+    assert r.subject_attribute == "is_valid"
+    assert r.predicate == "required"
+    assert r.object_value is True
