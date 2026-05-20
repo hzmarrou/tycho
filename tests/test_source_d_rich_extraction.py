@@ -1,0 +1,686 @@
+"""Unit tests for v1.2.1 rich-extraction helpers."""
+import ast
+
+from ontozense.core.ingest.source_d.ir import RuleFact
+from ontozense.core.ingest.source_d.model_extractor import extract_model
+from ontozense.core.ingest.source_d.parse import parse_module
+from ontozense.core.ingest.source_d.procedural_extractor import (
+    _UNRESOLVED,
+    _collect_module_constants,
+    _resolve_constant,
+    _resolve_subject,
+    extract_procedural,
+)
+
+
+def _expr(src: str) -> ast.expr:
+    """Parse a single expression string into its ast.expr."""
+    module = ast.parse(src, mode="eval")
+    return module.body
+
+
+def test_resolve_subject_param_attribute_access():
+    expr = _expr("loan.is_non_performing")
+    assert _resolve_subject(expr, {"loan"}) == "is_non_performing"
+
+
+def test_resolve_subject_param_string_subscript():
+    expr = _expr("payment['amount']")
+    assert _resolve_subject(expr, {"payment"}) == "amount"
+
+
+def test_resolve_subject_bare_param():
+    expr = _expr("has_active_forbearance")
+    assert _resolve_subject(expr, {"has_active_forbearance"}) == "has_active_forbearance"
+
+
+def test_resolve_subject_rejects_module_level_name():
+    expr = _expr("THRESHOLDS")
+    assert _resolve_subject(expr, {"loan"}) is None
+
+
+def test_resolve_subject_rejects_method_call():
+    expr = _expr("payment_history.continuous_repayments()")
+    assert _resolve_subject(expr, {"payment_history"}) is None
+
+
+def test_resolve_subject_rejects_chained_attribute():
+    expr = _expr("self.config.threshold")
+    assert _resolve_subject(expr, {"self"}) is None
+
+
+def test_resolve_subject_rejects_non_string_subscript():
+    expr = _expr("loan[0]")
+    assert _resolve_subject(expr, {"loan"}) is None
+
+
+def test_resolve_subject_rejects_subscript_on_non_param():
+    expr = _expr("CONFIG['key']")
+    assert _resolve_subject(expr, {"loan"}) is None
+
+
+def test_collect_module_constants_picks_up_simple_assigns(tmp_path):
+    src = tmp_path / "m.py"
+    src.write_text(
+        "NPE_DPD_THRESHOLD = 90\n"
+        "MATERIALITY = 100\n"
+        "IFRS_STAGE_IMPAIRED = 'ifrs_stage_3_impaired'\n"
+    )
+    pm = parse_module(src)
+    constants = _collect_module_constants(pm)
+    assert constants["NPE_DPD_THRESHOLD"] == 90
+    assert constants["MATERIALITY"] == 100
+    assert constants["IFRS_STAGE_IMPAIRED"] == "ifrs_stage_3_impaired"
+
+
+def test_collect_module_constants_ignores_non_constant_values(tmp_path):
+    src = tmp_path / "m.py"
+    src.write_text(
+        "FOO = some_func()\n"
+        "BAR = 1 + 2\n"
+        "OK = 5\n"
+    )
+    pm = parse_module(src)
+    constants = _collect_module_constants(pm)
+    assert "FOO" not in constants
+    assert "BAR" not in constants
+    assert constants["OK"] == 5
+
+
+def test_collect_module_constants_ignores_tuple_unpacking(tmp_path):
+    src = tmp_path / "m.py"
+    src.write_text("A, B = 1, 2\nC = 3\n")
+    pm = parse_module(src)
+    constants = _collect_module_constants(pm)
+    assert "A" not in constants
+    assert "B" not in constants
+    assert constants["C"] == 3
+
+
+def test_resolve_constant_returns_literal_value_for_ast_constant():
+    node = ast.parse("42", mode="eval").body
+    assert _resolve_constant(node, {}) == 42
+
+
+def test_resolve_constant_resolves_name_from_constants_map():
+    node = ast.parse("NPE_DPD_THRESHOLD", mode="eval").body
+    assert _resolve_constant(node, {"NPE_DPD_THRESHOLD": 90}) == 90
+
+
+def test_resolve_constant_returns_unresolved_for_unknown_name():
+    node = ast.parse("UNKNOWN", mode="eval").body
+    assert _resolve_constant(node, {"OTHER": 1}) is _UNRESOLVED
+
+
+def test_resolve_constant_returns_unresolved_for_other_shapes():
+    node = ast.parse("some_func()", mode="eval").body
+    assert _resolve_constant(node, {}) is _UNRESOLVED
+
+
+def test_pattern_d_resolves_module_constant_rhs_in_existing_extractor(tmp_path):
+    """An `if x['amount'] <= THRESHOLD: raise` rule must resolve
+    THRESHOLD against the module-level constant."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "THRESHOLD = 100\n"
+        "def validate_payment(payment):\n"
+        "    if payment['amount'] <= THRESHOLD:\n"
+        "        raise ValueError('too low')\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    rules = [r for r in facts if isinstance(r, RuleFact) and r.subject_attribute == "amount"]
+    assert len(rules) == 1
+    assert rules[0].object_value == 100
+    assert rules[0].predicate == "gt"  # inverted from <=
+
+
+def test_pattern_d_skips_when_constant_unknown(tmp_path):
+    """An unresolved Name RHS still skips emission (the v1.2 behavior)."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def validate_payment(payment):\n"
+        "    if payment['amount'] <= UNKNOWN_THRESHOLD:\n"
+        "        raise ValueError\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    rules = [r for r in facts if isinstance(r, RuleFact)]
+    # No structured rule; only the weak validate_* fallback fires.
+    structured = [r for r in rules if r.subject_attribute == "amount"]
+    assert structured == []
+
+
+# ---------------------------------------------------------------------------
+# Task 4 — Pattern A (multi-condition eligibility, conjunction)
+# ---------------------------------------------------------------------------
+
+
+def test_pattern_a_emits_eligibility_per_required_condition(tmp_path):
+    """`if not X: return False` chain → one eligibility rule per condition
+    with (required, True) polarity."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def is_forbearance(loan_modification, counterparty_status):\n"
+        "    if not counterparty_status.is_in_financial_difficulty:\n"
+        "        return False\n"
+        "    if not loan_modification.is_concessionary:\n"
+        "        return False\n"
+        "    return True\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    assert len(elig) == 2
+    subjects = {(r.subject_attribute, r.predicate, r.object_value) for r in elig}
+    assert ("is_in_financial_difficulty", "required", True) in subjects
+    assert ("is_concessionary", "required", True) in subjects
+
+
+def test_pattern_a_bare_param_truthiness_polarity(tmp_path):
+    """`if has_X: return False` (no `not`) → bare-param subject with
+    (required, False) polarity."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def can_upgrade(loan, has_active_forbearance):\n"
+        "    if has_active_forbearance:\n"
+        "        return False\n"
+        "    if not loan.is_non_performing:\n"
+        "        return False\n"
+        "    return True\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    triples = {(r.subject_attribute, r.predicate, r.object_value) for r in elig}
+    assert ("has_active_forbearance", "required", False) in triples
+    assert ("is_non_performing", "required", True) in triples
+
+
+def test_pattern_a_skips_nested_ifs(tmp_path):
+    """Nested `if/if return False` patterns must NOT contribute rules
+    — outer-guard context can't be serialised faithfully."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def is_eligible(loan):\n"
+        "    if loan.flag_a:\n"
+        "        if loan.flag_b:\n"
+        "            return False\n"
+        "    return True\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    # The OUTER if doesn't have `return False` directly; its body has
+    # only a nested if. Neither layer should emit a standalone rule.
+    assert elig == []
+
+
+def test_pattern_a_skips_when_lhs_is_method_call(tmp_path):
+    """`if not payment_history.continuous_repayments(): return False`
+    must be skipped — method call LHS is not a subject-bearing
+    reference."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def can_upgrade(loan, payment_history):\n"
+        "    if not payment_history.continuous_repayments():\n"
+        "        return False\n"
+        "    return True\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    assert elig == []
+
+
+def test_pattern_a_skips_when_rhs_is_local_variable(tmp_path):
+    """`if loan.dpd < threshold: return False` where `threshold` is a
+    local must be skipped — dataflow is out of scope."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def can_upgrade(loan):\n"
+        "    threshold = 90\n"
+        "    if loan.dpd < threshold:\n"
+        "        return False\n"
+        "    return True\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    assert elig == []
+
+
+# ---------------------------------------------------------------------------
+# Task 4 — Pattern B (multi-condition classification, disjunction)
+# ---------------------------------------------------------------------------
+
+
+def test_pattern_b_emits_eligibility_per_sufficient_trigger(tmp_path):
+    """`if X: return True; ...; return False` → one eligibility rule
+    per trigger with direct (not inverted) polarity."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def classify_loan_as_npe(loan):\n"
+        "    if loan.ifrs_stage == 'ifrs_stage_3_impaired':\n"
+        "        return True\n"
+        "    if loan.is_defaulted:\n"
+        "        return True\n"
+        "    return False\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    triples = {(r.subject_attribute, r.predicate, r.object_value) for r in elig}
+    assert ("ifrs_stage", "eq", "ifrs_stage_3_impaired") in triples
+    assert ("is_defaulted", "required", True) in triples
+
+
+def test_pattern_b_resolves_constant_rhs(tmp_path):
+    """Pattern B + Pattern D: `if X == IFRS_STAGE_IMPAIRED` resolves
+    the constant to its literal value."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "IFRS_STAGE_IMPAIRED = 'ifrs_stage_3_impaired'\n"
+        "def classify_loan(loan):\n"
+        "    if loan.ifrs_stage == IFRS_STAGE_IMPAIRED:\n"
+        "        return True\n"
+        "    return False\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    assert len(elig) == 1
+    assert elig[0].object_value == "ifrs_stage_3_impaired"
+
+
+def test_pattern_b_only_fires_on_extended_prefix_set(tmp_path):
+    """`classify_*`, `determine_*`, etc. trigger Pattern B; plain
+    function names don't."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def helper(loan):\n"  # not a recognised prefix
+        "    if loan.is_defaulted:\n"
+        "        return True\n"
+        "    return False\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    assert elig == []
+
+
+def test_pattern_a_skips_negated_comparison(tmp_path):
+    """`if not (X <op> lit): return False` is documented as a rare
+    pattern deferred to a future patch. The helper must return None
+    (no rule emitted) for this shape, not crash or emit a wrong rule."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def is_eligible(loan):\n"
+        "    if not (loan.amount > 0):\n"
+        "        return False\n"
+        "    return True\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    assert elig == []
+
+
+def test_pattern_b_negated_bare_name_polarity(tmp_path):
+    """`if not X: return True` (Pattern B, negated) maps to
+    (required, False) — X being falsy is the sufficient trigger."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def classify_loan(loan):\n"
+        "    if not loan.is_active:\n"
+        "        return True\n"
+        "    return False\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    assert len(elig) == 1
+    r = elig[0]
+    assert r.subject_attribute == "is_active"
+    assert r.predicate == "required"
+    assert r.object_value is False
+
+
+# ---------------------------------------------------------------------------
+# Task 5 — Pattern C (errors.append validation extraction)
+# ---------------------------------------------------------------------------
+
+
+def test_pattern_c_emits_validation_per_top_level_errors_append(tmp_path):
+    """`if X <op> lit: errors.append(...)` at top level emits a
+    validation rule with the inverted predicate."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def validate_payment(payment):\n"
+        "    errors = []\n"
+        "    if payment['amount'] <= 0:\n"
+        "        errors.append('amount must be positive')\n"
+        "    return errors\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    vals = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "validation"]
+    assert len(vals) == 1
+    r = vals[0]
+    assert r.subject_attribute == "amount"
+    assert r.predicate == "gt"  # inverted from <=
+    assert r.object_value == 0
+
+
+def test_pattern_c_bare_param_attribute_truthiness(tmp_path):
+    """`if X: errors.append(...)` with bare-attr LHS emits
+    (required, False) — X must NOT be truthy."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def validate_event(event):\n"
+        "    errors = []\n"
+        "    if event.is_suspicious:\n"
+        "        errors.append('suspicious')\n"
+        "    return errors\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    vals = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "validation"]
+    assert len(vals) == 1
+    assert vals[0].subject_attribute == "is_suspicious"
+    assert vals[0].predicate == "required"
+    assert vals[0].object_value is False
+
+
+def test_pattern_c_skips_nested_under_guard(tmp_path):
+    """`if outer: if inner: errors.append(...)` is SKIPPED entirely
+    — neither inner nor outer rule is emitted (false-promotion
+    avoidance per spec §10)."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def validate(event, loan):\n"
+        "    errors = []\n"
+        "    if loan.was_non_performing_at(event.start_date):\n"
+        "        if event.classification == 'performing_forborne':\n"
+        "            errors.append('illegal')\n"
+        "    return errors\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    vals = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "validation"]
+    assert vals == []
+
+
+def test_pattern_c_skips_non_validate_function_name(tmp_path):
+    """Functions outside _VALIDATE_PREFIXES don't trigger Pattern C
+    even if they use errors.append."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def normalize(payment):\n"
+        "    errors = []\n"
+        "    if payment['amount'] <= 0:\n"
+        "        errors.append('bad')\n"
+        "    return errors\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    vals = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "validation"]
+    assert vals == []
+
+
+def test_pattern_c_handles_negated_bare_attribute(tmp_path):
+    """`if not event.is_valid: errors.append(...)` must emit a
+    validation rule with (required, True) — i.e. is_valid must be
+    truthy for the entity to pass validation. Without the not-strip
+    fix, this case was silently dropped."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def validate_event(event):\n"
+        "    errors = []\n"
+        "    if not event.is_valid:\n"
+        "        errors.append('invalid')\n"
+        "    return errors\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    vals = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "validation"]
+    assert len(vals) == 1
+    r = vals[0]
+    assert r.subject_attribute == "is_valid"
+    assert r.predicate == "required"
+    assert r.object_value is True
+
+
+# ---------------------------------------------------------------------------
+# Task 6 — Pattern A + B (model) — multi-condition class methods
+# ---------------------------------------------------------------------------
+
+
+def test_pattern_a_in_class_method_anchors_to_class(tmp_path):
+    """Multi-condition eligibility in a class method: subject_entity
+    is set to the enclosing class name (anchored)."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "class LoanChecker:\n"
+        "    def is_eligible(self, loan):\n"
+        "        if not loan.is_non_performing:\n"
+        "            return False\n"
+        "        if loan.has_active_forbearance:\n"
+        "            return False\n"
+        "        return True\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_model(pm))
+    elig = [
+        f for f in facts
+        if isinstance(f, RuleFact) and f.rule_kind == "eligibility"
+    ]
+    assert len(elig) == 2
+    for r in elig:
+        assert r.subject_entity == "LoanChecker"
+
+
+def test_pattern_b_in_class_method_anchors_to_class(tmp_path):
+    """Pattern B classification inside a class method anchors to
+    the class."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "class Classifier:\n"
+        "    def classify_npe(self, loan):\n"
+        "        if loan.is_defaulted:\n"
+        "            return True\n"
+        "        if loan.ifrs_stage == 'impaired':\n"
+        "            return True\n"
+        "        return False\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_model(pm))
+    elig = [
+        f for f in facts
+        if isinstance(f, RuleFact) and f.rule_kind == "eligibility"
+    ]
+    assert len(elig) == 2
+    for r in elig:
+        assert r.subject_entity == "Classifier"
+
+
+def test_class_method_pattern_d_resolves_module_constant(tmp_path):
+    """Pattern D resolution works from inside class methods."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "IFRS_IMPAIRED = 'impaired'\n"
+        "class Classifier:\n"
+        "    def classify_npe(self, loan):\n"
+        "        if loan.ifrs_stage == IFRS_IMPAIRED:\n"
+        "            return True\n"
+        "        return False\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_model(pm))
+    elig = [
+        f for f in facts
+        if isinstance(f, RuleFact) and f.rule_kind == "eligibility"
+    ]
+    assert len(elig) == 1
+    assert elig[0].object_value == "impaired"
+
+
+def test_pattern_a_class_method_extracts_self_attribute(tmp_path):
+    """`self.<attr>` is the canonical anchored subject form for class
+    methods. Mirrors v1.2's _extract_eligibility_method contract.
+    This test pins that `self` is INCLUDED in param_names so
+    `self.is_non_performing` resolves correctly (Codex Finding 1)."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "class Loan:\n"
+        "    def is_eligible(self):\n"
+        "        if not self.is_non_performing:\n"
+        "            return False\n"
+        "        if self.has_active_forbearance:\n"
+        "            return False\n"
+        "        return True\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_model(pm))
+    elig = [
+        f for f in facts
+        if isinstance(f, RuleFact) and f.rule_kind == "eligibility"
+    ]
+    assert len(elig) == 2
+    triples = {(r.subject_attribute, r.predicate, r.object_value) for r in elig}
+    assert ("is_non_performing", "required", True) in triples
+    assert ("has_active_forbearance", "required", False) in triples
+    for r in elig:
+        assert r.subject_entity == "Loan"
+
+
+def test_pattern_b_class_method_extracts_self_attribute_with_constant(tmp_path):
+    """Pattern B + self.<attr> + Pattern D constant resolution
+    all compose inside a class method."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "STATUS_ACTIVE = 'active'\n"
+        "class Loan:\n"
+        "    def is_active(self):\n"
+        "        if self.status == STATUS_ACTIVE:\n"
+        "            return True\n"
+        "        return False\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_model(pm))
+    elig = [
+        f for f in facts
+        if isinstance(f, RuleFact) and f.rule_kind == "eligibility"
+    ]
+    assert len(elig) == 1
+    r = elig[0]
+    assert r.subject_entity == "Loan"
+    assert r.subject_attribute == "status"
+    assert r.predicate == "eq"
+    assert r.object_value == "active"
+
+
+def test_pattern_c_co_emits_with_raise_validation(tmp_path):
+    """A `validate_*` function using BOTH `if X: errors.append(...)` AND
+    `if Y <op> lit: raise ...` must emit BOTH a Pattern C validation rule
+    on X AND a Pattern raise-validation rule on Y. They're non-overlapping
+    by body shape, so co-emission is intentional. Without this test the
+    behavior is undocumented (Codex final review finding)."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def validate_payment(payment):\n"
+        "    errors = []\n"
+        "    if payment['status'] == 'INVALID':\n"
+        "        errors.append('invalid status')\n"
+        "    if payment['amount'] <= 0:\n"
+        "        raise ValueError('amount must be positive')\n"
+        "    return errors\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    rules = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "validation"]
+    # Both rules emitted: one from Pattern C (errors.append), one from the
+    # existing `if/raise` extractor in _extract_function_rules.
+    assert len(rules) == 2, f"expected 2 validation rules; got {len(rules)}"
+    by_subject = {r.subject_attribute: r for r in rules}
+    assert "status" in by_subject
+    assert "amount" in by_subject
+    # Pattern C rule: status must NOT be "INVALID" (neq).
+    assert by_subject["status"].predicate == "neq"
+    assert by_subject["status"].object_value == "INVALID"
+    # Raise rule: amount must be > 0 (inverted from <=).
+    assert by_subject["amount"].predicate == "gt"
+    assert by_subject["amount"].object_value == 0
+
+
+# ---------------------------------------------------------------------------
+# Regression tests — Pattern C receiver narrowing (Codex Medium bug fix)
+# ---------------------------------------------------------------------------
+
+
+def test_pattern_c_rejects_non_errors_receiver_warnings(tmp_path):
+    """`warnings.append(...)` in a validate_* function must NOT emit
+    a validation rule. The receiver must be the bare name `errors`
+    per spec §3. Codex caught this as Medium false-promotion bug."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def validate_payment(payment):\n"
+        "    warnings = []\n"
+        "    errors = []\n"
+        "    if payment['amount'] <= 0:\n"
+        "        warnings.append('amount low')\n"
+        "    return warnings + errors\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    vals = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "validation"]
+    structured = [r for r in vals if r.subject_attribute is not None]
+    assert structured == [], (
+        f"warnings.append must not emit a structured rule; got {structured}"
+    )
+
+
+def test_pattern_c_rejects_self_errors_receiver(tmp_path):
+    """`self.errors.append(...)` is also not the spec'd shape — the
+    receiver must be the bare name `errors`, not an attribute access."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "class Validator:\n"
+        "    def __init__(self):\n"
+        "        self.errors = []\n"
+        "    def validate_payment(self, payment):\n"
+        "        if payment['amount'] <= 0:\n"
+        "            self.errors.append('amount low')\n"
+        "        return self.errors\n"
+    )
+    pm = parse_module(src)
+    # Pattern C is procedural — but inspecting via extract_model is fine
+    # for the receiver-shape check. The key point: `self.errors.append`
+    # must not be interpreted as Pattern C.
+    facts = list(extract_model(pm))
+    vals = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "validation"]
+    structured = [r for r in vals if r.subject_attribute is not None]
+    assert structured == [], (
+        f"self.errors.append must not emit Pattern C rule; got {structured}"
+    )
+
+
+def test_pattern_c_accepts_only_bare_errors_name(tmp_path):
+    """Positive control: `errors.append(...)` (bare `errors` name) still
+    emits a Pattern C rule. This proves the narrowing doesn't kill the
+    legitimate spec'd case."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def validate_payment(payment):\n"
+        "    errors = []\n"
+        "    if payment['amount'] <= 0:\n"
+        "        errors.append('amount low')\n"
+        "    return errors\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    vals = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "validation"]
+    structured = [r for r in vals if r.subject_attribute is not None]
+    assert len(structured) == 1
+    assert structured[0].subject_attribute == "amount"
+    assert structured[0].predicate == "gt"  # inverted from <=

@@ -124,6 +124,7 @@ def extract_model(pm: ParsedModule, config: dict | None = None) -> Iterable[obje
     user_include: list[str] = list(config.get("include_classes", []) or [])
     user_force_vocab: list[str] = list(config.get("force_vocabulary", []) or [])
     file = str(pm.path)
+    constants = _collect_module_constants(pm)
 
     for cls_name, cls in pm.classes.items():
         # ── Private-class skip ────────────────────────────────────────────
@@ -224,9 +225,17 @@ def extract_model(pm: ParsedModule, config: dict | None = None) -> Iterable[obje
                     extractor_family="model",
                 )
                 yield from _extract_inline_rules(cls_name, stmt, pm.source, file)
-                elig = _extract_eligibility_method(cls_name, stmt, pm.source, file)
-                if elig is not None:
-                    yield elig
+                # Pattern A + B (multi-condition): try before single-return eligibility.
+                multi = list(_extract_multi_condition_method(
+                    cls_name, stmt, constants, pm.source, file,
+                ))
+                if multi:
+                    yield from multi
+                else:
+                    # Single-return eligibility (v1.2).
+                    elig = _extract_eligibility_method(cls_name, stmt, pm.source, file)
+                    if elig is not None:
+                        yield elig
                 yield from _extract_transition_assigns(cls_name, stmt, pm.source, file)
             elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name == "__init__":
                 yield from _extract_inline_rules(cls_name, stmt, pm.source, file)
@@ -246,6 +255,16 @@ _CMP_INVERSE: dict[type, str] = {
 
 _ELIGIBILITY_PREFIXES = ("is_", "can_", "may_", "should_", "must_")
 
+_MULTI_ELIGIBILITY_PREFIXES = _ELIGIBILITY_PREFIXES + (
+    "classify_",
+    "determine_",
+    "predict_",
+    "decide_",
+    "evaluate_",
+)
+
+_UNRESOLVED = object()
+
 # Direct (NOT inverted) — same as procedural_extractor.
 _DIRECT_CMP = {
     ast.Lt: "lt", ast.LtE: "lte", ast.Gt: "gt", ast.GtE: "gte",
@@ -258,6 +277,65 @@ _TRANSITION_FIELD_NAMES = frozenset({"status", "state", "phase", "stage", "lifec
 def _literal_value(node: ast.expr):
     if isinstance(node, ast.Constant):
         return node.value
+    return None
+
+
+def _collect_module_constants(pm: "ParsedModule") -> dict[str, object]:
+    """Identical to procedural_extractor's helper — duplicated per v1.2
+    convention. Future v1.3 may consolidate into a shared module."""
+    out: dict[str, object] = {}
+    for stmt in pm.tree.body:
+        if not isinstance(stmt, ast.Assign):
+            continue
+        if len(stmt.targets) != 1:
+            continue
+        target = stmt.targets[0]
+        if not isinstance(target, ast.Name):
+            continue
+        if not isinstance(stmt.value, ast.Constant):
+            continue
+        out[target.id] = stmt.value.value
+    return out
+
+
+def _resolve_constant(node: ast.expr, constants: dict[str, object]) -> object:
+    """Return the constant value for an ast.Constant or for an ast.Name
+    that maps to a module-level constant. Returns _UNRESOLVED for any
+    other shape."""
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name) and node.id in constants:
+        return constants[node.id]
+    return _UNRESOLVED
+
+
+def _resolve_subject(expr: ast.expr, param_names: set[str]) -> str | None:
+    """Return the subject_attribute name for a valid LHS shape, else None.
+
+    Accepts:
+      - <param>.<attr>        -> returns <attr>
+      - <param>["<key>"]      -> returns <key>
+      - bare <param>          -> returns <param>
+
+    Rejects everything else, including chained attribute access,
+    method calls, module-level constants, and subscripts on non-param
+    receivers. The receiver must be a direct ast.Name in param_names.
+    """
+    if isinstance(expr, ast.Attribute):
+        if isinstance(expr.value, ast.Name) and expr.value.id in param_names:
+            return expr.attr
+        return None
+    if isinstance(expr, ast.Subscript):
+        if not isinstance(expr.value, ast.Name) or expr.value.id not in param_names:
+            return None
+        slice_node = expr.slice
+        if isinstance(slice_node, ast.Constant) and isinstance(slice_node.value, str):
+            return slice_node.value
+        return None
+    if isinstance(expr, ast.Name):
+        if expr.id in param_names:
+            return expr.id
+        return None
     return None
 
 
@@ -308,6 +386,136 @@ def _extract_eligibility_method(cls_name: str, method: ast.FunctionDef, source: 
         evidence_span=_span(method, file, source),
         code_context=f"class {cls_name}, def {method.name}",
         confidence=0.85,
+        extractor_family="model",
+    )
+
+
+def _extract_multi_condition_method(
+    cls_name: str,
+    method: ast.FunctionDef,
+    constants: dict[str, object],
+    source: str,
+    file: str,
+) -> Iterable[RuleFact]:
+    """Class-method analogue of procedural_extractor._extract_multi_condition_returns.
+
+    subject_entity is set to cls_name (anchored). Otherwise identical
+    pattern matching and polarity logic.
+
+    Subject discipline — `self` is INCLUDED in param_names so that
+    `self.<attr>` is a valid LHS. This is the canonical anchored
+    subject form for class methods and matches v1.2's existing
+    _extract_eligibility_method contract.
+    Bare-param subjects on other method parameters also work.
+    """
+    if not method.name.startswith(_MULTI_ELIGIBILITY_PREFIXES):
+        return
+    if not method.body:
+        return
+    last = method.body[-1]
+    if not isinstance(last, ast.Return) or not isinstance(last.value, ast.Constant):
+        return
+    if last.value.value is True:
+        target_return = False
+    elif last.value.value is False:
+        target_return = True
+    else:
+        return
+
+    # INCLUDE `self` in param_names so `self.<attr>` resolves as a
+    # valid LHS — this is the canonical anchored subject form for
+    # class methods and matches v1.2's _extract_eligibility_method.
+    # Other method parameters work the same way as procedural.
+    param_names = {a.arg for a in method.args.args}
+
+    for stmt in method.body:  # TOP-LEVEL ONLY — no ast.walk()
+        if not isinstance(stmt, ast.If):
+            continue
+        if len(stmt.body) != 1:
+            continue
+        inner = stmt.body[0]
+        if not isinstance(inner, ast.Return):
+            continue
+        if not isinstance(inner.value, ast.Constant) or inner.value.value is not target_return:
+            continue
+
+        rule = _multi_condition_rule_from_test_method(
+            stmt.test, target_return, cls_name, param_names, constants,
+            stmt, method, source, file,
+        )
+        if rule is not None:
+            yield rule
+
+
+def _multi_condition_rule_from_test_method(
+    test: ast.expr,
+    target_return: bool,
+    cls_name: str,
+    param_names: set[str],
+    constants: dict[str, object],
+    if_node: ast.If,
+    method: ast.FunctionDef,
+    source: str,
+    file: str,
+) -> "RuleFact | None":
+    """Per-condition rule builder for class methods. subject_entity is
+    cls_name (anchored). Otherwise mirrors the procedural builder."""
+    negated = False
+    raw = test
+    if isinstance(raw, ast.UnaryOp) and isinstance(raw.op, ast.Not):
+        negated = True
+        raw = raw.operand
+
+    if not isinstance(raw, ast.Compare):
+        subject = _resolve_subject(raw, param_names)
+        if subject is None:
+            return None
+        if target_return is False:
+            object_value = True if negated else False
+        else:
+            object_value = False if negated else True
+        return RuleFact(
+            rule_kind="eligibility",
+            subject_entity=cls_name,
+            subject_attribute=subject,
+            predicate="required",
+            object_value=object_value,
+            expression=ast.unparse(test),
+            evidence_span=_span(if_node, file, source),
+            code_context=f"class {cls_name}, def {method.name}",
+            confidence=0.75,
+            extractor_family="model",
+        )
+
+    if negated:
+        return None
+    if len(raw.ops) != 1:
+        return None
+    op_type = type(raw.ops[0])
+    subject = _resolve_subject(raw.left, param_names)
+    if subject is None:
+        return None
+    rhs_value = _resolve_constant(raw.comparators[0], constants)
+    if rhs_value is _UNRESOLVED:
+        return None
+    if target_return is False:
+        if op_type not in _CMP_INVERSE:
+            return None
+        predicate = _CMP_INVERSE[op_type]
+    else:
+        if op_type not in _DIRECT_CMP:
+            return None
+        predicate = _DIRECT_CMP[op_type]
+    return RuleFact(
+        rule_kind="eligibility",
+        subject_entity=cls_name,
+        subject_attribute=subject,
+        predicate=predicate,
+        object_value=rhs_value,
+        expression=ast.unparse(test),
+        evidence_span=_span(if_node, file, source),
+        code_context=f"class {cls_name}, def {method.name}",
+        confidence=0.75,
         extractor_family="model",
     )
 

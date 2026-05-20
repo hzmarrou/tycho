@@ -33,6 +33,14 @@ _VALIDATE_PREFIXES = ("validate_", "check_", "assert_")
 
 _ELIGIBILITY_PREFIXES = ("is_", "can_", "may_", "should_", "must_")
 
+_MULTI_ELIGIBILITY_PREFIXES = _ELIGIBILITY_PREFIXES + (
+    "classify_",
+    "determine_",
+    "predict_",
+    "decide_",
+    "evaluate_",
+)
+
 # Direct (NOT inverted) op mapping for eligibility return predicates.
 # The function returns True when the comparison holds — that IS the
 # eligibility condition. Same convention as pipeline boolean masks.
@@ -42,6 +50,73 @@ _DIRECT_CMP = {
 }
 
 _TRANSITION_FIELD_NAMES = frozenset({"status", "state", "phase", "stage", "lifecycle_state"})
+
+_UNRESOLVED = object()
+
+
+def _collect_module_constants(pm: ParsedModule) -> dict[str, object]:
+    """Return {name: value} for top-level `<Name> = <Constant>` assignments.
+
+    Scans only direct children of pm.tree.body. Ignores:
+      - Tuple-unpacking targets (`A, B = 1, 2`).
+      - Non-Constant RHS values (`X = func()`, `Y = 1 + 2`).
+      - Annotated assignments without a value.
+      - Nested assignments inside functions or classes.
+    """
+    out: dict[str, object] = {}
+    for stmt in pm.tree.body:
+        if not isinstance(stmt, ast.Assign):
+            continue
+        if len(stmt.targets) != 1:
+            continue
+        target = stmt.targets[0]
+        if not isinstance(target, ast.Name):
+            continue
+        if not isinstance(stmt.value, ast.Constant):
+            continue
+        out[target.id] = stmt.value.value
+    return out
+
+
+def _resolve_constant(node: ast.expr, constants: dict[str, object]) -> object:
+    """Return the constant value for an ast.Constant or for an ast.Name
+    that maps to a module-level constant. Returns _UNRESOLVED for any
+    other shape (so callers can reject the case)."""
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name) and node.id in constants:
+        return constants[node.id]
+    return _UNRESOLVED
+
+
+def _resolve_subject(expr: ast.expr, param_names: set[str]) -> str | None:
+    """Return the subject_attribute name for a valid LHS shape, else None.
+
+    Accepts:
+      - <param>.<attr>        -> returns <attr>
+      - <param>["<key>"]      -> returns <key>
+      - bare <param>          -> returns <param>
+
+    Rejects everything else, including chained attribute access,
+    method calls, module-level constants, and subscripts on non-param
+    receivers. The receiver must be a direct ast.Name in param_names.
+    """
+    if isinstance(expr, ast.Attribute):
+        if isinstance(expr.value, ast.Name) and expr.value.id in param_names:
+            return expr.attr
+        return None
+    if isinstance(expr, ast.Subscript):
+        if not isinstance(expr.value, ast.Name) or expr.value.id not in param_names:
+            return None
+        slice_node = expr.slice
+        if isinstance(slice_node, ast.Constant) and isinstance(slice_node.value, str):
+            return slice_node.value
+        return None
+    if isinstance(expr, ast.Name):
+        if expr.id in param_names:
+            return expr.id
+        return None
+    return None
 
 
 def _span(node: ast.AST, file: str, source: str) -> EvidenceSpan:
@@ -131,7 +206,293 @@ def _extract_eligibility_return(func: ast.FunctionDef, source: str, file: str) -
     )
 
 
-def _extract_function_rules(func: ast.FunctionDef, source: str, file: str) -> Iterable[RuleFact]:
+def _extract_multi_condition_returns(
+    func: ast.FunctionDef,
+    constants: dict[str, object],
+    source: str,
+    file: str,
+) -> Iterable[RuleFact]:
+    """Pattern A + B: multi-condition bool-returning functions.
+
+    Walks ONLY top-level `if` statements (direct children of func.body)
+    to avoid nested-under-guard false promotion (spec §10).
+
+    Pattern A (conjunction): function body ends with `return True`.
+    Each top-level `if X: return False` is a required condition.
+
+    Pattern B (disjunction): function body ends with `return False`.
+    Each top-level `if X: return True` is a sufficient trigger.
+
+    Both patterns require the function name to start with one of
+    _MULTI_ELIGIBILITY_PREFIXES.
+    """
+    if not func.name.startswith(_MULTI_ELIGIBILITY_PREFIXES):
+        return
+    if not func.body:
+        return
+    # Determine pattern direction from the terminal return.
+    last = func.body[-1]
+    if not isinstance(last, ast.Return) or not isinstance(last.value, ast.Constant):
+        return
+    if last.value.value is True:
+        target_return = False   # Pattern A: if X -> return False
+    elif last.value.value is False:
+        target_return = True    # Pattern B: if X -> return True
+    else:
+        return
+
+    param_names = {a.arg for a in func.args.args}
+
+    for stmt in func.body:  # TOP-LEVEL ONLY — no ast.walk()
+        if not isinstance(stmt, ast.If):
+            continue
+        if len(stmt.body) != 1:
+            continue
+        inner = stmt.body[0]
+        if not isinstance(inner, ast.Return):
+            continue
+        if not isinstance(inner.value, ast.Constant) or inner.value.value is not target_return:
+            continue
+
+        # Extract subject + predicate + object_value from stmt.test.
+        rule = _multi_condition_rule_from_test(
+            stmt.test, target_return, param_names, constants, stmt, func, source, file,
+        )
+        if rule is not None:
+            yield rule
+
+
+def _multi_condition_rule_from_test(
+    test: ast.expr,
+    target_return: bool,
+    param_names: set[str],
+    constants: dict[str, object],
+    if_node: ast.If,
+    func: ast.FunctionDef,
+    source: str,
+    file: str,
+) -> "RuleFact | None":
+    """Turn a single top-level `if <test>: return <target_return>` into a RuleFact.
+
+    Polarity table for target_return=False (Pattern A, conjunction):
+      - `if X: return False`         -> (required, False) on X (must be falsy)
+      - `if not X: return False`     -> (required, True)  on X (must be truthy)
+      - `if X <op> lit: return False` -> (inverted(op), lit) on X
+
+    For target_return=True (Pattern B, disjunction):
+      - `if X: return True`          -> (required, True)
+      - `if X <op> lit: return True` -> (op, lit) direct
+    """
+    # Handle `if not X:` by stripping UnaryOp(Not, ...).
+    negated = False
+    raw = test
+    if isinstance(raw, ast.UnaryOp) and isinstance(raw.op, ast.Not):
+        negated = True
+        raw = raw.operand
+
+    # Case 1: bare subject (truthiness check).
+    if not isinstance(raw, ast.Compare):
+        subject = _resolve_subject(raw, param_names)
+        if subject is None:
+            return None
+        # target_return=False, negated: `if not X: return False` -> X must be True
+        # target_return=False, plain  : `if X: return False`     -> X must be False
+        # target_return=True,  plain  : `if X: return True`      -> X must be True
+        # target_return=True,  negated: `if not X: return True`  -> X must be False
+        if target_return is False:
+            object_value = True if negated else False
+        else:
+            object_value = False if negated else True
+        return RuleFact(
+            rule_kind="eligibility",
+            subject_entity=None,
+            subject_attribute=subject,
+            predicate="required",
+            object_value=object_value,
+            expression=ast.unparse(test),
+            evidence_span=_span(if_node, file, source),
+            code_context=f"def {func.name}",
+            confidence=0.75,
+            extractor_family="procedural",
+        )
+
+    # Case 2: comparison <subject> <op> <lit>.
+    if negated:
+        # `if not (X <op> lit): return ...` — rare pattern, defer.
+        return None
+    if len(raw.ops) != 1:
+        return None
+    op_type = type(raw.ops[0])
+    subject = _resolve_subject(raw.left, param_names)
+    if subject is None:
+        return None
+    rhs_value = _resolve_constant(raw.comparators[0], constants)
+    if rhs_value is _UNRESOLVED:
+        return None
+
+    if target_return is False:
+        # Conjunction: if X <op> lit triggers FAIL, so X must satisfy NOT(op).
+        if op_type not in _CMP_INVERSE:
+            return None
+        predicate = _CMP_INVERSE[op_type]
+    else:
+        # Disjunction: if X <op> lit triggers SUCCESS, so X satisfies (op) directly.
+        if op_type not in _DIRECT_CMP:
+            return None
+        predicate = _DIRECT_CMP[op_type]
+
+    return RuleFact(
+        rule_kind="eligibility",
+        subject_entity=None,
+        subject_attribute=subject,
+        predicate=predicate,
+        object_value=rhs_value,
+        expression=ast.unparse(test),
+        evidence_span=_span(if_node, file, source),
+        code_context=f"def {func.name}",
+        confidence=0.75,
+        extractor_family="procedural",
+    )
+
+
+def _extract_errors_append_validations(
+    func: ast.FunctionDef,
+    constants: dict[str, object],
+    source: str,
+    file: str,
+) -> Iterable[RuleFact]:
+    """Pattern C: `if <guard>: errors.append(...)` validation pattern.
+
+    Mirrors the existing `if <guard>: raise` extraction in
+    _extract_function_rules but with errors.append as the violation
+    signal. Top-level ifs ONLY — nested ifs are skipped (spec §10).
+
+    Function name must match _VALIDATE_PREFIXES.
+    """
+    if not func.name.startswith(_VALIDATE_PREFIXES):
+        return
+    param_names = {a.arg for a in func.args.args}
+
+    for stmt in func.body:  # TOP-LEVEL ONLY
+        if not isinstance(stmt, ast.If):
+            continue
+        if not _body_is_single_errors_append(stmt.body):
+            continue
+        rule = _validation_rule_from_test(
+            stmt.test, param_names, constants, stmt, func, source, file,
+        )
+        if rule is not None:
+            yield rule
+
+
+def _body_is_single_errors_append(body: list[ast.stmt]) -> bool:
+    """Return True if body is exactly one Expression node whose value
+    is a Call to `errors.append(...)` specifically.
+
+    The receiver MUST be the bare name `errors` — not `warnings`,
+    `findings`, `audit_log`, `self.errors`, etc. This matches the
+    spec §3 contract (`if <guard>: errors.append(...)`) and prevents
+    false promotion of non-error side effects into validation rules.
+
+    Other accumulator names are deferred to a future patch that can
+    explicitly broaden the contract.
+    """
+    if len(body) != 1:
+        return False
+    stmt = body[0]
+    if not isinstance(stmt, ast.Expr):
+        return False
+    call = stmt.value
+    if not isinstance(call, ast.Call):
+        return False
+    if not isinstance(call.func, ast.Attribute):
+        return False
+    if call.func.attr != "append":
+        return False
+    # NEW: receiver must be the bare name `errors`.
+    return isinstance(call.func.value, ast.Name) and call.func.value.id == "errors"
+
+
+def _validation_rule_from_test(
+    test: ast.expr,
+    param_names: set[str],
+    constants: dict[str, object],
+    if_node: ast.If,
+    func: ast.FunctionDef,
+    source: str,
+    file: str,
+) -> "RuleFact | None":
+    """Turn an `if <test>: errors.append(...)` into a validation RuleFact.
+
+    Polarity (validation = the negation must hold):
+      - `if X: errors.append(...)`          -> (required, False) on X
+      - `if not X: errors.append(...)`      -> (required, True)  on X
+      - `if X <op> lit: errors.append(...)` -> (inverted(op), lit) on X
+    """
+    # Handle `if not X: errors.append(...)` by stripping UnaryOp(Not, ...).
+    negated = False
+    raw = test
+    if isinstance(raw, ast.UnaryOp) and isinstance(raw.op, ast.Not):
+        negated = True
+        raw = raw.operand
+
+    # Bare-subject truthiness branch.
+    if not isinstance(raw, ast.Compare):
+        subject = _resolve_subject(raw, param_names)
+        if subject is None:
+            return None
+        # Polarity:
+        #   `if X: errors.append(...)`     -> X is a violation -> required, False
+        #   `if not X: errors.append(...)` -> not-X is a violation -> required, True
+        object_value = True if negated else False
+        return RuleFact(
+            rule_kind="validation",
+            subject_entity=None,
+            subject_attribute=subject,
+            predicate="required",
+            object_value=object_value,
+            expression=ast.unparse(test),
+            evidence_span=_span(if_node, file, source),
+            code_context=f"def {func.name}",
+            confidence=0.8,
+            extractor_family="procedural",
+        )
+
+    # Comparison branch.
+    if negated:
+        # `if not (X <op> lit): errors.append(...)` — rare pattern, defer.
+        return None
+    if len(raw.ops) != 1:
+        return None
+    op_type = type(raw.ops[0])
+    if op_type not in _CMP_INVERSE:
+        return None
+    subject = _resolve_subject(raw.left, param_names)
+    if subject is None:
+        return None
+    rhs_value = _resolve_constant(raw.comparators[0], constants)
+    if rhs_value is _UNRESOLVED:
+        return None
+    return RuleFact(
+        rule_kind="validation",
+        subject_entity=None,
+        subject_attribute=subject,
+        predicate=_CMP_INVERSE[op_type],
+        object_value=rhs_value,
+        expression=ast.unparse(test),
+        evidence_span=_span(if_node, file, source),
+        code_context=f"def {func.name}",
+        confidence=0.8,
+        extractor_family="procedural",
+    )
+
+
+def _extract_function_rules(
+    func: ast.FunctionDef,
+    constants: dict[str, object],
+    source: str,
+    file: str,
+) -> Iterable[RuleFact]:
     for node in ast.walk(func):
         if isinstance(node, ast.If) and node.body:
             test = node.test
@@ -139,8 +500,8 @@ def _extract_function_rules(func: ast.FunctionDef, source: str, file: str) -> It
                 attr = _key_from_subscript(test.left)
                 if attr is None:
                     continue
-                rhs = test.comparators[0]
-                if not isinstance(rhs, ast.Constant):
+                rhs_value = _resolve_constant(test.comparators[0], constants)
+                if rhs_value is _UNRESOLVED:
                     continue
                 if isinstance(node.body[0], ast.Raise):
                     yield RuleFact(
@@ -148,7 +509,7 @@ def _extract_function_rules(func: ast.FunctionDef, source: str, file: str) -> It
                         subject_entity=None,
                         subject_attribute=attr,
                         predicate=_CMP_INVERSE[type(test.ops[0])],
-                        object_value=rhs.value,
+                        object_value=rhs_value,
                         expression=ast.unparse(test),
                         evidence_span=_span(node, file, source),
                         code_context=f"def {func.name}",
@@ -162,8 +523,10 @@ def _extract_function_rules(func: ast.FunctionDef, source: str, file: str) -> It
                 if (
                     isinstance(first, ast.Assign)
                     and len(first.targets) == 1
-                    and isinstance(first.value, ast.Constant)
                 ):
+                    default_value = _resolve_constant(first.value, constants)
+                    if default_value is _UNRESOLVED:
+                        continue
                     tgt = first.targets[0]
                     # Assignment target must be <same_obj>["<same_key>"]
                     # — otherwise the if-block is doing something other
@@ -179,7 +542,7 @@ def _extract_function_rules(func: ast.FunctionDef, source: str, file: str) -> It
                             subject_entity=None,
                             subject_attribute=key,
                             predicate="default_to",
-                            object_value=first.value.value,
+                            object_value=default_value,
                             expression=ast.unparse(first),
                             evidence_span=_span(node, file, source),
                             code_context=f"def {func.name}",
@@ -234,19 +597,35 @@ def extract_procedural(pm: ParsedModule, config: dict | None = None) -> Iterable
     exclude = list(config.get("exclude_functions", []) or [])
     force = list(config.get("force_rule", []) or [])
     file = str(pm.path)
+    constants = _collect_module_constants(pm)
     for name, func in pm.functions.items():
         # Skip excluded functions entirely (consistent case-insensitive
         # glob behavior with other Source D config keys).
         if exclude and glob_match(name, exclude):
             continue
+        # Pattern A + B: multi-condition bool-returning function.
+        multi = list(_extract_multi_condition_returns(func, constants, pm.source, file))
+        if multi:
+            yield from multi
+            yield from _extract_transition_assigns_procedural(func, pm.source, file)
+            continue
+        # Pattern C: validate_*/check_*/assert_* with errors.append(...) sites.
+        # Intentional co-emission: Pattern C does NOT `continue` after firing.
+        # It and _extract_function_rules (which catches `if X: raise` patterns)
+        # are non-overlapping by body shape — a validate_* function using BOTH
+        # styles legitimately emits BOTH rule sets. See
+        # test_pattern_c_co_emits_with_raise_validation for the pinning test.
+        yielded_any = False
+        for r in _extract_errors_append_validations(func, constants, pm.source, file):
+            yielded_any = True
+            yield r
         # Eligibility path: is_*/can_*/may_*/should_*/must_* with
         # simple `return <Compare>` body.
         elig = _extract_eligibility_return(func, pm.source, file)
         if elig is not None:
             yield elig
             continue
-        yielded_any = False
-        for r in _extract_function_rules(func, pm.source, file):
+        for r in _extract_function_rules(func, constants, pm.source, file):
             yielded_any = True
             yield r
         # Transition extraction runs alongside _extract_function_rules
