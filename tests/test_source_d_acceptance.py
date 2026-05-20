@@ -462,3 +462,21 @@ def test_ac11_no_shacl_or_swrl_emitter_added():
         "AC11 violation — SHACL/SWRL token introduced in core/:\n"
         + "\n".join(f"  {p}:L{ln}: {src}" for p, ln, src in offenders)
     )
+
+
+def test_ac3_eligibility_and_transition_rules_emitted():
+    """AC3 (full): the integrated extraction set covers validation,
+    derivation, defaulting, eligibility, AND transition rule_kinds
+    without requiring an LLM."""
+    cands = _run_hybrid()
+    kinds = {
+        c.rule_payload["rule_kind"]
+        for c in cands
+        if c.artifact_kind == ArtifactKind.RULE and c.rule_payload
+    }
+    # All 5 v1.2 deterministic rule_kinds must appear in the hybrid run.
+    assert "validation" in kinds, f"missing validation; got {kinds}"
+    assert "derivation" in kinds, f"missing derivation; got {kinds}"
+    assert "defaulting" in kinds, f"missing defaulting; got {kinds}"
+    assert "eligibility" in kinds, f"missing eligibility; got {kinds}"
+    assert "transition" in kinds, f"missing transition; got {kinds}"
