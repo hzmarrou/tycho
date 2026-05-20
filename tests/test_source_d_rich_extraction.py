@@ -1,7 +1,13 @@
 """Unit tests for v1.2.1 rich-extraction helpers."""
 import ast
 
-from ontozense.core.ingest.source_d.procedural_extractor import _resolve_subject
+from ontozense.core.ingest.source_d.parse import parse_module
+from ontozense.core.ingest.source_d.procedural_extractor import (
+    _UNRESOLVED,
+    _collect_module_constants,
+    _resolve_constant,
+    _resolve_subject,
+)
 
 
 def _expr(src: str) -> ast.expr:
@@ -48,14 +54,6 @@ def test_resolve_subject_rejects_non_string_subscript():
 def test_resolve_subject_rejects_subscript_on_non_param():
     expr = _expr("CONFIG['key']")
     assert _resolve_subject(expr, {"loan"}) is None
-
-
-from ontozense.core.ingest.source_d.parse import parse_module
-from ontozense.core.ingest.source_d.procedural_extractor import (
-    _UNRESOLVED,
-    _collect_module_constants,
-    _resolve_constant,
-)
 
 
 def test_collect_module_constants_picks_up_simple_assigns(tmp_path):
