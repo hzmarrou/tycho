@@ -133,6 +133,130 @@ This synthetic codebase contains:
 - `reporting/finrep_npl_query.sql` — regulatory reporting SQL view
 - `reporting/loan_constraints.sql` — database CHECK constraints
 
+#### What Source D v1.2.1 extracts from this code
+
+Until v1.2, Source D extracted **one** weak rule from these three Python
+files (a `validate_*` name match with no payload). With v1.2.1's rich
+extraction patterns, the same files produce **nine** structured rule
+candidates with explicit `rule_kind`, `predicate`, and `object_value`:
+
+| File | Function | Rules extracted |
+|---|---|---|
+| `forbearance_validator.py` | `is_forbearance` | 2 `eligibility` rules on `is_in_financial_difficulty` and `is_concessionary` |
+| `transitions/upgrade_rules.py` | `can_upgrade_to_performing` | 3 `eligibility` rules (`is_non_performing`, `has_active_forbearance`, `improved_repayment_likelihood`) with correct polarity per `if X: return False` vs `if not X: return False` |
+| `transitions/upgrade_rules.py` | `can_exit_forborne_status` | 1 `eligibility` rule on `counterparty_still_in_difficulty` |
+| `npe_classifier.py` | `classify_loan_as_npe` | 3 `eligibility` rules — including one that resolves `IFRS_STAGE_IMPAIRED` against the module-level constant to `object_value: "ifrs_stage_3_impaired"` |
+| `forbearance_validator.py` | `validate_forbearance_event` | 0 structured rules — its `errors.append(...)` sites are nested under outer guards, which v1.2.1 deliberately skips to avoid overstating the source code |
+| `npe_classifier.py` | `is_material_past_due` | 0 rules — its return statement compares against a computed local (`materiality = max(...)`), which would require dataflow analysis (deferred to v1.3) |
+
+The four extraction patterns v1.2.1 recognises are **fully deterministic
+and domain-agnostic**:
+
+- **Pattern A — Multi-condition eligibility.** Functions named `is_*` /
+  `can_*` / `may_*` / `should_*` / `must_*` with `if not X: return False`
+  chains ending in `return True`. Each guard becomes one eligibility
+  rule. This is what fires for `is_forbearance` and
+  `can_upgrade_to_performing`.
+- **Pattern B — Multi-condition classification.** Functions named
+  `classify_*` / `determine_*` / `predict_*` / `decide_*` / `evaluate_*`
+  (plus the Pattern A prefixes) with `if X: return True` chains ending
+  in `return False`. Each trigger becomes one rule. This is what fires
+  for `classify_loan_as_npe`.
+- **Pattern C — `errors.append` validation.** Functions named `validate_*`
+  / `check_*` / `assert_*` with top-level `if X: errors.append(...)`
+  sites. Each becomes one validation rule on the negation of `X`.
+  Nested-under-guard cases are skipped.
+- **Pattern D — Module-level constant resolution.** When a comparison's
+  right-hand side is a module-level `<NAME> = <Constant>` reference,
+  Pattern D resolves it to the literal value. That's what makes
+  `loan.ifrs_stage == IFRS_STAGE_IMPAIRED` emit with
+  `object_value: "ifrs_stage_3_impaired"` rather than skipping.
+
+Concrete example of a `rule_payload` v1.2.1 produces from this
+codebase (one of the two rules from `is_forbearance`):
+
+```json
+{
+  "rule_kind": "eligibility",
+  "subject_entity": null,
+  "subject_attribute": "is_in_financial_difficulty",
+  "predicate": "required",
+  "object_value": true,
+  "expression": "not counterparty_status.is_in_financial_difficulty",
+  "evidence_span": {
+    "file": "forbearance/forbearance_validator.py",
+    "start_line": 17, "end_line": 18,
+    "snippet": "if not counterparty_status.is_in_financial_difficulty:\n        return False"
+  },
+  "condition": null,
+  "code_context": "def is_forbearance",
+  "normalization_status": "deterministic"
+}
+```
+
+The `code_context` field lets audit consumers group rules back to their
+source function — so the two rules from `is_forbearance` and the three
+from `can_upgrade_to_performing` are traceable as compound predicates
+even though they're emitted as individual structured facts.
+
+##### What's NOT extracted (deferred to v1.3+)
+
+So you know what to expect:
+
+- **Computed local variables on the RHS.** `is_material_past_due` ends
+  with `return past_due_amount > materiality` where `materiality` is a
+  local computed via `max(EUR, total * PCT)`. The extractor doesn't
+  follow that dataflow.
+- **Method-call LHS.** `if not payment_history.continuous_timely_repayments(months=3):`
+  has a method call as its LHS, which falls outside the
+  `<param>.<attr>` / `<param>["<key>"]` / bare `<param>` shapes the
+  extractor accepts.
+- **Nested-under-guard rules.** `if outer_cond: if inner_cond: errors.append(...)`
+  is skipped entirely. Emitting only the inner check would overstate
+  the source code's intent — the inner rule is only valid when the
+  outer guard holds, and v1.2.1 has no way to serialise that compound
+  condition faithfully.
+- **Operators outside `_CMP`.** `is not None`, `in`, boolean `and` /
+  `or`, and chained comparisons are not handled. The supported ops are
+  `<`, `<=`, `>`, `>=`, `==`, `!=` plus the truthiness paths for
+  bare-param subjects.
+
+These boundaries are an intentional honesty discipline: rather than
+emit speculative rules where the source code's semantics are
+ambiguous, v1.2.1 stays silent and routes the ambiguity to the audit
+block. See the v1.2.1 design spec at
+`docs/superpowers/specs/2026-05-20-source-d-rich-extraction-design.md`
+for the full rationale.
+
+##### Are these patterns NPL-specific?
+
+**No.** Pattern matching is purely structural — the extractor doesn't
+know anything about banking, Basel, or NPLs. The same patterns would
+fire against any idiomatic Python codebase that uses prefixed function
+naming and explicit predicates:
+
+- E-commerce: `is_eligible_for_discount(cart)`,
+  `classify_payment_risk(transaction)`, `validate_order(order)`
+- Healthcare: `can_prescribe(patient, drug)`,
+  `determine_severity(vitals)`, `check_dosage(prescription)`
+- Logistics: `is_deliverable(shipment)`, `validate_address(address)`
+
+The constraint is the **coding style**, not the domain. Codebases with
+flat top-level `if` statements, literal or constant comparison RHSes,
+and PEP-8 prefix conventions will see strong extraction; codebases
+that hide logic behind helper methods or computed locals will need
+v1.3's dataflow expansion to land equivalent rules.
+
+> **Heads-up — `fuse` is being phased out.** This tutorial still uses
+> `ontozense fuse` (the v1.0 command path). The v1.1+ canonical flow
+> is `ontozense survey → ontozense draft`, which is what actually
+> runs the Source D v1.2.1 extraction end-to-end and emits a richer
+> `candidate-graph.json`. A follow-up tutorial revision will migrate
+> the Step 4+ commands. Until then, the rule counts above describe
+> what Source D produces internally; the `fuse` path may surface
+> fewer of them in the final fused output depending on the v1.0
+> fusion engine's matching heuristics.
+
 ---
 
 ## Step 2 — Route your files (optional preview)
