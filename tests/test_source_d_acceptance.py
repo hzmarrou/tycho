@@ -146,8 +146,11 @@ def test_ac7_procedural_rules_without_classes():
 # ---------------------------------------------------------------------------
 
 def test_ac1a_ac10_c_and_d_check_rules_merge_into_one_concept():
-    """SQL `CHECK (amount > 0)` and Pydantic `if v <= 0: raise` must produce
-    a single CandidateConcept with both C and D attribution."""
+    """SQL `CHECK (amount > 0)` on table ``loan`` and Pydantic
+    ``class Loan`` with ``if v <= 0: raise`` must produce a single
+    CandidateConcept with both C and D attribution. merge_key
+    normalizes the Python ``Loan`` to ``loan`` so they fuse despite
+    the conventional naming split."""
     graph = build_candidate_graph(
         source_c={"files": [str(CD / "schema.sql")]},
         source_d={"files": [str(CD / "models.py")]},
@@ -334,6 +337,110 @@ def test_ac11_owl_emitter_modules_do_not_reference_rule_payload():
     assert not offenders, (
         "AC11 violation — rule_payload referenced in OWL emitter module(s):\n"
         + "\n".join(f"  {p}:L{ln}: {src}" for p, ln, src in offenders)
+    )
+
+
+def test_ac10_python_capitalized_class_fuses_with_sql_lowercase_table(tmp_path):
+    """Real OO Python codebases use ``class Loan`` while SQL uses
+    ``CREATE TABLE loan``. merge_key canonicalizes subject_entity so
+    these still fuse into one CandidateConcept — without this
+    normalization, every fusion across normal OO/SQL projects would
+    silently produce duplicate rule concepts."""
+    schema = tmp_path / "loans.sql"
+    schema.write_text(
+        "CREATE TABLE loan (\n"
+        "  loan_id VARCHAR(32) PRIMARY KEY,\n"
+        "  amount NUMERIC NOT NULL CHECK (amount > 0)\n"
+        ");\n",
+        encoding="utf-8",
+    )
+    code = tmp_path / "models.py"
+    code.write_text(
+        "from pydantic import BaseModel, field_validator\n"
+        "\n"
+        "class Loan(BaseModel):\n"
+        "    amount: float\n"
+        "\n"
+        "    @field_validator('amount')\n"
+        "    def positive(cls, v):\n"
+        "        if v <= 0:\n"
+        "            raise ValueError('amount must be positive')\n"
+        "        return v\n",
+        encoding="utf-8",
+    )
+    graph = build_candidate_graph(
+        source_c={"files": [str(schema)]},
+        source_d={"files": [str(code)]},
+    )
+    # Look for the rule by its merge_key — normalization makes
+    # Python "Loan" match SQL "loan".
+    target_key = merge_key({
+        "rule_kind": "validation",
+        "subject_entity": "loan",
+        "subject_attribute": "amount",
+        "predicate": "gt",
+        "object_value": 0,
+        "condition": None,
+    })
+    matches = [
+        c for c in graph.concepts
+        if c.artifact_kind == "rule"
+        and c.rule_payload
+        and merge_key(c.rule_payload) == target_key
+    ]
+    assert len(matches) == 1, (
+        f"Loan/loan naming split must produce exactly ONE concept; "
+        f"got {len(matches)}: {[(c.label, c.rule_payload.get('subject_entity')) for c in matches]}"
+    )
+    concept = matches[0]
+    assert concept.source_presence["C"] is True, "C attribution missing"
+    assert concept.source_presence["D"] is True, "D attribution missing"
+
+
+def test_ac10_pluralized_sql_table_fuses_with_singular_python_class(tmp_path):
+    """SQL conventions often pluralize table names (``loans``) while
+    Python uses the singular (``Loan``). merge_key singularizes both
+    so they fuse."""
+    schema = tmp_path / "s.sql"
+    schema.write_text(
+        "CREATE TABLE loans (\n"
+        "  loan_id VARCHAR(32) PRIMARY KEY,\n"
+        "  amount NUMERIC NOT NULL CHECK (amount > 0)\n"
+        ");\n",
+        encoding="utf-8",
+    )
+    code = tmp_path / "m.py"
+    code.write_text(
+        "from pydantic import BaseModel, field_validator\n"
+        "\n"
+        "class Loan(BaseModel):\n"
+        "    amount: float\n"
+        "\n"
+        "    @field_validator('amount')\n"
+        "    def positive(cls, v):\n"
+        "        if v <= 0:\n"
+        "            raise ValueError\n"
+        "        return v\n",
+        encoding="utf-8",
+    )
+    graph = build_candidate_graph(
+        source_c={"files": [str(schema)]},
+        source_d={"files": [str(code)]},
+    )
+    target_key = merge_key({
+        "rule_kind": "validation", "subject_entity": "loan",
+        "subject_attribute": "amount", "predicate": "gt",
+        "object_value": 0, "condition": None,
+    })
+    matches = [
+        c for c in graph.concepts
+        if c.artifact_kind == "rule"
+        and c.rule_payload
+        and merge_key(c.rule_payload) == target_key
+    ]
+    assert len(matches) == 1, (
+        f"loans (plural)/Loan (singular) must fuse; got {len(matches)}: "
+        f"{[(c.label, c.rule_payload.get('subject_entity')) for c in matches]}"
     )
 
 

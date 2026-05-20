@@ -56,16 +56,52 @@ def validate_rule_payload(p: dict) -> None:
         raise ValueError("evidence_span must be {file, start_line, end_line, snippet}")
 
 
+def _normalize_subject(name) -> str | None:
+    """Case-fold and singularize a subject_entity / subject_attribute
+    name so cross-source rule identity tolerates conventional naming
+    splits (e.g. Python ``class Loan`` ↔ SQL ``CREATE TABLE loan``,
+    or Pythonic ``credit_scores`` ↔ SQL ``credit_score``).
+
+    Matches the canonicalization that ``candidate_graph.normalize_label``
+    applies to entity/attribute candidates — extends the same discipline
+    to rule identity (spec §11.1 planning decision #5).
+
+    None passes through as None (anchoring discipline preserves the
+    'unresolved subject' sentinel).
+    """
+    if name is None:
+        return None
+    s = str(name).strip().lower()
+    if not s:
+        return s
+    try:
+        import inflect
+        engine = inflect.engine()
+        singular = engine.singular_noun(s)
+        if singular:
+            s = singular
+    except Exception:
+        # inflect not installed or threw — fall back to case-fold only.
+        pass
+    return s
+
+
 def merge_key(p: dict) -> tuple:
     """Identity tuple for rule fusion. Labels are display-only and not included.
 
     Per spec §11.1: matching considers rule_kind, subject_entity,
     subject_attribute, predicate, normalized object_value, normalized condition.
+
+    ``subject_entity`` and ``subject_attribute`` are passed through
+    ``_normalize_subject`` (case-fold + singularize) so cross-source
+    naming splits (Python ``Loan`` ↔ SQL ``loan``) fuse into one
+    concept. The original spelling is preserved in the payload — only
+    the merge key is canonicalized.
     """
     return (
         p.get("rule_kind"),
-        p.get("subject_entity"),
-        p.get("subject_attribute"),
+        _normalize_subject(p.get("subject_entity")),
+        _normalize_subject(p.get("subject_attribute")),
         p.get("predicate"),
         _normalize_value(p.get("object_value")),
         _normalize_value(p.get("condition")),
