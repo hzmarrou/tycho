@@ -1,12 +1,14 @@
 """Unit tests for v1.2.1 rich-extraction helpers."""
 import ast
 
+from ontozense.core.ingest.source_d.ir import RuleFact
 from ontozense.core.ingest.source_d.parse import parse_module
 from ontozense.core.ingest.source_d.procedural_extractor import (
     _UNRESOLVED,
     _collect_module_constants,
     _resolve_constant,
     _resolve_subject,
+    extract_procedural,
 )
 
 
@@ -112,10 +114,6 @@ def test_resolve_constant_returns_unresolved_for_unknown_name():
 def test_resolve_constant_returns_unresolved_for_other_shapes():
     node = ast.parse("some_func()", mode="eval").body
     assert _resolve_constant(node, {}) is _UNRESOLVED
-
-
-from ontozense.core.ingest.source_d.ir import RuleFact
-from ontozense.core.ingest.source_d.procedural_extractor import extract_procedural
 
 
 def test_pattern_d_resolves_module_constant_rhs_in_existing_extractor(tmp_path):
