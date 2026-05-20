@@ -598,6 +598,11 @@ def extract_procedural(pm: ParsedModule, config: dict | None = None) -> Iterable
             yield from _extract_transition_assigns_procedural(func, pm.source, file)
             continue
         # Pattern C: validate_*/check_*/assert_* with errors.append(...) sites.
+        # Intentional co-emission: Pattern C does NOT `continue` after firing.
+        # It and _extract_function_rules (which catches `if X: raise` patterns)
+        # are non-overlapping by body shape — a validate_* function using BOTH
+        # styles legitimately emits BOTH rule sets. See
+        # test_pattern_c_co_emits_with_raise_validation for the pinning test.
         yielded_any = False
         for r in _extract_errors_append_validations(func, constants, pm.source, file):
             yielded_any = True

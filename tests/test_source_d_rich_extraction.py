@@ -578,3 +578,36 @@ def test_pattern_b_class_method_extracts_self_attribute_with_constant(tmp_path):
     assert r.subject_attribute == "status"
     assert r.predicate == "eq"
     assert r.object_value == "active"
+
+
+def test_pattern_c_co_emits_with_raise_validation(tmp_path):
+    """A `validate_*` function using BOTH `if X: errors.append(...)` AND
+    `if Y <op> lit: raise ...` must emit BOTH a Pattern C validation rule
+    on X AND a Pattern raise-validation rule on Y. They're non-overlapping
+    by body shape, so co-emission is intentional. Without this test the
+    behavior is undocumented (Codex final review finding)."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def validate_payment(payment):\n"
+        "    errors = []\n"
+        "    if payment['status'] == 'INVALID':\n"
+        "        errors.append('invalid status')\n"
+        "    if payment['amount'] <= 0:\n"
+        "        raise ValueError('amount must be positive')\n"
+        "    return errors\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    rules = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "validation"]
+    # Both rules emitted: one from Pattern C (errors.append), one from the
+    # existing `if/raise` extractor in _extract_function_rules.
+    assert len(rules) == 2, f"expected 2 validation rules; got {len(rules)}"
+    by_subject = {r.subject_attribute: r for r in rules}
+    assert "status" in by_subject
+    assert "amount" in by_subject
+    # Pattern C rule: status must NOT be "INVALID" (neq).
+    assert by_subject["status"].predicate == "neq"
+    assert by_subject["status"].object_value == "INVALID"
+    # Raise rule: amount must be > 0 (inverted from <=).
+    assert by_subject["amount"].predicate == "gt"
+    assert by_subject["amount"].object_value == 0

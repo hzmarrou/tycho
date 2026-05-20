@@ -89,6 +89,18 @@ def test_ac_r4_validate_forbearance_event_emits_zero_structured_rules():
     # (i.e. no rule with a non-None subject_attribute).
     structured = [r for r in rules if r.rule_payload.get("subject_attribute") is not None]
     assert structured == [], f"expected 0 structured rules; got {[r.label for r in structured]}"
+    # Pin the fallback's presence too — guards against future over-suppression.
+    # The weak fallback has subject_attribute=None so anchor.py suppresses it;
+    # check suppressed candidates to verify it was still emitted by extract_procedural.
+    suppressed_fallback = [
+        c for c in cands
+        if c.artifact_kind == ArtifactKind.RULE
+        and c.suppressed
+        and c.rule_payload
+        and c.rule_payload.get("code_context") == "def validate_forbearance_event"
+        and c.rule_payload.get("subject_attribute") is None
+    ]
+    assert len(suppressed_fallback) >= 1, "expected at least the weak validate_* fallback rule (suppressed)"
 
 
 def test_ac_r5_can_exit_forborne_status_emits_one_eligibility_rule():
