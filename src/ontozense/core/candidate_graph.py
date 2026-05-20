@@ -137,6 +137,14 @@ class _CandidateIndex:
         self.attestations: dict[str, list[tuple[str, str]]] = {}
         self.kind_conflicts: list[dict[str, str]] = []
         self.by_rule_key: dict[tuple, str] = {}
+        # Subject-grouped rule tracker for conflict_type audit (decision #4).
+        # Key: (normalized subject_entity, normalized subject_attribute).
+        # Value: list of (rule_kind, predicate, object_value, source_type,
+        #                 rule_norm_key) tuples for every distinct rule
+        # candidate registered with that subject. When two entries on
+        # the same subject differ in (predicate, object_value) AND have
+        # different rule_norm_keys, they're a fusion-time conflict.
+        self.rule_subjects: dict[tuple, list[tuple]] = {}
 
     def values(self) -> list[CandidateConcept]:
         return list(self.by_key.values())
@@ -378,25 +386,56 @@ def build_candidate_graph(
             suppressed=True,
         ))
 
+    audit_list: list[dict[str, Any]] = [
+        {
+            "label": ic.label,
+            "definition": ic.definition,
+            "source_type": ic.source_type,
+            "source_artifact": ic.source_artifact,
+            "raw_type": ic.raw_type,
+            "eid": ic.eid,
+            "artifact_kind": ic.artifact_kind.value,
+            "strength": ic.strength.value,
+            "promotion_reason": ic.promotion_reason,
+            "suppression_reason": ic.suppression_reason or "",
+            "suppressed": ic.suppressed,
+        }
+        for ic in suppressed_audit
+    ]
+
+    # Conflict markers (planning decision #4): when two rule candidates
+    # share (subject_entity, subject_attribute) but disagree on
+    # (predicate, object_value), surface them in the audit block so
+    # consumers can spot contradictions without scanning every concept.
+    for (subj_entity, subj_attr), entries in index.rule_subjects.items():
+        if len(entries) < 2:
+            continue
+        # Group by (predicate, object_value); only entries that share
+        # a subject but differ in (pred, val) are conflicts.
+        signatures = {(e[1], e[2]) for e in entries}
+        if len(signatures) < 2:
+            continue
+        # Concrete conflict — emit one audit entry per conflicting subject.
+        audit_list.append({
+            "conflict_type": "rule_disagreement",
+            "subject_entity": subj_entity,
+            "subject_attribute": subj_attr,
+            "rules": [
+                {
+                    "rule_kind": rk,
+                    "predicate": pred,
+                    "object_value": val,
+                    "source_type": src,
+                    "concept_key": ckey,
+                }
+                for (rk, pred, val, src, ckey) in entries
+            ],
+        })
+
     return CandidateGraph(
         concepts=index.values(),
         relationships=relationships,
-        audit=[
-            {
-                "label": ic.label,
-                "definition": ic.definition,
-                "source_type": ic.source_type,
-                "source_artifact": ic.source_artifact,
-                "raw_type": ic.raw_type,
-                "eid": ic.eid,
-                "artifact_kind": ic.artifact_kind.value,
-                "strength": ic.strength.value,
-                "promotion_reason": ic.promotion_reason,
-                "suppression_reason": ic.suppression_reason or "",
-                "suppressed": ic.suppressed,
-            }
-            for ic in suppressed_audit
-        ],
+        audit=audit_list,
     )
 
 
@@ -469,7 +508,10 @@ def _upsert(
     # prevents collisions between rules that share a canonical label
     # but differ in rule_kind or condition.
     if rule_payload is not None:
-        from .ingest.source_d.rule_payload import merge_key as _rule_merge_key
+        from .ingest.source_d.rule_payload import (
+            merge_key as _rule_merge_key,
+            _normalize_subject,
+        )
         rule_key_tuple = _rule_merge_key(rule_payload)
         existing_rule_key = index.by_rule_key.get(rule_key_tuple)
         if existing_rule_key is not None:
@@ -508,6 +550,23 @@ def _upsert(
         if eid:
             # Secondary alias only — rule_norm_key is the canonical store key.
             index.by_id[eid] = rule_norm_key
+
+        # Track subject grouping for conflict detection (decision #4).
+        # Only on SEED (not on merge-into-existing) — a merge means same
+        # merge_key, hence same predicate+value, hence no conflict.
+        subj = (
+            _normalize_subject(rule_payload.get("subject_entity")),
+            _normalize_subject(rule_payload.get("subject_attribute")),
+        )
+        entry = (
+            rule_payload.get("rule_kind"),
+            rule_payload.get("predicate"),
+            rule_payload.get("object_value"),
+            source_type,
+            rule_norm_key,
+        )
+        index.rule_subjects.setdefault(subj, []).append(entry)
+
         _record_attestation_and_boost(index, rule_norm_key, source_type, strength)
         return
 

@@ -208,3 +208,69 @@ def test_rule_candidates_with_same_eid_but_different_rule_keys_do_not_collide():
     assert len(index.values()) == 2
     rule_kinds = {c.rule_payload["rule_kind"] for c in index.values()}
     assert rule_kinds == {"validation", "defaulting"}
+
+
+def test_conflict_type_audit_marker_for_contradictory_rules_on_same_subject(tmp_path):
+    """Two rules sharing (subject_entity, subject_attribute) but with
+    different (predicate, object_value) produce two distinct concepts
+    AND a `conflict_type: rule_disagreement` audit entry (decision #4).
+    """
+    from ontozense.core.candidate_graph import build_candidate_graph
+
+    # SQL CHECK says amount > 0
+    sql = tmp_path / "schema.sql"
+    sql.write_text(
+        "CREATE TABLE loan (\n"
+        "  loan_id VARCHAR(32) PRIMARY KEY,\n"
+        "  amount NUMERIC NOT NULL CHECK (amount > 0)\n"
+        ");\n",
+        encoding="utf-8",
+    )
+    # Python validator says amount > 100 (contradicts the SQL threshold)
+    py = tmp_path / "models.py"
+    py.write_text(
+        "from pydantic import BaseModel, field_validator\n"
+        "\n"
+        "class Loan(BaseModel):\n"
+        "    amount: float\n"
+        "\n"
+        "    @field_validator('amount')\n"
+        "    def above_min(cls, v):\n"
+        "        if v <= 100:\n"
+        "            raise ValueError('amount must exceed 100')\n"
+        "        return v\n",
+        encoding="utf-8",
+    )
+
+    graph = build_candidate_graph(
+        source_c={"files": [str(sql)]},
+        source_d={"files": [str(py)]},
+    )
+
+    # Both rules emit as distinct concepts (different merge_keys).
+    rule_concepts = [
+        c for c in graph.concepts
+        if c.artifact_kind == "rule"
+        and c.rule_payload
+        and c.rule_payload.get("subject_attribute") == "amount"
+    ]
+    object_values = {c.rule_payload["object_value"] for c in rule_concepts}
+    assert 0 in object_values and 100 in object_values, (
+        f"expected both 0 and 100 thresholds as distinct concepts; got {object_values}"
+    )
+
+    # The audit block contains a rule_disagreement entry for Loan.amount.
+    conflicts = [
+        a for a in graph.audit
+        if isinstance(a, dict) and a.get("conflict_type") == "rule_disagreement"
+        and a.get("subject_attribute") == "amount"
+    ]
+    assert conflicts, (
+        f"expected rule_disagreement audit entry; got audit: {graph.audit}"
+    )
+    # The conflict cites both rules (by source_type or concept_key).
+    rules_in_conflict = conflicts[0]["rules"]
+    sources = {r["source_type"] for r in rules_in_conflict}
+    assert {"C", "D"} <= sources, (
+        f"conflict must reference both source types; got {sources}"
+    )
