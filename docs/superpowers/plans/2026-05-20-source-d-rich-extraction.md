@@ -99,12 +99,19 @@ def _extract_multi_condition_returns(
     NOT nested ifs. Skips functions whose name doesn't match the prefix
     list or whose body has no `if X: return False/True` pattern.
 
+    Termination contract (narrow, deterministic):
+      - The function's LAST statement must be `return <ast.Constant>`
+        with value `True` (Pattern A) or `False` (Pattern B). Any other
+        terminal form (computed return like `return all(...)`, no return,
+        raise) is skipped. This is the v1.2.1 boundary — handling computed
+        bool returns would require dataflow analysis (deferred per spec §10).
+
     Polarity:
-      - Pattern A (function ends with `return True` or no terminal return):
+      - Pattern A (function ends with `return True` as ast.Constant):
         `if X: return False`     -> (required, False) on X
         `if not X: return False` -> (required, True)  on X
         `if X <op> lit: return False` -> (inverted(op), lit) on X
-      - Pattern B (function ends with `return False`):
+      - Pattern B (function ends with `return False` as ast.Constant):
         `if X: return True`      -> (required, True)  on X
         `if X <op> lit: return True`  -> (op, lit) on X
 
@@ -146,6 +153,12 @@ def _extract_multi_condition_method(
     """Class-method analogue of _extract_multi_condition_returns.
     subject_entity is set to cls_name (anchored). Otherwise identical
     pattern matching and polarity logic.
+
+    Subject discipline — `self` is INCLUDED in param_names so that
+    `self.<attr>` is a valid LHS. This is the canonical anchored
+    subject form for class methods and matches v1.2's existing
+    _extract_eligibility_method contract (model_extractor.py:264).
+    Bare-param subjects on other method parameters also work.
     """
 ```
 
@@ -1295,13 +1308,68 @@ def test_class_method_pattern_d_resolves_module_constant(tmp_path):
     ]
     assert len(elig) == 1
     assert elig[0].object_value == "impaired"
+
+
+def test_pattern_a_class_method_extracts_self_attribute(tmp_path):
+    """`self.<attr>` is the canonical anchored subject form for class
+    methods. Mirrors v1.2's _extract_eligibility_method contract.
+    This test pins that `self` is INCLUDED in param_names so
+    `self.is_non_performing` resolves correctly (Codex Finding 1)."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "class Loan:\n"
+        "    def is_eligible(self):\n"
+        "        if not self.is_non_performing:\n"
+        "            return False\n"
+        "        if self.has_active_forbearance:\n"
+        "            return False\n"
+        "        return True\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_model(pm))
+    elig = [
+        f for f in facts
+        if isinstance(f, RuleFact) and f.rule_kind == "eligibility"
+    ]
+    assert len(elig) == 2
+    triples = {(r.subject_attribute, r.predicate, r.object_value) for r in elig}
+    assert ("is_non_performing", "required", True) in triples
+    assert ("has_active_forbearance", "required", False) in triples
+    for r in elig:
+        assert r.subject_entity == "Loan"
+
+
+def test_pattern_b_class_method_extracts_self_attribute_with_constant(tmp_path):
+    """Pattern B + self.<attr> + Pattern D constant resolution
+    all compose inside a class method."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "STATUS_ACTIVE = 'active'\n"
+        "class Loan:\n"
+        "    def is_active(self):\n"
+        "        if self.status == STATUS_ACTIVE:\n"
+        "            return True\n"
+        "        return False\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_model(pm))
+    elig = [
+        f for f in facts
+        if isinstance(f, RuleFact) and f.rule_kind == "eligibility"
+    ]
+    assert len(elig) == 1
+    r = elig[0]
+    assert r.subject_entity == "Loan"
+    assert r.subject_attribute == "status"
+    assert r.predicate == "eq"
+    assert r.object_value == "active"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `pytest tests/test_source_d_rich_extraction.py -v -k "class_method or in_class_method"`
 
-Expected: 3 FAIL.
+Expected: 5 FAIL.
 
 - [ ] **Step 3: Add helpers to `model_extractor.py`**
 
@@ -1392,9 +1460,11 @@ def _extract_multi_condition_method(
     else:
         return
 
-    # Exclude `self` (already-bound) from subject-candidate names; methods
-    # bind self separately and subject resolution doesn't use it.
-    param_names = {a.arg for a in method.args.args if a.arg != "self"}
+    # INCLUDE `self` in param_names so `self.<attr>` resolves as a
+    # valid LHS — this is the canonical anchored subject form for
+    # class methods and matches v1.2's _extract_eligibility_method.
+    # Other method parameters work the same way as procedural.
+    param_names = {a.arg for a in method.args.args}
 
     for stmt in method.body:  # TOP-LEVEL ONLY
         if not isinstance(stmt, ast.If):
@@ -1522,7 +1592,7 @@ Inside the per-class-method walk (find the place where `_extract_eligibility_met
 
 Run: `pytest tests/test_source_d_rich_extraction.py -v -k "class_method or in_class_method"`
 
-Expected: 3 PASS.
+Expected: 5 PASS.
 
 - [ ] **Step 7: Run existing model tests**
 
@@ -1692,7 +1762,7 @@ If any test fails, the most likely cause is a polarity or LHS-shape edge case in
 
 Run: `pytest --tb=no -q`
 
-Expected: all green; total count up by ~26 tests (8 in Task 1, 7 in Task 2, 2 in Task 3, 8 in Task 4, 4 in Task 5, 3 in Task 6, 7 in Task 7 = ~39 new tests total; existing 1000+ tests still pass).
+Expected: all green; total count up by ~41 tests (8 in Task 1, 7 in Task 2, 2 in Task 3, 8 in Task 4, 4 in Task 5, 5 in Task 6, 7 in Task 7 = 41 new tests total; existing 1000+ tests still pass).
 
 - [ ] **Step 4: Commit**
 
