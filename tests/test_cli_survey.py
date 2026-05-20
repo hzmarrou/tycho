@@ -498,3 +498,47 @@ def test_survey_rejects_malformed_source_d_yaml(tmp_path):
     assert result.exit_code == 2
     msg = result.stdout.lower()
     assert "source-d.yaml" in msg or "source_d" in msg
+
+
+# ─── Rule-count summary helper tests ────────────────────────────────────────
+
+
+def test_format_rule_summary_groups_by_rule_kind():
+    """Rule summary groups concepts by rule_kind and reports the total."""
+    from ontozense.cli import _format_rule_summary
+    from ontozense.core.discovery_contracts import CandidateConcept
+
+    def _rule(kind: str) -> CandidateConcept:
+        return CandidateConcept(
+            candidate_id=f"id_{kind}",
+            label=f"label_{kind}",
+            normalized_label=f"label_{kind}",
+            suggested_entity_type="Rule",
+            classification="unknown",
+            summary_definition="",
+            source_presence={"A": False, "B": False, "C": False, "D": True},
+            source_counts={"A": 0, "B": 0, "C": 0, "D": 1},
+            artifact_kind="rule",
+            rule_payload={"rule_kind": kind},
+        )
+
+    concepts = [
+        _rule("validation"), _rule("validation"), _rule("validation"),
+        _rule("derivation"),
+        _rule("eligibility"), _rule("eligibility"),
+        _rule("transition"),
+    ]
+    summary = _format_rule_summary(concepts)
+    assert "Rules: 7" in summary
+    assert "validation: 3" in summary
+    assert "derivation: 1" in summary
+    assert "eligibility: 2" in summary
+    assert "transition: 1" in summary
+
+
+def test_format_rule_summary_handles_zero_rules():
+    """Empty rule list produces a single-line 'Rules: 0' summary."""
+    from ontozense.cli import _format_rule_summary
+
+    summary = _format_rule_summary([])
+    assert summary == "Rules: 0"

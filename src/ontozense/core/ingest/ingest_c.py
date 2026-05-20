@@ -24,8 +24,91 @@ from .base import (
     IntermediateCandidate,
     Strength,
 )
+from .source_d.rule_payload import canonical_rule_label
 
 logger = logging.getLogger(__name__)
+
+
+_SIMPLE_OP_MAP: dict[type, str] = {
+    exp.GT: "gt",
+    exp.GTE: "gte",
+    exp.LT: "lt",
+    exp.LTE: "lte",
+    exp.EQ: "eq",
+    exp.NEQ: "neq",
+}
+
+
+def _try_extract_simple_check(
+    check_expr: exp.Expression, table_name: str, source_path: Path
+) -> tuple[dict | None, str | None]:
+    """Return (rule_payload, None) for a simple <col> <op> <literal> CHECK.
+    Return (None, suppression_reason) for any non-trivial CHECK.
+    """
+    op_type = type(check_expr)
+    if op_type not in _SIMPLE_OP_MAP:
+        return None, "non_trivial_check_constraint:unsupported_operator"
+    left, right = check_expr.this, check_expr.expression
+    if not isinstance(left, exp.Column):
+        return None, "non_trivial_check_constraint:non_column_lhs"
+    if not isinstance(right, exp.Literal):
+        return None, "non_trivial_check_constraint:non_literal_rhs"
+    col_name = left.name
+    raw = right.this
+    try:
+        value = int(raw) if right.is_int else float(raw)
+    except (TypeError, ValueError):
+        value = raw
+    payload = {
+        "rule_kind": "validation",
+        "subject_entity": table_name,
+        "subject_attribute": col_name,
+        "predicate": _SIMPLE_OP_MAP[op_type],
+        "object_value": value,
+        "condition": None,
+        "depends_on": [],
+        "expression": check_expr.sql(),
+        # sqlglot does not surface per-token line numbers reliably;
+        # the file-level provenance is in source_artifact.
+        "evidence_span": {
+            "file": str(source_path),
+            "start_line": 0,
+            "end_line": 0,
+            "snippet": check_expr.sql(),
+        },
+        "code_context": f"CREATE TABLE {table_name}",
+        "confidence": 1.0,
+        "extractor_family": "source_c_ddl",
+        "normalization_status": "deterministic",
+    }
+    return payload, None
+
+
+def _build_required_rule_payload(
+    table_name: str, column_name: str, source_path: Path
+) -> dict:
+    return {
+        "rule_kind": "validation",
+        "subject_entity": table_name,
+        "subject_attribute": column_name,
+        "predicate": "required",
+        "object_value": True,
+        "condition": None,
+        "depends_on": [],
+        "expression": f"{column_name} IS NOT NULL",
+        # sqlglot does not surface per-column line numbers reliably;
+        # the file-level provenance is in source_artifact.
+        "evidence_span": {
+            "file": str(source_path),
+            "start_line": 0,
+            "end_line": 0,
+            "snippet": f"{column_name} NOT NULL",
+        },
+        "code_context": f"CREATE TABLE {table_name}",
+        "confidence": 1.0,
+        "extractor_family": "source_c_ddl",
+        "normalization_status": "deterministic",
+    }
 
 
 class SourceCIngester(IngestionPolicy):
@@ -73,6 +156,7 @@ class SourceCIngester(IngestionPolicy):
                     "columns": self._extract_columns(stmt),
                     "pk": self._extract_pk_columns(stmt),
                     "fks": self._extract_foreign_keys(stmt, name),
+                    "constraints": self._extract_column_constraints(stmt),
                 }
 
         # ── Compute FK-in counts for code-table detection ──
@@ -253,12 +337,22 @@ class SourceCIngester(IngestionPolicy):
             suppressed=table_suppressed,
         )
 
-        # Columns → attributes (each may be individually suppressed).
+        # Columns → attributes; NOT NULL rules; per-column inline CHECK rules.
+        # All three share the column's suppression decision.
+        constraints = tdata["constraints"]
+        column_decisions: dict[str, tuple[bool, str | None]] = {}
+        # CHECK dedup key uses sqlglot's .sql() output — same logical
+        # predicate produces the same string within a dialect, but
+        # different source quoting/casing can render differently. Safe
+        # for single-dialect DDL parsing, which is the v1.1+ contract.
+        seen_check_sql: set[str] = set()
+
         for col_name, col_type in columns:
             if col_name in pk:
                 continue
             if any(fk["column"] == col_name for fk in fks):
                 continue
+
             col_suppressed = column_is_suppressed(
                 col_name, user_exclude_columns, []
             )
@@ -282,6 +376,8 @@ class SourceCIngester(IngestionPolicy):
                 table_suppression_reason if table_suppressed
                 else col_suppression_reason
             )
+            column_decisions[col_name] = (final_suppressed, final_reason)
+
             yield IntermediateCandidate(
                 label=col_name,
                 definition="",
@@ -297,6 +393,120 @@ class SourceCIngester(IngestionPolicy):
                 suppression_reason=final_reason,
                 suppressed=final_suppressed,
             )
+
+            # NOT NULL on this column → required-rule candidate (AC1a),
+            # carrying the same suppression decision as the attribute.
+            col_constraints = constraints.get(col_name, {"nullable": True, "checks": []})
+            if not col_constraints["nullable"]:
+                payload = _build_required_rule_payload(tname, col_name, source_path)
+                yield IntermediateCandidate(
+                    label=canonical_rule_label(payload),
+                    definition=f"{tname}.{col_name} must not be null.",
+                    source_type="C",
+                    source_artifact=f"{source_path}#{tname}.{col_name}",
+                    raw_type="not_null_constraint",
+                    eid="",
+                    artifact_kind=ArtifactKind.RULE,
+                    strength=Strength.STRONG,
+                    promotion_reason=f"Source C: NOT NULL constraint on {tname}.{col_name}.",
+                    suppression_reason=final_reason,
+                    suppressed=final_suppressed,
+                    rule_payload=payload,
+                )
+
+            # Per-column inline CHECK constraints (collected in pass 1).
+            for check_expr in col_constraints["checks"]:
+                seen_check_sql.add(check_expr.sql())
+                payload, suppress_reason = _try_extract_simple_check(
+                    check_expr, tname, source_path
+                )
+                if payload is not None:
+                    yield IntermediateCandidate(
+                        label=canonical_rule_label(payload),
+                        definition=f"CHECK constraint on {tname}.{payload['subject_attribute']}",
+                        source_type="C",
+                        source_artifact=f"{source_path}#{tname}.{payload['subject_attribute']}",
+                        raw_type="check_constraint",
+                        eid="",
+                        artifact_kind=ArtifactKind.RULE,
+                        strength=Strength.STRONG,
+                        promotion_reason=f"Source C: CHECK ({check_expr.sql()}) on {tname}.",
+                        suppression_reason=final_reason,
+                        suppressed=final_suppressed,
+                        rule_payload=payload,
+                    )
+                else:
+                    # Combine the technical (non-trivial) reason with the
+                    # column's exclusion reason when both fire. The audit
+                    # consumer needs to see both attribution paths.
+                    combined_reason = suppress_reason
+                    if final_suppressed and final_reason and final_reason != suppress_reason:
+                        combined_reason = f"{suppress_reason}; column also excluded: {final_reason}"
+                    yield IntermediateCandidate(
+                        label=f"complex check on {tname}: {check_expr.sql()[:80]}",
+                        definition=f"Non-trivial CHECK constraint on {tname}",
+                        source_type="C",
+                        source_artifact=str(source_path),
+                        raw_type="check_constraint",
+                        eid="",
+                        artifact_kind=ArtifactKind.RULE,
+                        strength=Strength.WEAK,
+                        promotion_reason=f"Source C: non-trivial inline CHECK on {tname}.{col_name}.",
+                        suppression_reason=combined_reason,
+                        suppressed=True,
+                    )
+
+        # Table-level CHECK constraints (not already seen as inline).
+        # These appear as CheckColumnConstraint nodes directly inside the
+        # Schema's expression list (not nested inside a ColumnDef).
+        stmt = tdata["stmt"]
+        schema = stmt.this
+        table_level_checks = (
+            e for e in (schema.expressions if isinstance(schema, exp.Schema) else [])
+            if isinstance(e, exp.CheckColumnConstraint)
+        )
+        for check in table_level_checks:
+            inner = check.this
+            if inner is None or inner.sql() in seen_check_sql:
+                continue
+            payload, suppress_reason = _try_extract_simple_check(
+                inner, tname, source_path
+            )
+            if payload is not None:
+                # Inherit the subject column's suppression decision when known;
+                # otherwise default to table-level decision.
+                subj = payload["subject_attribute"]
+                col_suppressed, col_reason = column_decisions.get(
+                    subj, (table_suppressed, table_suppression_reason)
+                )
+                yield IntermediateCandidate(
+                    label=canonical_rule_label(payload),
+                    definition=f"CHECK constraint on {tname}.{subj}",
+                    source_type="C",
+                    source_artifact=f"{source_path}#{tname}.{subj}",
+                    raw_type="check_constraint",
+                    eid="",
+                    artifact_kind=ArtifactKind.RULE,
+                    strength=Strength.STRONG,
+                    promotion_reason=f"Source C: CHECK ({inner.sql()}) on {tname}.",
+                    suppression_reason=col_reason,
+                    suppressed=col_suppressed,
+                    rule_payload=payload,
+                )
+            else:
+                yield IntermediateCandidate(
+                    label=f"complex check on {tname}: {inner.sql()[:80]}",
+                    definition=f"Non-trivial CHECK constraint on {tname}",
+                    source_type="C",
+                    source_artifact=str(source_path),
+                    raw_type="check_constraint",
+                    eid="",
+                    artifact_kind=ArtifactKind.RULE,
+                    strength=Strength.WEAK,
+                    promotion_reason=f"Source C: complex CHECK ({inner.sql()[:80]}) on {tname} — audit only.",
+                    suppression_reason=suppress_reason,
+                    suppressed=True,
+                )
 
         # FKs → relationships.
         for fk in fks:
@@ -369,6 +579,34 @@ class SourceCIngester(IngestionPolicy):
                 for col in expression.expressions or []:
                     pk.add(col.name)
         return pk
+
+    @staticmethod
+    def _extract_column_constraints(stmt: exp.Create) -> dict[str, dict]:
+        """Return {col_name: {"nullable": bool, "checks": list[exp.Expression]}}.
+
+        Mirrors the walk pattern used by _extract_pk_columns. Default
+        nullable=True; flip to False when a NotNullColumnConstraint is
+        present on the column. ``checks`` collects any
+        CheckColumnConstraint expression nodes for the column for
+        downstream rule emission (Task 4).
+        """
+        out: dict[str, dict] = {}
+        this = stmt.this
+        if not isinstance(this, exp.Schema):
+            return out
+        for expression in this.expressions or []:
+            if not isinstance(expression, exp.ColumnDef):
+                continue
+            col_name = expression.name
+            entry: dict = {"nullable": True, "checks": []}
+            for constraint in expression.args.get("constraints") or []:
+                kind = constraint.args.get("kind")
+                if isinstance(kind, exp.NotNullColumnConstraint):
+                    entry["nullable"] = False
+                elif isinstance(kind, exp.CheckColumnConstraint):
+                    entry["checks"].append(kind.this)
+            out[col_name] = entry
+        return out
 
     @staticmethod
     def _extract_foreign_keys(

@@ -136,9 +136,37 @@ class _CandidateIndex:
         self.ambiguous_norms: set[str] = set()
         self.attestations: dict[str, list[tuple[str, str]]] = {}
         self.kind_conflicts: list[dict[str, str]] = []
+        self.by_rule_key: dict[tuple, str] = {}
+        # Subject-grouped rule tracker for conflict_type audit (decision #4).
+        # Key: (normalized subject_entity, normalized subject_attribute).
+        # Value: list of (rule_kind, predicate, object_value, source_type,
+        #                 rule_norm_key) tuples for every distinct rule
+        # candidate registered with that subject. When two entries on
+        # the same subject differ in (predicate, object_value) AND have
+        # different rule_norm_keys, they're a fusion-time conflict.
+        self.rule_subjects: dict[tuple, list[tuple]] = {}
 
     def values(self) -> list[CandidateConcept]:
         return list(self.by_key.values())
+
+
+# ─── Rule-identity helpers ──────────────────────────────────────────────────
+
+
+def _rule_store_key(rule_key_tuple: tuple) -> str:
+    """Render the canonical _CandidateIndex.by_key for a rule identity tuple.
+
+    Rule candidates use this format so they bypass label-based lookup
+    (spec §11.1 / planning decision #5). The tuple comes from
+    ``source_d.rule_payload.merge_key``.
+
+    Uses ``repr(...)`` for collision-safety: any two distinct tuples
+    produce distinct strings (Python's repr is unambiguous for
+    hashable types). A naive ``":".join(str(p) for p in ...)`` would
+    collide whenever any tuple component contained the separator
+    character.
+    """
+    return f"rule:{rule_key_tuple!r}"
 
 
 # ─── Builder ────────────────────────────────────────────────────────────────
@@ -153,6 +181,7 @@ def build_candidate_graph(
     alias_map: dict[str, str] | None = None,
     source_c_config: dict[str, Any] | None = None,
     source_d_config: dict[str, Any] | None = None,
+    source_d_llm: Any | None = None,
 ) -> CandidateGraph:
     """Build a merged candidate graph from raw source outputs.
 
@@ -265,6 +294,7 @@ def build_candidate_graph(
                 suppression_reason=ic.suppression_reason,
                 suppressed=False,
                 alias_map=aliases,
+                rule_payload=ic.rule_payload,
             )
 
     if source_a:
@@ -274,7 +304,7 @@ def build_candidate_graph(
     if source_c:
         _dispatch(SourceCIngester(config=source_c_config), source_c)
     if source_d:
-        _dispatch(SourceDIngester(config=source_d_config), source_d)
+        _dispatch(SourceDIngester(config=source_d_config, llm=source_d_llm), source_d)
 
     # Relationship ingestion stays in the orchestrator — it requires
     # post-merge candidate-id resolution that's only available now.
@@ -356,25 +386,56 @@ def build_candidate_graph(
             suppressed=True,
         ))
 
+    audit_list: list[dict[str, Any]] = [
+        {
+            "label": ic.label,
+            "definition": ic.definition,
+            "source_type": ic.source_type,
+            "source_artifact": ic.source_artifact,
+            "raw_type": ic.raw_type,
+            "eid": ic.eid,
+            "artifact_kind": ic.artifact_kind.value,
+            "strength": ic.strength.value,
+            "promotion_reason": ic.promotion_reason,
+            "suppression_reason": ic.suppression_reason or "",
+            "suppressed": ic.suppressed,
+        }
+        for ic in suppressed_audit
+    ]
+
+    # Conflict markers (planning decision #4): when two rule candidates
+    # share (subject_entity, subject_attribute) but disagree on
+    # (predicate, object_value), surface them in the audit block so
+    # consumers can spot contradictions without scanning every concept.
+    for (subj_entity, subj_attr), entries in index.rule_subjects.items():
+        if len(entries) < 2:
+            continue
+        # Group by (predicate, object_value); only entries that share
+        # a subject but differ in (pred, val) are conflicts.
+        signatures = {(e[1], e[2]) for e in entries}
+        if len(signatures) < 2:
+            continue
+        # Concrete conflict — emit one audit entry per conflicting subject.
+        audit_list.append({
+            "conflict_type": "rule_disagreement",
+            "subject_entity": subj_entity,
+            "subject_attribute": subj_attr,
+            "rules": [
+                {
+                    "rule_kind": rk,
+                    "predicate": pred,
+                    "object_value": val,
+                    "source_type": src,
+                    "concept_key": ckey,
+                }
+                for (rk, pred, val, src, ckey) in entries
+            ],
+        })
+
     return CandidateGraph(
         concepts=index.values(),
         relationships=relationships,
-        audit=[
-            {
-                "label": ic.label,
-                "definition": ic.definition,
-                "source_type": ic.source_type,
-                "source_artifact": ic.source_artifact,
-                "raw_type": ic.raw_type,
-                "eid": ic.eid,
-                "artifact_kind": ic.artifact_kind.value,
-                "strength": ic.strength.value,
-                "promotion_reason": ic.promotion_reason,
-                "suppression_reason": ic.suppression_reason or "",
-                "suppressed": ic.suppressed,
-            }
-            for ic in suppressed_audit
-        ],
+        audit=audit_list,
     )
 
 
@@ -396,6 +457,7 @@ def _upsert(
     suppression_reason: str | None = None,
     suppressed: bool = False,
     alias_map: dict[str, str] | None = None,
+    rule_payload: dict | None = None,
 ) -> None:
     """Insert or merge a candidate for ``label`` following the
     architecture's merge-key priority.
@@ -439,6 +501,74 @@ def _upsert(
         raw_type=raw_type,
         confidence=0.8,
     )
+
+    # 0. Structured rule identity (spec §11.1, planning decision #5).
+    # When the incoming candidate carries a rule_payload, fusion key
+    # is the full structured tuple, NOT the surface label. This
+    # prevents collisions between rules that share a canonical label
+    # but differ in rule_kind or condition.
+    if rule_payload is not None:
+        from .ingest.source_d.rule_payload import (
+            merge_key as _rule_merge_key,
+            _normalize_subject,
+        )
+        rule_key_tuple = _rule_merge_key(rule_payload)
+        existing_rule_key = index.by_rule_key.get(rule_key_tuple)
+        if existing_rule_key is not None:
+            # Existing rule with the same structured identity — merge.
+            _merge_into(
+                index, existing_rule_key, evidence, label, definition,
+                source_type, raw_type,
+                canonical_label=canonical_label,
+                alias_fired=alias_fired,
+                artifact_kind=artifact_kind, strength=strength,
+                promotion_reason=promotion_reason,
+                suppression_reason=suppression_reason, suppressed=suppressed,
+                rule_payload=rule_payload,
+            )
+            _record_attestation_and_boost(index, existing_rule_key, source_type, strength)
+            return
+        # No existing rule with this identity.
+        # Identity is the structured tuple — bypass all label-based lookup
+        # paths and seed a new candidate immediately. Two rules that share
+        # a surface label but differ in rule_kind / condition must NOT merge
+        # (spec §11.1, planning decision #5).
+        rule_norm_key = _rule_store_key(rule_key_tuple)
+        new_rule = _new_candidate(
+            norm=norm, label=label, definition=definition,
+            raw_type=raw_type, source_type=source_type,
+            eid=eid, evidence=evidence,
+            canonical_label=canonical_label,
+            alias_fired=alias_fired,
+            artifact_kind=artifact_kind, strength=strength,
+            promotion_reason=promotion_reason,
+            suppression_reason=suppression_reason, suppressed=suppressed,
+            rule_payload=rule_payload,
+        )
+        index.by_key[rule_norm_key] = new_rule
+        index.by_rule_key[rule_key_tuple] = rule_norm_key
+        if eid:
+            # Secondary alias only — rule_norm_key is the canonical store key.
+            index.by_id[eid] = rule_norm_key
+
+        # Track subject grouping for conflict detection (decision #4).
+        # Only on SEED (not on merge-into-existing) — a merge means same
+        # merge_key, hence same predicate+value, hence no conflict.
+        subj = (
+            _normalize_subject(rule_payload.get("subject_entity")),
+            _normalize_subject(rule_payload.get("subject_attribute")),
+        )
+        entry = (
+            rule_payload.get("rule_kind"),
+            rule_payload.get("predicate"),
+            rule_payload.get("object_value"),
+            source_type,
+            rule_norm_key,
+        )
+        index.rule_subjects.setdefault(subj, []).append(entry)
+
+        _record_attestation_and_boost(index, rule_norm_key, source_type, strength)
+        return
 
     # 1. Direct id hit — same canonical entity seen before.
     if eid and eid in index.by_id:
@@ -623,6 +753,7 @@ def _upsert(
         artifact_kind=artifact_kind, strength=strength,
         promotion_reason=promotion_reason,
         suppression_reason=suppression_reason, suppressed=suppressed,
+        rule_payload=rule_payload,
     )
     if eid:
         key = f"id:{eid}"
@@ -670,6 +801,7 @@ def _new_candidate(
     promotion_reason: str = "",
     suppression_reason: str | None = None,
     suppressed: bool = False,
+    rule_payload: dict | None = None,
 ) -> CandidateConcept:
     """Construct a fresh :class:`CandidateConcept` for a never-seen-before
     normalised label.
@@ -735,6 +867,7 @@ def _new_candidate(
         promotion_reason=promotion_reason,
         suppression_reason=suppression_reason,
         suppressed=suppressed,
+        rule_payload=rule_payload,
     )
 
 
@@ -755,6 +888,7 @@ def _merge_into(
     promotion_reason: str = "",
     suppression_reason: str | None = None,
     suppressed: bool = False,
+    rule_payload: dict | None = None,
 ) -> None:
     """Merge incoming evidence into the candidate stored at ``key``.
 
@@ -817,6 +951,11 @@ def _merge_into(
     )
     merged_suppressed = existing.suppressed or suppressed
 
+    # First-wins merge for rule_payload (spec §11.1): payload is
+    # identity-bearing, not value-recomputed. Keep the existing payload
+    # when present; adopt the incoming one only if the existing is None.
+    merged_rule_payload = existing.rule_payload if existing.rule_payload is not None else rule_payload
+
     # Alias-map authoritative relabel on merge (spec): if this
     # upsert's alias_map fired and produced a canonical_label
     # different from the existing surface label, flip the label
@@ -842,6 +981,7 @@ def _merge_into(
         promotion_reason=merged_promotion_reason,
         suppression_reason=merged_suppression_reason,
         suppressed=merged_suppressed,
+        rule_payload=merged_rule_payload,
     )
 
 

@@ -81,6 +81,9 @@ DEFAULT_SOURCE_D_CLASS_SUPPRESSIONS: list[str] = [
 SOURCE_D_VALID_CONFIG_KEYS: set[str] = {
     "exclude_paths", "exclude_classes", "include_classes",
     "force_vocabulary",
+    "exclude_functions",
+    "force_rule",
+    "rule_extractors",
 }
 
 

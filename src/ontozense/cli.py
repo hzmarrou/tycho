@@ -3341,6 +3341,33 @@ def survey(
         f"{cross} cross-source matches. "
         f"See {discovery_dir}."
     )
+    console.print(_format_rule_summary(graph.concepts))
+
+
+def _format_rule_summary(concepts: list) -> str:
+    """Return a one-line rule-count summary grouped by rule_kind.
+
+    Used by the ``survey`` command to surface rule extraction results
+    without requiring the caller to inspect each concept manually.
+
+    Examples::
+
+        "Rules: 5 (derivation: 1, eligibility: 2, validation: 2)"
+        "Rules: 0"
+    """
+    rule_concepts = [c for c in concepts if getattr(c, "artifact_kind", None) == "rule"]
+    if not rule_concepts:
+        return "Rules: 0"
+    from collections import Counter
+    by_kind: Counter = Counter(
+        c.rule_payload.get("rule_kind", "unknown") if c.rule_payload else "unknown"
+        for c in rule_concepts
+    )
+    kind_summary = ", ".join(
+        f"{kind}: {count}"
+        for kind, count in sorted(by_kind.items())
+    )
+    return f"Rules: {len(rule_concepts)} ({kind_summary})"
 
 
 def _expand_source_paths(

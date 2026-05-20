@@ -192,7 +192,16 @@ def test_customer_status_enum_classified_as_vocabulary():
 
 def test_validate_amount_classified_as_rule():
     """The validate_amount() module-level function in loan.py
-    emits as a rule candidate at WEAK strength."""
+    is extracted as a rule candidate.
+
+    v1.2 pipeline change: validate_* functions with no extractable body
+    have no subject_entity and no subject_attribute. The anchor stage
+    suppresses such unanchored rules to the audit block (they cannot be
+    resolved without cross-source attestation). The rule still appears
+    in the graph's audit list with raw_type='rule:validation' and
+    suppressed=True. Active concepts with rule artifact_kind are reserved
+    for anchored rules (those with a resolvable subject_entity).
+    """
     source_d = {
         "files": [
             str(p) for p in (FIXTURE / "source-d").iterdir()
@@ -201,9 +210,16 @@ def test_validate_amount_classified_as_rule():
     }
     graph = build_candidate_graph(source_d=source_d)
 
-    rules = [c for c in graph.concepts if c.artifact_kind == "rule"]
-    rule_labels = {r.label for r in rules}
-    assert "validate_amount" in rule_labels
-
-    validate = next(r for r in rules if r.label == "validate_amount")
-    assert validate.strength == "weak"
+    # v1.2: unanchored validate_* rules go to audit, not concepts.
+    audit_rules = [
+        a for a in graph.audit
+        if a.get("artifact_kind") == "rule"
+        and "validate_amount" in a.get("label", "")
+    ]
+    assert audit_rules, (
+        f"expected 'validate_amount' in audit rules; "
+        f"audit labels: {[a.get('label') for a in graph.audit]}"
+    )
+    validate = audit_rules[0]
+    assert validate["suppressed"] is True
+    assert validate["strength"] == "weak"
