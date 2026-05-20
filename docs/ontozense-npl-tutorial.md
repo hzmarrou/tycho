@@ -63,6 +63,20 @@ This is where all inputs and outputs for the NPL domain will live.
 
 ## Step 1 — Prepare your sources
 
+> **If you're using a packaged Tycho distribution** (e.g. `dist/tycho-public/`
+> produced by `python scripts/export_tycho_public.py`), the four NPL sources
+> are already staged at `domains/npl/sources/`:
+>
+> - `npl-basel-guidelines.md` (Source A — Basel D403 document)
+> - `governance.json` (Source B — governance reference)
+> - `npl-schema.sql` (Source C — OpenNPL database schema)
+> - `npl-code/` (Source D — production Python + SQL)
+>
+> You can skip the `cp` commands in the three Source subsections below
+> and jump to **Step 2 — Route your files**. If you're working from a
+> dev checkout of the repo, run the `cp` commands as written to assemble
+> your domain workspace.
+
 ### Source A: Authoritative domain document
 
 Ontozense ships with a Basel D403 regulatory guidelines document. Copy

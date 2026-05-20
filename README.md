@@ -200,10 +200,21 @@ ontozense draft \
 
 For the underlying pipeline commands (`extract-a`, `fuse`, `validate`, `lint`, etc.) run by hand — for CI pipelines or fine-grained control — see [Advanced — running the pipeline by hand](#advanced--running-the-pipeline-by-hand) below.
 
-Two NPL (Non-Performing Loans) walkthroughs are available:
+Three NPL (Non-Performing Loans) walkthroughs are available:
 
+- [**docs/ontozense-npl-tutorial.md**](docs/ontozense-npl-tutorial.md) — the bundled-distribution walkthrough. Works against the curated layout produced by `python scripts/export_tycho_public.py` (see [Packaging](#packaging)) and against a dev checkout.
 - [**docs/ontozense-npl-validation.md**](docs/ontozense-npl-validation.md) — step-by-step tutorial for a brand-new user, starting from `git clone`. Covers both the discovery workflow and the profile-aware pipeline, with concrete `✓ Expected` checkpoints.
 - [**docs/ontozense-npl-advanced.md**](docs/ontozense-npl-advanced.md) — power-user reference; runs each underlying command in isolation. Useful for CI pipelines or fine-grained control.
+
+## Packaging
+
+To produce a curated public Tycho distribution (runtime + bundled NPL example + tutorial), run:
+
+```bash
+python scripts/export_tycho_public.py
+```
+
+This assembles a clean `dist/tycho-public/` containing only the runtime package, `pyproject.toml`, `README.md`, the NPL tutorial, and the four NPL sources pre-staged under `domains/npl/sources/`. The output is regenerated on demand and not committed to git.
 
 ## Advanced — running the pipeline by hand
 
