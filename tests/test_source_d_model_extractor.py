@@ -227,3 +227,70 @@ def test_model_extractor_eligibility_still_emits_behavior_fact(tmp_path):
     rules = [r for r in facts if isinstance(r, RuleFact)]
     assert len(behaviors) == 1
     assert len(rules) == 1
+
+
+def test_model_extractor_extracts_transition_rule(tmp_path):
+    """`if self.score >= 700: self.status = 'APPROVED'` emits a transition
+    rule on `status` with predicate `transitions_to` and value 'APPROVED'."""
+    f = tmp_path / "f.py"
+    f.write_text(
+        "class Loan:\n"
+        "    score: int\n"
+        "    status: str\n"
+        "    def approve(self):\n"
+        "        if self.score >= 700:\n"
+        "            self.status = 'APPROVED'\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_model(pm))
+    trans = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "transition"]
+    assert len(trans) == 1
+    r = trans[0]
+    assert r.subject_entity == "Loan"
+    assert r.subject_attribute == "status"
+    assert r.predicate == "transitions_to"
+    assert r.object_value == "APPROVED"
+
+
+def test_model_extractor_transition_supports_state_phase_stage_lifecycle(tmp_path):
+    """All five transition field names trigger extraction."""
+    f = tmp_path / "f.py"
+    f.write_text(
+        "class Order:\n"
+        "    state: str\n"
+        "    phase: str\n"
+        "    stage: str\n"
+        "    lifecycle_state: str\n"
+        "    def update(self, flag):\n"
+        "        if flag:\n"
+        "            self.state = 'OPEN'\n"
+        "        if flag:\n"
+        "            self.phase = 'INTAKE'\n"
+        "        if flag:\n"
+        "            self.stage = 'REVIEW'\n"
+        "        if flag:\n"
+        "            self.lifecycle_state = 'ACTIVE'\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_model(pm))
+    trans = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "transition"]
+    by_attr = {r.subject_attribute for r in trans}
+    assert by_attr == {"state", "phase", "stage", "lifecycle_state"}
+
+
+def test_model_extractor_transition_ignores_non_status_field_assigns(tmp_path):
+    """Guarded assigns to non-status fields (e.g. `if x: self.amount = 0`)
+    are NOT transitions — to avoid swamping the candidate graph with
+    every constant assignment."""
+    f = tmp_path / "f.py"
+    f.write_text(
+        "class Account:\n"
+        "    amount: float\n"
+        "    def reset(self):\n"
+        "        if self.amount < 0:\n"
+        "            self.amount = 0\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_model(pm))
+    trans = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "transition"]
+    assert trans == [], "non-status-named field assigns must not be transitions"

@@ -227,6 +227,7 @@ def extract_model(pm: ParsedModule, config: dict | None = None) -> Iterable[obje
                 elig = _extract_eligibility_method(cls_name, stmt, pm.source, file)
                 if elig is not None:
                     yield elig
+                yield from _extract_transition_assigns(cls_name, stmt, pm.source, file)
             elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name == "__init__":
                 yield from _extract_inline_rules(cls_name, stmt, pm.source, file)
 
@@ -250,6 +251,8 @@ _DIRECT_CMP = {
     ast.Lt: "lt", ast.LtE: "lte", ast.Gt: "gt", ast.GtE: "gte",
     ast.Eq: "eq", ast.NotEq: "neq",
 }
+
+_TRANSITION_FIELD_NAMES = frozenset({"status", "state", "phase", "stage", "lifecycle_state"})
 
 
 def _literal_value(node: ast.expr):
@@ -300,6 +303,41 @@ def _extract_eligibility_method(cls_name: str, method: ast.FunctionDef, source: 
         confidence=0.85,
         extractor_family="model",
     )
+
+
+def _extract_transition_assigns(cls_name: str, method: ast.FunctionDef, source: str, file: str):
+    """Yield RuleFacts for `if <guard>: self.<status_field> = <literal>`
+    patterns inside ``method``. <status_field> must match a status-like
+    name (status / state / phase / stage / lifecycle_state)."""
+    for node in ast.walk(method):
+        if not (isinstance(node, ast.If) and node.body):
+            continue
+        for stmt in node.body:
+            if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+                continue
+            tgt = stmt.targets[0]
+            # Target: self.<field>
+            if not (
+                isinstance(tgt, ast.Attribute)
+                and isinstance(tgt.value, ast.Name)
+                and tgt.value.id == "self"
+                and tgt.attr in _TRANSITION_FIELD_NAMES
+            ):
+                continue
+            if not isinstance(stmt.value, ast.Constant):
+                continue
+            yield RuleFact(
+                rule_kind="transition",
+                subject_entity=cls_name,
+                subject_attribute=tgt.attr,
+                predicate="transitions_to",
+                object_value=stmt.value.value,
+                expression=ast.unparse(stmt),
+                evidence_span=_span(node, file, source),
+                code_context=f"class {cls_name}, def {method.name}",
+                confidence=0.85,
+                extractor_family="model",
+            )
 
 
 def _decorator_field_name(deco: ast.expr) -> str | None:

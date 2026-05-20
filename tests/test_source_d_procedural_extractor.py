@@ -204,3 +204,37 @@ def test_procedural_eligibility_does_not_double_emit_validation(tmp_path):
     # Exactly one rule — the eligibility one.
     assert len(rules) == 1
     assert rules[0].rule_kind == "eligibility"
+
+
+def test_procedural_extracts_transition_rule(tmp_path):
+    """`if approved: payment['status'] = 'PAID'` emits a transition rule."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "def settle(payment, approved):\n"
+        "    if approved:\n"
+        "        payment['status'] = 'PAID'\n"
+        "    return payment\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_procedural(pm))
+    trans = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "transition"]
+    assert len(trans) == 1
+    r = trans[0]
+    assert r.subject_attribute == "status"
+    assert r.predicate == "transitions_to"
+    assert r.object_value == "PAID"
+
+
+def test_procedural_transition_ignores_non_status_subscript_assigns(tmp_path):
+    """Subscript assigns to non-status fields are NOT transitions."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "def apply_discount(cart, condition):\n"
+        "    if condition:\n"
+        "        cart['total'] = 0\n"
+        "    return cart\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_procedural(pm))
+    trans = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "transition"]
+    assert trans == []

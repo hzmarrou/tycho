@@ -41,6 +41,8 @@ _DIRECT_CMP = {
     ast.Eq: "eq", ast.NotEq: "neq",
 }
 
+_TRANSITION_FIELD_NAMES = frozenset({"status", "state", "phase", "stage", "lifecycle_state"})
+
 
 def _span(node: ast.AST, file: str, source: str) -> EvidenceSpan:
     start = getattr(node, "lineno", 1)
@@ -176,6 +178,39 @@ def _extract_function_rules(func: ast.FunctionDef, source: str, file: str) -> It
                         )
 
 
+def _extract_transition_assigns_procedural(func: ast.FunctionDef, source: str, file: str):
+    """Yield RuleFacts for `if <guard>: <obj>["<status_field>"] = <literal>`
+    in procedural code. Status field name must match the closed list."""
+    for node in ast.walk(func):
+        if not (isinstance(node, ast.If) and node.body):
+            continue
+        for stmt in node.body:
+            if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+                continue
+            tgt = stmt.targets[0]
+            if not (
+                isinstance(tgt, ast.Subscript)
+                and isinstance(tgt.slice, ast.Constant)
+                and isinstance(tgt.slice.value, str)
+                and tgt.slice.value in _TRANSITION_FIELD_NAMES
+            ):
+                continue
+            if not isinstance(stmt.value, ast.Constant):
+                continue
+            yield RuleFact(
+                rule_kind="transition",
+                subject_entity=None,
+                subject_attribute=tgt.slice.value,
+                predicate="transitions_to",
+                object_value=stmt.value.value,
+                expression=ast.unparse(stmt),
+                evidence_span=_span(node, file, source),
+                code_context=f"def {func.name}",
+                confidence=0.85,
+                extractor_family="procedural",
+            )
+
+
 def extract_procedural(pm: ParsedModule, config: dict | None = None) -> Iterable[RuleFact]:
     config = config or {}
     exclude = list(config.get("exclude_functions", []) or [])
@@ -196,6 +231,12 @@ def extract_procedural(pm: ParsedModule, config: dict | None = None) -> Iterable
         for r in _extract_function_rules(func, pm.source, file):
             yielded_any = True
             yield r
+        # Transition extraction runs alongside _extract_function_rules
+        # (a function can have both `if amount <= 0: raise` AND
+        # `if approved: payment["status"] = "PAID"`).
+        for t in _extract_transition_assigns_procedural(func, pm.source, file):
+            yielded_any = True
+            yield t
         # Weak-rule fallback: validate_*/check_*/assert_* OR force_rule glob.
         if not yielded_any and (
             name.startswith(_VALIDATE_PREFIXES)
