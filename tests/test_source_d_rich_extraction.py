@@ -306,3 +306,40 @@ def test_pattern_b_only_fires_on_extended_prefix_set(tmp_path):
     facts = list(extract_procedural(pm))
     elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
     assert elig == []
+
+
+def test_pattern_a_skips_negated_comparison(tmp_path):
+    """`if not (X <op> lit): return False` is documented as a rare
+    pattern deferred to a future patch. The helper must return None
+    (no rule emitted) for this shape, not crash or emit a wrong rule."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def is_eligible(loan):\n"
+        "    if not (loan.amount > 0):\n"
+        "        return False\n"
+        "    return True\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    assert elig == []
+
+
+def test_pattern_b_negated_bare_name_polarity(tmp_path):
+    """`if not X: return True` (Pattern B, negated) maps to
+    (required, False) — X being falsy is the sufficient trigger."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def classify_loan(loan):\n"
+        "    if not loan.is_active:\n"
+        "        return True\n"
+        "    return False\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    assert len(elig) == 1
+    r = elig[0]
+    assert r.subject_attribute == "is_active"
+    assert r.predicate == "required"
+    assert r.object_value is False

@@ -33,9 +33,12 @@ _VALIDATE_PREFIXES = ("validate_", "check_", "assert_")
 
 _ELIGIBILITY_PREFIXES = ("is_", "can_", "may_", "should_", "must_")
 
-_MULTI_ELIGIBILITY_PREFIXES = (
-    "is_", "can_", "may_", "should_", "must_",
-    "classify_", "determine_", "predict_", "decide_", "evaluate_",
+_MULTI_ELIGIBILITY_PREFIXES = _ELIGIBILITY_PREFIXES + (
+    "classify_",
+    "determine_",
+    "predict_",
+    "decide_",
+    "evaluate_",
 )
 
 # Direct (NOT inverted) op mapping for eligibility return predicates.
