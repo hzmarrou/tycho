@@ -104,3 +104,73 @@ def test_canonical_rule_label_matches_for_equivalent_payloads():
 def test_canonical_rule_label_without_subject_entity():
     p = {"subject_entity": None, "subject_attribute": "amount", "predicate": "gt", "object_value": 0}
     assert canonical_rule_label(p) == "amount gt 0"
+
+
+def test_normalize_subject_preserves_words_with_trailing_s_that_arent_plural():
+    """inflect.singular_noun is naive: it strips trailing 's' from
+    words like 'address' (-> 'addres') or 'analysis' (-> 'analysi').
+    The round-trip guard rejects these false-positive singularizations
+    so the merge key stays stable."""
+    from ontozense.core.ingest.source_d.rule_payload import _normalize_subject
+
+    # Each pair: input -> expected normalized form.
+    # These all end in 's' but are NOT plurals; the original lowercase
+    # form must be preserved.
+    assert _normalize_subject("address") == "address"
+    assert _normalize_subject("Address") == "address"
+    assert _normalize_subject("analysis") == "analysis"
+    assert _normalize_subject("status") == "status"
+    assert _normalize_subject("customer_status") == "customer_status"
+
+
+def test_normalize_subject_singularizes_real_plurals_safely():
+    """Real plurals still singularize correctly through the
+    round-trip guard."""
+    from ontozense.core.ingest.source_d.rule_payload import _normalize_subject
+
+    assert _normalize_subject("loans") == "loan"
+    assert _normalize_subject("customers") == "customer"
+    assert _normalize_subject("addresses") == "address"
+    # Compound names with a trailing real plural still singularize:
+    assert _normalize_subject("customer_statuses") == "customer_status"
+
+
+def test_address_and_addresses_fuse_via_merge_key():
+    """The false-positive singularization bug would have made
+    'address' and 'addresses' produce different merge_keys. With the
+    round-trip guard, they normalize to the same form and fuse."""
+    from ontozense.core.ingest.source_d.rule_payload import merge_key
+
+    a = {
+        "rule_kind": "validation", "subject_entity": "Address",
+        "subject_attribute": "city", "predicate": "required",
+        "object_value": True, "condition": None,
+    }
+    b = {
+        "rule_kind": "validation", "subject_entity": "addresses",
+        "subject_attribute": "city", "predicate": "required",
+        "object_value": True, "condition": None,
+    }
+    assert merge_key(a) == merge_key(b), (
+        f"Address (PEP 8) and addresses (SQL plural) must fuse; "
+        f"got {merge_key(a)} vs {merge_key(b)}"
+    )
+
+
+def test_compound_status_names_fuse_singular_and_plural():
+    """customer_status (SQL) and customer_statuses (SQL plural) must
+    produce identical merge_keys. Without the round-trip guard, the
+    singular form was being mangled to 'customer_statu'."""
+    from ontozense.core.ingest.source_d.rule_payload import merge_key
+
+    singular = {
+        "rule_kind": "validation", "subject_entity": "customer_status",
+        "subject_attribute": "state", "predicate": "required",
+        "object_value": True, "condition": None,
+    }
+    plural = {
+        "rule_kind": "validation", "subject_entity": "customer_statuses",
+        "subject_attribute": "state", "predicate": "required",
+        "object_value": True, "condition": None,
+    }
+    assert merge_key(singular) == merge_key(plural)

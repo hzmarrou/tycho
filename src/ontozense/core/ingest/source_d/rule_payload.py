@@ -57,29 +57,55 @@ def validate_rule_payload(p: dict) -> None:
 
 
 def _normalize_subject(name) -> str | None:
-    """Case-fold and singularize a subject_entity / subject_attribute
+    """Case-fold and safely singularize a subject_entity / subject_attribute
     name so cross-source rule identity tolerates conventional naming
-    splits (e.g. Python ``class Loan`` ↔ SQL ``CREATE TABLE loan``,
-    or Pythonic ``credit_scores`` ↔ SQL ``credit_score``).
+    splits (Python ``Loan`` ↔ SQL ``loan``, plural ``loans`` ↔ singular ``loan``).
 
-    Matches the canonicalization that ``candidate_graph.normalize_label``
-    applies to entity/attribute candidates — extends the same discipline
-    to rule identity (spec §11.1 planning decision #5).
+    Safety: ``inflect.singular_noun`` is naive — it strips trailing 's'
+    even from words that aren't plural (``address`` -> ``addres``,
+    ``analysis`` -> ``analysi``). Two guards are applied:
 
-    None passes through as None (anchoring discipline preserves the
-    'unresolved subject' sentinel).
+    1. **Non-plural suffix denylist**: words whose lowercased last
+       segment ends in ``-us``, ``-ss``, or ``-is`` are almost never
+       plurals (status, analysis, address, …). Skip singularisation
+       entirely for these. This mirrors the forward denylist in
+       ``candidate_graph._resolve_alias_with_normalisation``.
+
+    2. **Round-trip guard**: only accept the singular form when
+       ``inflect.plural(singular)`` equals the original. This rejects
+       remaining false-positive singularizations.
+
+    Both guards are required because inflect's round-trip for
+    ``"analysis"`` → ``"analysi"`` passes (``plural("analysi") ==
+    "analysis"``), so the round-trip guard alone is insufficient for
+    -is words.
+
+    This mirrors the v1.1 ``normalize_label`` safety pattern in
+    ``candidate_graph.py``.
+
+    None passes through as None; empty string passes through as "".
     """
     if name is None:
         return None
     s = str(name).strip().lower()
     if not s:
         return s
+    # Guard 1: non-plural suffix denylist (mirrors candidate_graph.py).
+    # Words ending in -us, -ss, -is are almost never true plurals.
+    # Use the last underscore-delimited segment so compound names like
+    # ``customer_status`` are caught by their trailing segment ``status``.
+    last_segment = s.rsplit("_", 1)[-1]
+    NON_PLURAL_SUFFIXES = ("us", "ss", "is")
+    if any(last_segment.endswith(suf) for suf in NON_PLURAL_SUFFIXES):
+        return s
     try:
         import inflect
         engine = inflect.engine()
         singular = engine.singular_noun(s)
-        if singular:
-            s = singular
+        # Guard 2: round-trip check — only accept the singular when
+        # inflect.plural(singular) round-trips back to the original.
+        if singular and engine.plural(singular) == s:
+            return singular
     except Exception:
         # inflect not installed or threw — fall back to case-fold only.
         pass
