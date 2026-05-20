@@ -112,3 +112,41 @@ def test_resolve_constant_returns_unresolved_for_unknown_name():
 def test_resolve_constant_returns_unresolved_for_other_shapes():
     node = ast.parse("some_func()", mode="eval").body
     assert _resolve_constant(node, {}) is _UNRESOLVED
+
+
+from ontozense.core.ingest.source_d.ir import RuleFact
+from ontozense.core.ingest.source_d.procedural_extractor import extract_procedural
+
+
+def test_pattern_d_resolves_module_constant_rhs_in_existing_extractor(tmp_path):
+    """An `if x['amount'] <= THRESHOLD: raise` rule must resolve
+    THRESHOLD against the module-level constant."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "THRESHOLD = 100\n"
+        "def validate_payment(payment):\n"
+        "    if payment['amount'] <= THRESHOLD:\n"
+        "        raise ValueError('too low')\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    rules = [r for r in facts if isinstance(r, RuleFact) and r.subject_attribute == "amount"]
+    assert len(rules) == 1
+    assert rules[0].object_value == 100
+    assert rules[0].predicate == "gt"  # inverted from <=
+
+
+def test_pattern_d_skips_when_constant_unknown(tmp_path):
+    """An unresolved Name RHS still skips emission (the v1.2 behavior)."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def validate_payment(payment):\n"
+        "    if payment['amount'] <= UNKNOWN_THRESHOLD:\n"
+        "        raise ValueError\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    rules = [r for r in facts if isinstance(r, RuleFact)]
+    # No structured rule; only the weak validate_* fallback fires.
+    structured = [r for r in rules if r.subject_attribute == "amount"]
+    assert structured == []

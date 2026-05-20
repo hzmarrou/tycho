@@ -198,7 +198,12 @@ def _extract_eligibility_return(func: ast.FunctionDef, source: str, file: str) -
     )
 
 
-def _extract_function_rules(func: ast.FunctionDef, source: str, file: str) -> Iterable[RuleFact]:
+def _extract_function_rules(
+    func: ast.FunctionDef,
+    constants: dict[str, object],
+    source: str,
+    file: str,
+) -> Iterable[RuleFact]:
     for node in ast.walk(func):
         if isinstance(node, ast.If) and node.body:
             test = node.test
@@ -206,8 +211,8 @@ def _extract_function_rules(func: ast.FunctionDef, source: str, file: str) -> It
                 attr = _key_from_subscript(test.left)
                 if attr is None:
                     continue
-                rhs = test.comparators[0]
-                if not isinstance(rhs, ast.Constant):
+                rhs_value = _resolve_constant(test.comparators[0], constants)
+                if rhs_value is _UNRESOLVED:
                     continue
                 if isinstance(node.body[0], ast.Raise):
                     yield RuleFact(
@@ -215,7 +220,7 @@ def _extract_function_rules(func: ast.FunctionDef, source: str, file: str) -> It
                         subject_entity=None,
                         subject_attribute=attr,
                         predicate=_CMP_INVERSE[type(test.ops[0])],
-                        object_value=rhs.value,
+                        object_value=rhs_value,
                         expression=ast.unparse(test),
                         evidence_span=_span(node, file, source),
                         code_context=f"def {func.name}",
@@ -229,8 +234,10 @@ def _extract_function_rules(func: ast.FunctionDef, source: str, file: str) -> It
                 if (
                     isinstance(first, ast.Assign)
                     and len(first.targets) == 1
-                    and isinstance(first.value, ast.Constant)
                 ):
+                    default_value = _resolve_constant(first.value, constants)
+                    if default_value is _UNRESOLVED:
+                        continue
                     tgt = first.targets[0]
                     # Assignment target must be <same_obj>["<same_key>"]
                     # — otherwise the if-block is doing something other
@@ -246,7 +253,7 @@ def _extract_function_rules(func: ast.FunctionDef, source: str, file: str) -> It
                             subject_entity=None,
                             subject_attribute=key,
                             predicate="default_to",
-                            object_value=first.value.value,
+                            object_value=default_value,
                             expression=ast.unparse(first),
                             evidence_span=_span(node, file, source),
                             code_context=f"def {func.name}",
@@ -301,6 +308,7 @@ def extract_procedural(pm: ParsedModule, config: dict | None = None) -> Iterable
     exclude = list(config.get("exclude_functions", []) or [])
     force = list(config.get("force_rule", []) or [])
     file = str(pm.path)
+    constants = _collect_module_constants(pm)
     for name, func in pm.functions.items():
         # Skip excluded functions entirely (consistent case-insensitive
         # glob behavior with other Source D config keys).
@@ -313,7 +321,7 @@ def extract_procedural(pm: ParsedModule, config: dict | None = None) -> Iterable
             yield elig
             continue
         yielded_any = False
-        for r in _extract_function_rules(func, pm.source, file):
+        for r in _extract_function_rules(func, constants, pm.source, file):
             yielded_any = True
             yield r
         # Transition extraction runs alongside _extract_function_rules
