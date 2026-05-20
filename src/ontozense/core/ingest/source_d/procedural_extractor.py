@@ -355,6 +355,111 @@ def _multi_condition_rule_from_test(
     )
 
 
+def _extract_errors_append_validations(
+    func: ast.FunctionDef,
+    constants: dict[str, object],
+    source: str,
+    file: str,
+) -> Iterable[RuleFact]:
+    """Pattern C: `if <guard>: errors.append(...)` validation pattern.
+
+    Mirrors the existing `if <guard>: raise` extraction in
+    _extract_function_rules but with errors.append as the violation
+    signal. Top-level ifs ONLY — nested ifs are skipped (spec §10).
+
+    Function name must match _VALIDATE_PREFIXES.
+    """
+    if not func.name.startswith(_VALIDATE_PREFIXES):
+        return
+    param_names = {a.arg for a in func.args.args}
+
+    for stmt in func.body:  # TOP-LEVEL ONLY
+        if not isinstance(stmt, ast.If):
+            continue
+        if not _body_is_single_errors_append(stmt.body):
+            continue
+        rule = _validation_rule_from_test(
+            stmt.test, param_names, constants, stmt, func, source, file,
+        )
+        if rule is not None:
+            yield rule
+
+
+def _body_is_single_errors_append(body: list[ast.stmt]) -> bool:
+    """Return True if body is exactly one Expression node whose value
+    is a Call to `<name>.append(...)`."""
+    if len(body) != 1:
+        return False
+    stmt = body[0]
+    if not isinstance(stmt, ast.Expr):
+        return False
+    call = stmt.value
+    if not isinstance(call, ast.Call):
+        return False
+    if not isinstance(call.func, ast.Attribute):
+        return False
+    return call.func.attr == "append"
+
+
+def _validation_rule_from_test(
+    test: ast.expr,
+    param_names: set[str],
+    constants: dict[str, object],
+    if_node: ast.If,
+    func: ast.FunctionDef,
+    source: str,
+    file: str,
+) -> "RuleFact | None":
+    """Turn an `if <test>: errors.append(...)` into a validation RuleFact.
+
+    Polarity (validation = the negation must hold):
+      - `if X: errors.append(...)`          -> (required, False) on X
+      - `if X <op> lit: errors.append(...)` -> (inverted(op), lit) on X
+    """
+    # Bare-subject truthiness branch.
+    if not isinstance(test, ast.Compare):
+        subject = _resolve_subject(test, param_names)
+        if subject is None:
+            return None
+        return RuleFact(
+            rule_kind="validation",
+            subject_entity=None,
+            subject_attribute=subject,
+            predicate="required",
+            object_value=False,
+            expression=ast.unparse(test),
+            evidence_span=_span(if_node, file, source),
+            code_context=f"def {func.name}",
+            confidence=0.8,
+            extractor_family="procedural",
+        )
+
+    # Comparison branch.
+    if len(test.ops) != 1:
+        return None
+    op_type = type(test.ops[0])
+    if op_type not in _CMP_INVERSE:
+        return None
+    subject = _resolve_subject(test.left, param_names)
+    if subject is None:
+        return None
+    rhs_value = _resolve_constant(test.comparators[0], constants)
+    if rhs_value is _UNRESOLVED:
+        return None
+    return RuleFact(
+        rule_kind="validation",
+        subject_entity=None,
+        subject_attribute=subject,
+        predicate=_CMP_INVERSE[op_type],
+        object_value=rhs_value,
+        expression=ast.unparse(test),
+        evidence_span=_span(if_node, file, source),
+        code_context=f"def {func.name}",
+        confidence=0.8,
+        extractor_family="procedural",
+    )
+
+
 def _extract_function_rules(
     func: ast.FunctionDef,
     constants: dict[str, object],
@@ -477,13 +582,17 @@ def extract_procedural(pm: ParsedModule, config: dict | None = None) -> Iterable
             yield from multi
             yield from _extract_transition_assigns_procedural(func, pm.source, file)
             continue
+        # Pattern C: validate_*/check_*/assert_* with errors.append(...) sites.
+        yielded_any = False
+        for r in _extract_errors_append_validations(func, constants, pm.source, file):
+            yielded_any = True
+            yield r
         # Eligibility path: is_*/can_*/may_*/should_*/must_* with
         # simple `return <Compare>` body.
         elig = _extract_eligibility_return(func, pm.source, file)
         if elig is not None:
             yield elig
             continue
-        yielded_any = False
         for r in _extract_function_rules(func, constants, pm.source, file):
             yielded_any = True
             yield r

@@ -343,3 +343,85 @@ def test_pattern_b_negated_bare_name_polarity(tmp_path):
     assert r.subject_attribute == "is_active"
     assert r.predicate == "required"
     assert r.object_value is False
+
+
+# ---------------------------------------------------------------------------
+# Task 5 — Pattern C (errors.append validation extraction)
+# ---------------------------------------------------------------------------
+
+
+def test_pattern_c_emits_validation_per_top_level_errors_append(tmp_path):
+    """`if X <op> lit: errors.append(...)` at top level emits a
+    validation rule with the inverted predicate."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def validate_payment(payment):\n"
+        "    errors = []\n"
+        "    if payment['amount'] <= 0:\n"
+        "        errors.append('amount must be positive')\n"
+        "    return errors\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    vals = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "validation"]
+    assert len(vals) == 1
+    r = vals[0]
+    assert r.subject_attribute == "amount"
+    assert r.predicate == "gt"  # inverted from <=
+    assert r.object_value == 0
+
+
+def test_pattern_c_bare_param_attribute_truthiness(tmp_path):
+    """`if X: errors.append(...)` with bare-attr LHS emits
+    (required, False) — X must NOT be truthy."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def validate_event(event):\n"
+        "    errors = []\n"
+        "    if event.is_suspicious:\n"
+        "        errors.append('suspicious')\n"
+        "    return errors\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    vals = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "validation"]
+    assert len(vals) == 1
+    assert vals[0].subject_attribute == "is_suspicious"
+    assert vals[0].predicate == "required"
+    assert vals[0].object_value is False
+
+
+def test_pattern_c_skips_nested_under_guard(tmp_path):
+    """`if outer: if inner: errors.append(...)` is SKIPPED entirely
+    — neither inner nor outer rule is emitted (false-promotion
+    avoidance per spec §10)."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def validate(event, loan):\n"
+        "    errors = []\n"
+        "    if loan.was_non_performing_at(event.start_date):\n"
+        "        if event.classification == 'performing_forborne':\n"
+        "            errors.append('illegal')\n"
+        "    return errors\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    vals = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "validation"]
+    assert vals == []
+
+
+def test_pattern_c_skips_non_validate_function_name(tmp_path):
+    """Functions outside _VALIDATE_PREFIXES don't trigger Pattern C
+    even if they use errors.append."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def normalize(payment):\n"
+        "    errors = []\n"
+        "    if payment['amount'] <= 0:\n"
+        "        errors.append('bad')\n"
+        "    return errors\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    vals = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "validation"]
+    assert vals == []
