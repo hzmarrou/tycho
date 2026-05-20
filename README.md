@@ -200,10 +200,51 @@ ontozense draft \
 
 For the underlying pipeline commands (`extract-a`, `fuse`, `validate`, `lint`, etc.) run by hand — for CI pipelines or fine-grained control — see [Advanced — running the pipeline by hand](#advanced--running-the-pipeline-by-hand) below.
 
-Two NPL (Non-Performing Loans) walkthroughs are available:
+Three NPL (Non-Performing Loans) walkthroughs are available:
 
+- [**docs/ontozense-npl-tutorial.md**](docs/ontozense-npl-tutorial.md) — the bundled-distribution walkthrough. Works against the curated layout produced by `python scripts/export_tycho_public.py` (see [Packaging](#packaging)) and against a dev checkout.
 - [**docs/ontozense-npl-validation.md**](docs/ontozense-npl-validation.md) — step-by-step tutorial for a brand-new user, starting from `git clone`. Covers both the discovery workflow and the profile-aware pipeline, with concrete `✓ Expected` checkpoints.
 - [**docs/ontozense-npl-advanced.md**](docs/ontozense-npl-advanced.md) — power-user reference; runs each underlying command in isolation. Useful for CI pipelines or fine-grained control.
+
+## Packaging
+
+Tycho uses a **two-branch model** so the GitHub-facing version stays clean while local development keeps the full repo (tests, internal design docs, scratch files):
+
+- **`main`** — full repo. You work here. Pushed to GitHub for collaborators, but not the default visitors see.
+- **`public`** — curated subset: runtime + NPL example + user-facing tutorial only. This is the GitHub default branch; what visitors see when they land on the repo.
+
+### Daily workflow
+
+After you push `main` as usual, sync the `public` branch:
+
+```bash
+git push origin main
+python scripts/publish_public_branch.py
+```
+
+The publish script:
+1. Rebuilds the curated bundle (`dist/tycho-public/`).
+2. Replaces the contents of the `public` branch with that bundle.
+3. Commits and pushes `public`.
+
+Your `main` worktree is never touched — the sync happens in a temp worktree under `.worktrees/public-sync/` that's cleaned up afterwards.
+
+### First-time setup
+
+1. Run `python scripts/publish_public_branch.py` once. This creates the `public` branch as an orphan and pushes it.
+2. On GitHub → Settings → Branches, change the default branch to `public`.
+
+After that, https://github.com/hzmarrou/tycho shows the curated version by default. `main` is still available via the branch picker.
+
+### One-off bundle (no branch sync)
+
+If you just want the curated folder locally (no GitHub push), run only the export step:
+
+```bash
+python scripts/export_tycho_public.py
+```
+
+It writes to `dist/tycho-public/` (gitignored) and stops there.
 
 ## Advanced — running the pipeline by hand
 
