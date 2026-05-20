@@ -43,6 +43,43 @@ _DIRECT_CMP = {
 
 _TRANSITION_FIELD_NAMES = frozenset({"status", "state", "phase", "stage", "lifecycle_state"})
 
+_UNRESOLVED = object()
+
+
+def _collect_module_constants(pm: ParsedModule) -> dict[str, object]:
+    """Return {name: value} for top-level `<Name> = <Constant>` assignments.
+
+    Scans only direct children of pm.tree.body. Ignores:
+      - Tuple-unpacking targets (`A, B = 1, 2`).
+      - Non-Constant RHS values (`X = func()`, `Y = 1 + 2`).
+      - Annotated assignments without a value.
+      - Nested assignments inside functions or classes.
+    """
+    out: dict[str, object] = {}
+    for stmt in pm.tree.body:
+        if not isinstance(stmt, ast.Assign):
+            continue
+        if len(stmt.targets) != 1:
+            continue
+        target = stmt.targets[0]
+        if not isinstance(target, ast.Name):
+            continue
+        if not isinstance(stmt.value, ast.Constant):
+            continue
+        out[target.id] = stmt.value.value
+    return out
+
+
+def _resolve_constant(node: ast.expr, constants: dict[str, object]) -> object:
+    """Return the constant value for an ast.Constant or for an ast.Name
+    that maps to a module-level constant. Returns _UNRESOLVED for any
+    other shape (so callers can reject the case)."""
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name) and node.id in constants:
+        return constants[node.id]
+    return _UNRESOLVED
+
 
 def _resolve_subject(expr: ast.expr, param_names: set[str]) -> str | None:
     """Return the subject_attribute name for a valid LHS shape, else None.
