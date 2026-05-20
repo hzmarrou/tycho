@@ -1,0 +1,128 @@
+[
+  {
+    "domain_name": "Risk Management",
+    "element_name": "Borrower",
+    "definition": "A sub-class of Counterparty that applies to lending relations. The party that receives funds under a credit agreement and is obligated to repay.",
+    "is_critical": true,
+    "citation": "data marketplace"
+  },
+  {
+    "domain_name": "Risk Management",
+    "element_name": "Collateral",
+    "definition": "An asset or property pledged by a borrower to secure a loan. If the borrower defaults, the lender may seize the collateral to recover losses.",
+    "is_critical": true,
+    "citation": "data marketplace"
+  },
+  {
+    "domain_name": "Risk Management",
+    "element_name": "Collection Agent",
+    "definition": "An entity appointed to recover outstanding debts on behalf of the lender, typically engaged when internal collection efforts have been exhausted.",
+    "is_critical": false,
+    "citation": "data marketplace"
+  },
+  {
+    "domain_name": "Risk Management",
+    "element_name": "Corporate Borrower",
+    "definition": "A sub-class of Borrower that applies to corporations. A legal entity that has entered into a credit agreement.",
+    "is_critical": true,
+    "citation": "data marketplace"
+  },
+  {
+    "domain_name": "Risk Management",
+    "element_name": "Corporate Loan",
+    "definition": "A loan extended to a corporate entity, typically with terms negotiated based on the corporation's creditworthiness and financial position.",
+    "is_critical": true,
+    "citation": "data marketplace"
+  },
+  {
+    "domain_name": "Risk Management",
+    "element_name": "Counterparty",
+    "definition": "A general party to a financial transaction or contract. In the NPL context, the entity that owes an obligation under a credit arrangement.",
+    "is_critical": true,
+    "citation": "data marketplace"
+  },
+  {
+    "domain_name": "Risk Management",
+    "element_name": "Counterparty Group",
+    "definition": "A set of counterparties that are connected through ownership, control, or economic interdependence, treated as a single risk unit for credit assessment purposes.",
+    "is_critical": true,
+    "citation": "data marketplace"
+  },
+  {
+    "domain_name": "Risk Management",
+    "element_name": "Enforcement",
+    "definition": "The legal process by which a lender exercises its rights to recover amounts owed, including seizure of collateral, court proceedings, or insolvency actions.",
+    "is_critical": true,
+    "citation": "data marketplace"
+  },
+  {
+    "domain_name": "Risk Management",
+    "element_name": "External Collection",
+    "definition": "The outsourcing of debt recovery activities to a third-party collection agent or agency.",
+    "is_critical": false,
+    "citation": "data marketplace"
+  },
+  {
+    "domain_name": "Risk Management",
+    "element_name": "Forbearance",
+    "definition": "A concession granted to a counterparty experiencing financial difficulty that the lender would not otherwise consider, such as payment holidays, term extensions, or reduced interest rates.",
+    "is_critical": true,
+    "citation": "data marketplace"
+  },
+  {
+    "domain_name": "Risk Management",
+    "element_name": "Individual Borrower",
+    "definition": "A sub-class of Borrower that applies to natural persons. An individual who has entered into a credit agreement.",
+    "is_critical": true,
+    "citation": "data marketplace"
+  },
+  {
+    "domain_name": "Risk Management",
+    "element_name": "Insolvency Practitioner",
+    "definition": "A licensed professional appointed to manage insolvency proceedings, including liquidation, administration, or voluntary arrangements.",
+    "is_critical": false,
+    "citation": "data marketplace"
+  },
+  {
+    "domain_name": "Risk Management",
+    "element_name": "Insurance Provider",
+    "definition": "An entity that provides insurance coverage related to credit risk, such as mortgage insurance or credit default insurance.",
+    "is_critical": false,
+    "citation": "data marketplace"
+  },
+  {
+    "domain_name": "Risk Management",
+    "element_name": "Loan",
+    "definition": "A financial instrument representing funds advanced by a lender to a borrower under agreed terms, including principal amount, interest rate, maturity, and repayment schedule.",
+    "is_critical": true,
+    "citation": "data marketplace"
+  },
+  {
+    "domain_name": "Risk Management",
+    "element_name": "Personal Loan",
+    "definition": "A loan extended to an individual borrower, typically unsecured or secured by personal assets rather than real property.",
+    "is_critical": true,
+    "citation": "data marketplace"
+  },
+  {
+    "domain_name": "Risk Management",
+    "element_name": "Property Collateral",
+    "definition": "Real estate or property pledged as security for a loan. The most common form of collateral for mortgage lending.",
+    "is_critical": true,
+    "citation": "data marketplace"
+  },
+  {
+    "domain_name": "Risk Management",
+    "element_name": "Rating Agency",
+    "definition": "A credit rating agency that assesses the creditworthiness of counterparties, providing standardised risk ratings used in credit decisions.",
+    "is_critical": false,
+    "citation": "data marketplace"
+  },
+  {
+    "domain_name": "Risk Management",
+    "element_name": "Receiver",
+    "definition": "A person or entity appointed by a court or creditor to take control of a debtor's assets during enforcement or insolvency proceedings.",
+    "is_critical": false,
+    "citation": "data marketplace"
+  }
+]

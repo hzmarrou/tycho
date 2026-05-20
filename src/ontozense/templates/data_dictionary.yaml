@@ -1,0 +1,118 @@
+id: http://w3id.org/ontozense/data_dictionary
+name: data_dictionary
+title: Data Dictionary Extraction Template
+description: >-
+  Extract data elements from authoritative domain documents — any prose-shaped
+  document the domain experts treat as canonical (formal regulations, internal
+  policies, academic papers, industry standards, vendor specifications, white
+  papers, technical guidelines). Each data element represents a reportable
+  field with its definition, criticality, citation, and data quality rules.
+  The structure mirrors the columns of a typical enterprise data dictionary.
+license: https://creativecommons.org/publicdomain/zero/1.0/
+
+prefixes:
+  rdf: http://www.w3.org/1999/02/22-rdf-syntax-ns#
+  ddict: http://w3id.org/ontozense/data_dictionary/
+  linkml: https://w3id.org/linkml/
+
+default_prefix: ddict
+default_range: string
+
+imports:
+  - linkml:types
+
+classes:
+  DataDictionaryExtraction:
+    tree_root: true
+    description: >-
+      A collection of data elements extracted from one document, all belonging
+      to a single domain or sub-domain.
+    attributes:
+      domain_name:
+        description: >-
+          The high-level business domain or sub-domain this document describes.
+          Use a noun phrase that names the area of business knowledge covered
+          by the document. Use the most specific domain name supported by the
+          text.
+      data_elements:
+        description: >-
+          A list of data elements (reportable fields, attributes, or variables)
+          that the document EXPLICITLY DEFINES or formally specifies. Include
+          an element only if the document provides at least one of: a definition,
+          a value range or enumeration, a data quality rule, an authoritative
+          requirement, or an explicit field-level reference. DO NOT include
+          terms that are only mentioned casually in passing without any
+          definitional content.
+        range: DataElement
+        multivalued: true
+        inlined: true
+        inlined_as_list: true
+
+  DataElement:
+    description: >-
+      A single data element corresponding to one row in a data dictionary.
+      Each element represents a field that exists (or should exist) in some
+      data store and that has business meaning defined by the source document.
+    attributes:
+      element_name:
+        identifier: true
+        description: >-
+          The canonical name of the data element as referenced in the document.
+          Use the most natural human-readable form appearing in the text.
+      sub_domain:
+        description: >-
+          A categorization of where this data element belongs within the domain.
+          Use a noun phrase that groups related elements (the entity, object,
+          process, or area the element describes). The model should choose the
+          most specific category supported by the text.
+      definition:
+        description: >-
+          The definition of this data element as stated in the document.
+          Quote or closely paraphrase the source text. Do NOT invent a definition
+          if none is given - leave empty in that case.
+      term_definition:
+        description: >-
+          The formal authoritative, industry-standard, or glossary term
+          definition if one is provided in the text. May be the same as
+          `definition` if no formal version exists.
+      is_critical:
+        description: >-
+          Whether this is a Critical Data Element under the source document's
+          governance, authoritative, or policy framework. Use exactly "Y" if the
+          document indicates the element is critical or mandatory; "N" if
+          explicitly non-critical; empty if not stated.
+      citation:
+        description: >-
+          The specific section, paragraph, article, or field reference within
+          the source document that defines this element. Quote the reference
+          verbatim from the source (e.g. "Section 3.1 Paragraph 14",
+          "Article 178", "Annex II Table F18").
+      mandatory_optional:
+        description: >-
+          Whether this data element is Mandatory ("M") or Optional ("O") to
+          report or populate. Empty if not stated in the text.
+      dq_completeness:
+        description: >-
+          Completeness rules - when this element must be filled in, what scope
+          of records it applies to, and any conditional requirements.
+      dq_accuracy:
+        description: >-
+          Accuracy requirements or business rules that determine whether the
+          value represents reality (real-world agreement, validation rules,
+          calculation formulas).
+      dq_uniqueness:
+        description: >-
+          Uniqueness or deduplication rules - constraints on duplicate values,
+          one-per-record rules, or cardinality requirements.
+      dq_timeliness:
+        description: >-
+          Timeliness or retention requirements - when the data must be
+          available, how fresh it must be, retention periods.
+      dq_consistency:
+        description: >-
+          Consistency rules across systems, time periods, or related data
+          elements. Cross-reference or reconciliation requirements.
+      dq_validity:
+        description: >-
+          Validity rules - allowed value sets, format constraints, domain
+          ranges, enumerations, or pattern requirements.
