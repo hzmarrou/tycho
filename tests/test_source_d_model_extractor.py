@@ -188,3 +188,42 @@ def test_model_extractor_extracts_self_attr_against_literal(tmp_path):
         and r.predicate == "gte" and r.object_value == 0
         for r in rules
     )
+
+
+def test_model_extractor_extracts_eligibility_method(tmp_path):
+    """A class method named `is_*`/`can_*`/etc. with `return <Compare>` body
+    emits an eligibility RuleFact anchored to the class."""
+    f = tmp_path / "f.py"
+    f.write_text(
+        "class Loan:\n"
+        "    credit_score: int\n"
+        "    def is_eligible(self):\n"
+        "        return self.credit_score >= 500\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_model(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    assert len(elig) == 1
+    r = elig[0]
+    assert r.subject_entity == "Loan"
+    assert r.subject_attribute == "credit_score"
+    assert r.predicate == "gte"
+    assert r.object_value == 500
+
+
+def test_model_extractor_eligibility_still_emits_behavior_fact(tmp_path):
+    """The eligibility extraction is additive — the method also produces
+    a BehaviorFact, so downstream consumers see the method exists."""
+    f = tmp_path / "f.py"
+    f.write_text(
+        "class Loan:\n"
+        "    credit_score: int\n"
+        "    def is_eligible(self):\n"
+        "        return self.credit_score >= 500\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_model(pm))
+    behaviors = [b for b in facts if isinstance(b, BehaviorFact) and b.name == "is_eligible"]
+    rules = [r for r in facts if isinstance(r, RuleFact)]
+    assert len(behaviors) == 1
+    assert len(rules) == 1

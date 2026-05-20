@@ -128,3 +128,79 @@ def test_procedural_defaulting_skips_mismatched_object(tmp_path):
     facts = list(extract_procedural(pm))
     rules = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "defaulting"]
     assert rules == [], f"mismatched-object default must not emit: {rules}"
+
+
+def test_procedural_extracts_eligibility_rule_from_is_prefix(tmp_path):
+    """`def is_eligible(borrower): return borrower["credit_score"] >= 500`
+    must emit an eligibility rule on credit_score with predicate gte, value 500.
+    Direct op mapping — the comparison IS the eligibility predicate."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "def is_eligible(borrower):\n"
+        "    return borrower['credit_score'] >= 500\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    assert len(elig) == 1
+    r = elig[0]
+    assert r.subject_attribute == "credit_score"
+    assert r.predicate == "gte"
+    assert r.object_value == 500
+    assert r.confidence == 0.85
+
+
+def test_procedural_eligibility_supports_can_may_should_must_prefixes(tmp_path):
+    """All five eligibility prefixes (is_, can_, may_, should_, must_)
+    are recognised."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "def can_approve(loan):\n"
+        "    return loan['amount'] > 0\n"
+        "def may_proceed(req):\n"
+        "    return req['score'] >= 700\n"
+        "def should_retry(ctx):\n"
+        "    return ctx['attempts'] < 3\n"
+        "def must_validate(payment):\n"
+        "    return payment['total'] > 0\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    assert len(elig) == 4
+    by_attr = {r.subject_attribute for r in elig}
+    assert by_attr == {"amount", "score", "attempts", "total"}
+
+
+def test_procedural_eligibility_skips_when_body_is_not_a_simple_compare_return(tmp_path):
+    """Eligibility extraction requires a single `return <Compare>` body.
+    Multi-statement bodies or non-comparison returns don't qualify."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "def is_complex(x):\n"
+        "    y = x * 2\n"
+        "    return y > 0\n"
+        "def is_constant(x):\n"
+        "    return True\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    assert elig == [], f"non-simple bodies must not emit; got {elig}"
+
+
+def test_procedural_eligibility_does_not_double_emit_validation(tmp_path):
+    """A function matching the eligibility prefix that ALSO has an internal
+    `if/raise` guard must NOT produce both an eligibility and a validation
+    rule for the same condition. Eligibility short-circuits the validate path."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "def is_valid(payment):\n"
+        "    return payment['amount'] > 0\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_procedural(pm))
+    rules = [r for r in facts if isinstance(r, RuleFact)]
+    # Exactly one rule — the eligibility one.
+    assert len(rules) == 1
+    assert rules[0].rule_kind == "eligibility"

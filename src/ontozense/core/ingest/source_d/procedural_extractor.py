@@ -31,6 +31,16 @@ _CMP_INVERSE = {
 
 _VALIDATE_PREFIXES = ("validate_", "check_", "assert_")
 
+_ELIGIBILITY_PREFIXES = ("is_", "can_", "may_", "should_", "must_")
+
+# Direct (NOT inverted) op mapping for eligibility return predicates.
+# The function returns True when the comparison holds — that IS the
+# eligibility condition. Same convention as pipeline boolean masks.
+_DIRECT_CMP = {
+    ast.Lt: "lt", ast.LtE: "lte", ast.Gt: "gt", ast.GtE: "gte",
+    ast.Eq: "eq", ast.NotEq: "neq",
+}
+
 
 def _span(node: ast.AST, file: str, source: str) -> EvidenceSpan:
     start = getattr(node, "lineno", 1)
@@ -62,6 +72,51 @@ def _is_get_is_none(test: ast.expr) -> tuple[str, str] | None:
             obj_repr = ast.unparse(left.func.value)
             return obj_repr, left.args[0].value
     return None
+
+
+def _extract_eligibility_return(func: ast.FunctionDef, source: str, file: str) -> "RuleFact | None":
+    """If ``func`` has an eligibility-prefixed name AND its body is a single
+    ``return <Compare>`` over a subscript or self-attribute with a literal RHS,
+    return an eligibility RuleFact. Otherwise None."""
+    if not func.name.startswith(_ELIGIBILITY_PREFIXES):
+        return None
+    # Body should be a single Return whose value is a Compare.
+    # Allow leading docstring / module-level constants would be unusual
+    # in a function body, so just check the last statement.
+    if not func.body:
+        return None
+    last = func.body[-1]
+    if not isinstance(last, ast.Return) or not isinstance(last.value, ast.Compare):
+        return None
+    cmp = last.value
+    if len(cmp.ops) != 1:
+        return None
+    op = type(cmp.ops[0])
+    if op not in _DIRECT_CMP:
+        return None
+    rhs = cmp.comparators[0]
+    if not isinstance(rhs, ast.Constant):
+        return None
+    # LHS: subscript <param>["<field>"] OR bare ast.Name (param name).
+    lhs = cmp.left
+    attr: str | None = None
+    if isinstance(lhs, ast.Subscript) and isinstance(lhs.slice, ast.Constant) and isinstance(lhs.slice.value, str):
+        attr = lhs.slice.value
+    # Skip bare-name LHS in procedural — same discipline as Task 9 fix.
+    if attr is None:
+        return None
+    return RuleFact(
+        rule_kind="eligibility",
+        subject_entity=None,
+        subject_attribute=attr,
+        predicate=_DIRECT_CMP[op],
+        object_value=rhs.value,
+        expression=ast.unparse(cmp),
+        evidence_span=_span(func, file, source),
+        code_context=f"def {func.name}",
+        confidence=0.85,
+        extractor_family="procedural",
+    )
 
 
 def _extract_function_rules(func: ast.FunctionDef, source: str, file: str) -> Iterable[RuleFact]:
@@ -130,6 +185,12 @@ def extract_procedural(pm: ParsedModule, config: dict | None = None) -> Iterable
         # Skip excluded functions entirely (consistent case-insensitive
         # glob behavior with other Source D config keys).
         if exclude and glob_match(name, exclude):
+            continue
+        # Eligibility path: is_*/can_*/may_*/should_*/must_* with
+        # simple `return <Compare>` body.
+        elig = _extract_eligibility_return(func, pm.source, file)
+        if elig is not None:
+            yield elig
             continue
         yielded_any = False
         for r in _extract_function_rules(func, pm.source, file):

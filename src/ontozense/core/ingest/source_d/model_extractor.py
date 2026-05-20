@@ -224,6 +224,9 @@ def extract_model(pm: ParsedModule, config: dict | None = None) -> Iterable[obje
                     extractor_family="model",
                 )
                 yield from _extract_inline_rules(cls_name, stmt, pm.source, file)
+                elig = _extract_eligibility_method(cls_name, stmt, pm.source, file)
+                if elig is not None:
+                    yield elig
             elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name == "__init__":
                 yield from _extract_inline_rules(cls_name, stmt, pm.source, file)
 
@@ -240,11 +243,63 @@ _CMP_INVERSE: dict[type, str] = {
     ast.NotEq: "eq",
 }
 
+_ELIGIBILITY_PREFIXES = ("is_", "can_", "may_", "should_", "must_")
+
+# Direct (NOT inverted) — same as procedural_extractor.
+_DIRECT_CMP = {
+    ast.Lt: "lt", ast.LtE: "lte", ast.Gt: "gt", ast.GtE: "gte",
+    ast.Eq: "eq", ast.NotEq: "neq",
+}
+
 
 def _literal_value(node: ast.expr):
     if isinstance(node, ast.Constant):
         return node.value
     return None
+
+
+def _extract_eligibility_method(cls_name: str, method: ast.FunctionDef, source: str, file: str) -> "RuleFact | None":
+    """Detect ``def is_*/can_*/may_*/should_*/must_*(self, ...): return <Compare>``
+    inside a class. The Compare's LHS may be ``self.<attr>``, a subscript
+    ``<param>["<field>"]``, or a bare param name (last param) — the latter
+    only if the method is bound via @field_validator (rare for eligibility
+    but symmetric with Task 9's discipline)."""
+    if not method.name.startswith(_ELIGIBILITY_PREFIXES):
+        return None
+    if not method.body:
+        return None
+    last = method.body[-1]
+    if not isinstance(last, ast.Return) or not isinstance(last.value, ast.Compare):
+        return None
+    cmp = last.value
+    if len(cmp.ops) != 1:
+        return None
+    op = type(cmp.ops[0])
+    if op not in _DIRECT_CMP:
+        return None
+    rhs = cmp.comparators[0]
+    if not isinstance(rhs, ast.Constant):
+        return None
+    lhs = cmp.left
+    attr: str | None = None
+    if isinstance(lhs, ast.Attribute) and isinstance(lhs.value, ast.Name) and lhs.value.id == "self":
+        attr = lhs.attr
+    elif isinstance(lhs, ast.Subscript) and isinstance(lhs.slice, ast.Constant) and isinstance(lhs.slice.value, str):
+        attr = lhs.slice.value
+    if attr is None:
+        return None
+    return RuleFact(
+        rule_kind="eligibility",
+        subject_entity=cls_name,
+        subject_attribute=attr,
+        predicate=_DIRECT_CMP[op],
+        object_value=rhs.value,
+        expression=ast.unparse(cmp),
+        evidence_span=_span(method, file, source),
+        code_context=f"class {cls_name}, def {method.name}",
+        confidence=0.85,
+        extractor_family="model",
+    )
 
 
 def _decorator_field_name(deco: ast.expr) -> str | None:
