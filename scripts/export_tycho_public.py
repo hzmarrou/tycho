@@ -53,6 +53,9 @@ MANIFEST: list[tuple[str, str, str]] = [
     # Project metadata + entry doc.
     ("pyproject.toml", "pyproject.toml", "file"),
     ("README.md", "README.md", "file"),
+    # README references this single image; ship it so the public README
+    # renders correctly on GitHub. Other images under images/ are dev-only.
+    ("images/tycho.png", "images/tycho.png", "file"),
     # User-facing tutorial.
     (
         "docs/ontozense-npl-tutorial.md",
@@ -172,6 +175,7 @@ def _verify_tutorial_paths(output: Path) -> list[str]:
         "src/ontozense/__init__.py",
         "pyproject.toml",
         "README.md",
+        "images/tycho.png",
     ]
     return [p for p in expected if not (output / p).exists()]
 
