@@ -99,10 +99,20 @@ def _extract_eligibility_return(func: ast.FunctionDef, source: str, file: str) -
     rhs = cmp.comparators[0]
     if not isinstance(rhs, ast.Constant):
         return None
-    # LHS: subscript <param>["<field>"] OR bare ast.Name (param name).
+    # LHS: subscript <param>["<field>"] — receiver must be a function parameter.
+    # Module-level constants (e.g. THRESHOLDS["x"]) are rejected because THRESHOLDS
+    # is not in param_names. self.config["x"] is also rejected because lhs.value is
+    # ast.Attribute, not ast.Name. (Spec §4.4, §9.2.)
     lhs = cmp.left
     attr: str | None = None
-    if isinstance(lhs, ast.Subscript) and isinstance(lhs.slice, ast.Constant) and isinstance(lhs.slice.value, str):
+    param_names = {a.arg for a in func.args.args}
+    if (
+        isinstance(lhs, ast.Subscript)
+        and isinstance(lhs.slice, ast.Constant)
+        and isinstance(lhs.slice.value, str)
+        and isinstance(lhs.value, ast.Name)
+        and lhs.value.id in param_names
+    ):
         attr = lhs.slice.value
     # Skip bare-name LHS in procedural — same discipline as Task 9 fix.
     if attr is None:
@@ -180,7 +190,12 @@ def _extract_function_rules(func: ast.FunctionDef, source: str, file: str) -> It
 
 def _extract_transition_assigns_procedural(func: ast.FunctionDef, source: str, file: str):
     """Yield RuleFacts for `if <guard>: <obj>["<status_field>"] = <literal>`
-    in procedural code. Status field name must match the closed list."""
+    in procedural code. Status field name must match the closed list.
+    The subscript receiver must be a function parameter — module-level
+    constants (e.g. CONFIG["status"]) are rejected. (Spec §4.4, §9.2.)
+    The guard expression is captured as `condition` so that different
+    guards on the same field produce distinct merge_keys. (Spec §11.1.)"""
+    param_names = {a.arg for a in func.args.args}  # compute once per function
     for node in ast.walk(func):
         if not (isinstance(node, ast.If) and node.body):
             continue
@@ -193,6 +208,8 @@ def _extract_transition_assigns_procedural(func: ast.FunctionDef, source: str, f
                 and isinstance(tgt.slice, ast.Constant)
                 and isinstance(tgt.slice.value, str)
                 and tgt.slice.value in _TRANSITION_FIELD_NAMES
+                and isinstance(tgt.value, ast.Name)
+                and tgt.value.id in param_names
             ):
                 continue
             if not isinstance(stmt.value, ast.Constant):
@@ -203,6 +220,7 @@ def _extract_transition_assigns_procedural(func: ast.FunctionDef, source: str, f
                 subject_attribute=tgt.slice.value,
                 predicate="transitions_to",
                 object_value=stmt.value.value,
+                condition=ast.unparse(node.test),
                 expression=ast.unparse(stmt),
                 evidence_span=_span(node, file, source),
                 code_context=f"def {func.name}",

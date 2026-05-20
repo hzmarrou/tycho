@@ -238,3 +238,61 @@ def test_procedural_transition_ignores_non_status_subscript_assigns(tmp_path):
     facts = list(extract_procedural(pm))
     trans = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "transition"]
     assert trans == []
+
+
+def test_procedural_eligibility_rejects_module_level_constant_receiver(tmp_path):
+    """A subscript on a module-level constant (e.g. THRESHOLDS) is NOT
+    a subject-bearing reference. The receiver must be a function
+    parameter — per spec §4.4 (suppress ambiguity over-promote noise)
+    and §9.2 (no rules inferred only from names)."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "THRESHOLDS = {'credit_score': 500}\n"
+        "def is_eligible(borrower):\n"
+        "    return THRESHOLDS['credit_score'] >= 500\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_procedural(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    assert elig == [], f"module-level constant receiver must not emit: {elig}"
+
+
+def test_procedural_transition_rejects_module_level_constant_receiver(tmp_path):
+    """`if cond: CONFIG['status'] = 'PAID'` must NOT emit a transition
+    rule — CONFIG is a module-level constant, not a domain object."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "CONFIG = {}\n"
+        "def settle(approved):\n"
+        "    if approved:\n"
+        "        CONFIG['status'] = 'PAID'\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_procedural(pm))
+    trans = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "transition"]
+    assert trans == [], f"module-level constant target must not emit: {trans}"
+
+
+def test_procedural_transitions_with_different_guards_do_not_merge(tmp_path):
+    """Two transitions on the same field with DIFFERENT guards must
+    produce two distinct rules — `condition` is part of merge identity
+    per spec §11.1. Without this, `if approved: status='PAID'` and
+    `if waived: status='PAID'` would collapse."""
+    f = tmp_path / "p.py"
+    f.write_text(
+        "def settle(payment, approved, waived):\n"
+        "    if approved:\n"
+        "        payment['status'] = 'PAID'\n"
+        "    if waived:\n"
+        "        payment['status'] = 'PAID'\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_procedural(pm))
+    trans = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "transition"]
+    assert len(trans) == 2, f"expected two distinct transitions; got {len(trans)}"
+    conditions = {r.condition for r in trans}
+    assert conditions == {"approved", "waived"}, f"got conditions: {conditions}"
+    # Different merge_keys.
+    from ontozense.core.ingest.source_d.rule_payload import merge_key
+    keys = {merge_key(r.to_payload()) for r in trans}
+    assert len(keys) == 2, "different guards must produce different merge_keys"

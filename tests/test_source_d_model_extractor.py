@@ -294,3 +294,64 @@ def test_model_extractor_transition_ignores_non_status_field_assigns(tmp_path):
     facts = list(extract_model(pm))
     trans = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "transition"]
     assert trans == [], "non-status-named field assigns must not be transitions"
+
+
+def test_model_eligibility_rejects_module_level_constant_receiver(tmp_path):
+    """A subscript on a module-level constant is not a subject-bearing
+    reference even from within a method."""
+    f = tmp_path / "f.py"
+    f.write_text(
+        "THRESHOLDS = {'credit_score': 500}\n"
+        "class Loan:\n"
+        "    credit_score: int\n"
+        "    def is_eligible(self):\n"
+        "        return THRESHOLDS['credit_score'] >= 500\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_model(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    assert elig == [], f"module-level constant receiver must not emit: {elig}"
+
+
+def test_model_transitions_with_different_guards_do_not_merge(tmp_path):
+    """Different guards on the same self.status assignment produce
+    distinct rules — condition is part of merge identity."""
+    f = tmp_path / "f.py"
+    f.write_text(
+        "class Loan:\n"
+        "    status: str\n"
+        "    def update(self, approved, waived):\n"
+        "        if approved:\n"
+        "            self.status = 'APPROVED'\n"
+        "        if waived:\n"
+        "            self.status = 'APPROVED'\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_model(pm))
+    trans = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "transition"]
+    assert len(trans) == 2, f"expected two distinct transitions; got {len(trans)}"
+    conditions = {r.condition for r in trans}
+    assert conditions == {"approved", "waived"}
+    from ontozense.core.ingest.source_d.rule_payload import merge_key
+    keys = {merge_key(r.to_payload()) for r in trans}
+    assert len(keys) == 2, "different guards must produce different merge_keys"
+
+
+def test_model_eligibility_via_method_parameter_subscript_still_works(tmp_path):
+    """A method that takes a non-self parameter and subscripts INTO it
+    is a valid eligibility pattern. The receiver IS a parameter."""
+    f = tmp_path / "f.py"
+    f.write_text(
+        "class PolicyChecker:\n"
+        "    def is_eligible(self, applicant):\n"
+        "        return applicant['credit_score'] >= 500\n"
+    )
+    pm = parse_module(f)
+    facts = list(extract_model(pm))
+    elig = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "eligibility"]
+    assert len(elig) == 1
+    r = elig[0]
+    assert r.subject_entity == "PolicyChecker"
+    assert r.subject_attribute == "credit_score"
+    assert r.predicate == "gte"
+    assert r.object_value == 500

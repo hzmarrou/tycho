@@ -285,9 +285,16 @@ def _extract_eligibility_method(cls_name: str, method: ast.FunctionDef, source: 
         return None
     lhs = cmp.left
     attr: str | None = None
+    param_names = {a.arg for a in method.args.args}
     if isinstance(lhs, ast.Attribute) and isinstance(lhs.value, ast.Name) and lhs.value.id == "self":
         attr = lhs.attr
-    elif isinstance(lhs, ast.Subscript) and isinstance(lhs.slice, ast.Constant) and isinstance(lhs.slice.value, str):
+    elif (
+        isinstance(lhs, ast.Subscript)
+        and isinstance(lhs.slice, ast.Constant)
+        and isinstance(lhs.slice.value, str)
+        and isinstance(lhs.value, ast.Name)
+        and lhs.value.id in param_names
+    ):
         attr = lhs.slice.value
     if attr is None:
         return None
@@ -332,6 +339,7 @@ def _extract_transition_assigns(cls_name: str, method: ast.FunctionDef, source: 
                 subject_attribute=tgt.attr,
                 predicate="transitions_to",
                 object_value=stmt.value.value,
+                condition=ast.unparse(node.test),
                 expression=ast.unparse(stmt),
                 evidence_span=_span(node, file, source),
                 code_context=f"class {cls_name}, def {method.name}",
