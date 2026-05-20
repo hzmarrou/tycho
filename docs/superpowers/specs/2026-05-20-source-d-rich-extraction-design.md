@@ -129,11 +129,21 @@ Polarity is preserved in the predicate:
 
 ---
 
-## 5. Rule grouping (hybrid model)
+## 5. Rule grouping and fusion behaviour (honest)
 
-Per-condition rules are emitted independently — they merge naturally with C/D fusion (a Source C `NOT NULL` on `is_in_financial_difficulty` fuses with the corresponding Pattern A rule). To preserve the source function for audit grouping, each rule's `code_context` is set to `f"def {func_name}"`. Downstream audit consumers can group rules by `code_context` to reconstruct the original predicate's conjunction/disjunction structure.
+Per-condition rules are emitted independently. Each rule's `code_context` is set to `f"def {func_name}"` so audit consumers can group them back to the source function.
 
-This matches v1.2's existing behaviour for inline `__init__` and validator rules — granular emission, contextual provenance.
+**Fusion claim — honest scope.** Procedural multi-condition rules (Patterns A, B, C) emit with `subject_entity=None`. The v1.2 anchor layer can only fill `subject_entity` from in-module `AttributeFact`s, and procedural functions do not produce `AttributeFact`s for their parameters (`loan`, `payment_history`, `forbearance`, …). The `merge_key` tuple includes `subject_entity`, so:
+
+- A procedural Pattern-A rule like `(is_non_performing, required, True)` from `can_upgrade_to_performing(loan, …)` keeps `subject_entity=None`.
+- A Source C `NOT NULL` rule on `loan.is_non_performing` has `subject_entity="loan"`.
+- Their `merge_key`s differ. They **do not fuse via `by_rule_key`** — they live as two distinct concepts in the candidate graph.
+
+This is the same behaviour Task 19's `test_ac1a_anchored_c_rule_does_not_swallow_unanchored_d_rule` test pinned for v1.2: anchoring is a fusion precondition. The v1.2.1 patch does not change that contract.
+
+**What v1.2.1 does deliver:** more D-only rule candidates in the graph, all with `code_context` traceable to a source function. Fusion-time anchoring across sources is unchanged from v1.2 — it works for rules from model_extractor (which produce `subject_entity` from the enclosing class) and not for parameter-bound procedural rules. Closing that gap requires either parameter-name-to-entity anchoring or a relaxation of `merge_key` for partial subject matches; both are deferred (§10).
+
+The model-family multi-condition extension (Patterns A and B inside class methods) **does** anchor naturally — `subject_entity` is the class name, same as v1.2's inline `__init__` and validator rules — and **does** fuse via `by_rule_key` when a Source C rule matches the merged subject + attribute.
 
 ---
 
@@ -164,7 +174,7 @@ This matches v1.2's existing behaviour for inline `__init__` and validator rules
 
 ## 8. Acceptance criteria
 
-These ACs reflect what the *extractor* can recover from each function. Conditions whose RHS is a local variable, whose LHS is a method call, or whose comparison uses an operator outside `_CMP` are skipped — those would require dataflow tracking or richer operator support, both deferred. The honest improvement is **~10 deterministic rules across the six NPL functions, vs 1 weak fallback rule in v1.2**.
+These ACs reflect what the *extractor* can recover from each function. Conditions whose RHS is a local variable, whose LHS is a method call, whose comparison uses an operator outside `_CMP`, or whose `if` is nested inside another `if` are skipped — those require dataflow tracking, richer operator support, or guard-composition serialisation, all deferred. The honest improvement is **9 deterministic rules across the six NPL functions, vs 1 weak fallback rule in v1.2**.
 
 - **AC-R1.** `is_forbearance` produces **2 eligibility rules**: `(is_in_financial_difficulty, required, True)` and `(is_concessionary, required, True)`. Both via `<param>.<attr>` LHS, both via `if not X: return False` polarity.
 - **AC-R2.** `can_upgrade_to_performing` produces **3 eligibility rules**:
@@ -177,7 +187,11 @@ These ACs reflect what the *extractor* can recover from each function. Condition
   - `(is_defaulted, required, True)` — from `if loan.is_defaulted: return True`.
   - `(unlikeliness_to_pay_flag, required, True)` — from `if loan.unlikeliness_to_pay_flag: return True`.
   The `loan.days_past_due > threshold` branch is **not** extracted because `threshold` is a local variable computed from a conditional expression — dataflow is out of scope.
-- **AC-R4.** `validate_forbearance_event` produces **1 validation rule**: `(classification, neq, "performing_forborne")` — from the nested `if forbearance_event.classification == "performing_forborne": errors.append(...)`. The other two `errors.append` sites compare two attribute accesses or use `is not None` / method calls; non-literal RHS and operator-out-of-scope cases stay skipped.
+- **AC-R4.** `validate_forbearance_event` produces **0 rules**. Walking each `errors.append` site:
+  - `if forbearance_event.start_date < loan.origination_date: errors.append(...)` — non-literal RHS (`loan.origination_date` is an attribute access, not a constant). Skipped.
+  - `if forbearance_event.end_date is not None: if … < …: errors.append(...)` — outer `is not None` is outside `_CMP`; inner comparison would be nested-under-guard. Both skipped.
+  - `if loan.was_non_performing_at(…): if forbearance_event.classification == "performing_forborne": errors.append(...)` — outer LHS is a method call (out of scope); inner check is *nested under that guard*. Per §10, nested-under-guard rules are NOT emitted because the outer condition cannot be serialised faithfully into `condition`. Emitting the inner rule standalone would overstate what the source code actually says (false promotion). Skipped.
+  This is a deliberate honesty trade-off — `validate_forbearance_event` is the canonical case showing the boundary of v1.2.1 deterministic safety. A future v1.2.x or v1.3 can lift this once guard composition is designed.
 - **AC-R5.** `can_exit_forborne_status` produces **1 eligibility rule**: `(counterparty_still_in_difficulty, required, False)` from the bare-param attribute `forbearance.counterparty_still_in_difficulty:`.
 - **AC-R6.** `is_material_past_due` produces **0 rules** — its single `return past_due_amount > materiality` has a local-variable RHS. This is the canonical case demonstrating the v1.2.1 / dataflow boundary.
 - **AC-R7.** No `subject_entity` or `subject_attribute` is fabricated from non-parameter receivers; module-level constants used as subjects continue to be rejected (PR #6 discipline preserved).
@@ -202,7 +216,8 @@ These ACs reflect what the *extractor* can recover from each function. Condition
 - **Dataflow analysis** for intermediate variables. Examples we cannot resolve: `materiality = max(EUR, total * PCT); return amount > materiality`; `days_since_default = (date.today() - loan.default_date).days; if days_since_default < THRESHOLD`; `threshold = X if cond else Y; if loan.attr > threshold`.
 - **Method-call LHS or RHS.** `if payment_history.continuous_timely_repayments(months=3):` and `if loan.was_non_performing_at(forbearance_event.start_date):` stay unextracted — the extractor does not recurse into method calls or trace their return values.
 - **Operators outside `_CMP`.** `is not None`, `in`, `not in`, `is`, boolean `and` / `or`, and chained comparisons (`0 < x < 10`) are not handled in this batch. The seven supported ops stay: `Lt, LtE, Gt, GtE, Eq, NotEq` plus the truthiness paths covered in section 4.
-- **Outer-guard context for nested `if` blocks.** A pattern like `if outer_cond: if inner_cond <op> lit: errors.append(...)` emits a rule on the *inner* condition only — the outer guard is dropped. Audit consumers receive the inner rule with `code_context` pointing at the enclosing function. Capturing outer-guard composition would require structured `condition` serialization, which is deferred.
+- **Outer-guard context for nested `if` blocks.** A pattern like `if outer_cond: if inner_cond <op> lit: errors.append(...)` is **skipped entirely** in v1.2.1 — neither the inner nor the outer condition is emitted. Emitting only the inner rule (without the outer guard) would overstate the source code's semantics: the inner check is only valid when the outer guard holds, and dropping that context turns a conditional rule into an unconditional one. This is the canonical false-promotion case the v1.2 anchor / suppress discipline is designed to prevent. Capturing outer-guard composition requires structured `condition` serialisation across nested AST levels, deferred to a future patch.
+- **Parameter-name-to-entity anchoring.** Procedural rules with parameter-bound subjects (e.g. `(is_non_performing, required, True)` from `can_upgrade_to_performing(loan, …)`) keep `subject_entity=None` and do not fuse via `merge_key` with anchored Source C rules whose `subject_entity="loan"`. A heuristic anchoring step that maps function parameter names to entities in the candidate graph would close that gap, but it requires its own design (false-anchor risk: `loan` as a parameter name doesn't always mean "the Loan entity"). v1.2.1 stays honest about the limitation rather than introducing the heuristic without a design pass.
 - **Class-level constants** and `self`-bound attributes used as comparison RHS.
 - **Constant resolution across import boundaries.** Pattern D scans only the current module's top-level `ast.Assign(targets=[Name], value=Constant)` nodes.
 - **LLM-based** normalization, classification, or rule discovery.
