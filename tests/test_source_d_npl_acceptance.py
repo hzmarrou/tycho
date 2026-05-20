@@ -108,8 +108,12 @@ def test_ac_r6_is_material_past_due_emits_zero_rules():
     assert structured == []
 
 
-def test_total_npl_rule_count_is_at_least_nine():
-    """Aggregate AC: 9 deterministic rules across the six functions."""
+def test_total_npl_rule_count_is_exactly_nine():
+    """Aggregate AC: exactly 9 deterministic structured rules across the
+    six NPL functions in v1.2.1. The sum of AC-R1..R5 (2+3+3+0+1+0=9).
+    Locked at == 9 — when a future patch deliberately expands extraction
+    coverage, raise this number explicitly along with the per-function
+    ACs."""
     all_files = [
         "classification/npe_classifier.py",
         "forbearance/forbearance_validator.py",
@@ -126,4 +130,4 @@ def test_total_npl_rule_count_is_at_least_nine():
             and c.rule_payload
             and c.rule_payload.get("subject_attribute") is not None
         )
-    assert total >= 9, f"expected ≥9 NPL rules across the three files; got {total}"
+    assert total == 9, f"expected exactly 9 NPL rules across the three files; got {total}"
