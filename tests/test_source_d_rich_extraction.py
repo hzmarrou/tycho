@@ -2,6 +2,7 @@
 import ast
 
 from ontozense.core.ingest.source_d.ir import RuleFact
+from ontozense.core.ingest.source_d.model_extractor import extract_model
 from ontozense.core.ingest.source_d.parse import parse_module
 from ontozense.core.ingest.source_d.procedural_extractor import (
     _UNRESOLVED,
@@ -448,3 +449,132 @@ def test_pattern_c_handles_negated_bare_attribute(tmp_path):
     assert r.subject_attribute == "is_valid"
     assert r.predicate == "required"
     assert r.object_value is True
+
+
+# ---------------------------------------------------------------------------
+# Task 6 — Pattern A + B (model) — multi-condition class methods
+# ---------------------------------------------------------------------------
+
+
+def test_pattern_a_in_class_method_anchors_to_class(tmp_path):
+    """Multi-condition eligibility in a class method: subject_entity
+    is set to the enclosing class name (anchored)."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "class LoanChecker:\n"
+        "    def is_eligible(self, loan):\n"
+        "        if not loan.is_non_performing:\n"
+        "            return False\n"
+        "        if loan.has_active_forbearance:\n"
+        "            return False\n"
+        "        return True\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_model(pm))
+    elig = [
+        f for f in facts
+        if isinstance(f, RuleFact) and f.rule_kind == "eligibility"
+    ]
+    assert len(elig) == 2
+    for r in elig:
+        assert r.subject_entity == "LoanChecker"
+
+
+def test_pattern_b_in_class_method_anchors_to_class(tmp_path):
+    """Pattern B classification inside a class method anchors to
+    the class."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "class Classifier:\n"
+        "    def classify_npe(self, loan):\n"
+        "        if loan.is_defaulted:\n"
+        "            return True\n"
+        "        if loan.ifrs_stage == 'impaired':\n"
+        "            return True\n"
+        "        return False\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_model(pm))
+    elig = [
+        f for f in facts
+        if isinstance(f, RuleFact) and f.rule_kind == "eligibility"
+    ]
+    assert len(elig) == 2
+    for r in elig:
+        assert r.subject_entity == "Classifier"
+
+
+def test_class_method_pattern_d_resolves_module_constant(tmp_path):
+    """Pattern D resolution works from inside class methods."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "IFRS_IMPAIRED = 'impaired'\n"
+        "class Classifier:\n"
+        "    def classify_npe(self, loan):\n"
+        "        if loan.ifrs_stage == IFRS_IMPAIRED:\n"
+        "            return True\n"
+        "        return False\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_model(pm))
+    elig = [
+        f for f in facts
+        if isinstance(f, RuleFact) and f.rule_kind == "eligibility"
+    ]
+    assert len(elig) == 1
+    assert elig[0].object_value == "impaired"
+
+
+def test_pattern_a_class_method_extracts_self_attribute(tmp_path):
+    """`self.<attr>` is the canonical anchored subject form for class
+    methods. Mirrors v1.2's _extract_eligibility_method contract.
+    This test pins that `self` is INCLUDED in param_names so
+    `self.is_non_performing` resolves correctly (Codex Finding 1)."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "class Loan:\n"
+        "    def is_eligible(self):\n"
+        "        if not self.is_non_performing:\n"
+        "            return False\n"
+        "        if self.has_active_forbearance:\n"
+        "            return False\n"
+        "        return True\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_model(pm))
+    elig = [
+        f for f in facts
+        if isinstance(f, RuleFact) and f.rule_kind == "eligibility"
+    ]
+    assert len(elig) == 2
+    triples = {(r.subject_attribute, r.predicate, r.object_value) for r in elig}
+    assert ("is_non_performing", "required", True) in triples
+    assert ("has_active_forbearance", "required", False) in triples
+    for r in elig:
+        assert r.subject_entity == "Loan"
+
+
+def test_pattern_b_class_method_extracts_self_attribute_with_constant(tmp_path):
+    """Pattern B + self.<attr> + Pattern D constant resolution
+    all compose inside a class method."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "STATUS_ACTIVE = 'active'\n"
+        "class Loan:\n"
+        "    def is_active(self):\n"
+        "        if self.status == STATUS_ACTIVE:\n"
+        "            return True\n"
+        "        return False\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_model(pm))
+    elig = [
+        f for f in facts
+        if isinstance(f, RuleFact) and f.rule_kind == "eligibility"
+    ]
+    assert len(elig) == 1
+    r = elig[0]
+    assert r.subject_entity == "Loan"
+    assert r.subject_attribute == "status"
+    assert r.predicate == "eq"
+    assert r.object_value == "active"
