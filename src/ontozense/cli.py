@@ -3443,11 +3443,9 @@ def draft(
     source_c: Path = typer.Option(
         None, "--source-c", "-c",
         help=(
-            "Optional Source C input — legacy SchemaResult JSON only "
-            "(produced by an adapter; see adapters/django/README.md). "
-            "Raw .sql schema files belong in `ontozense survey`, not "
-            "`draft`. If you already ran survey, Source C is reflected "
-            "in discovery/candidate-graph.json and this flag can be omitted."
+            "DEPRECATED — ignored. Source C is read from "
+            "`discovery/candidate-graph.json` (produced by `survey`). "
+            "Will be removed in a future release."
         ),
     ),
     source_d: Path = typer.Option(
@@ -3667,68 +3665,20 @@ def _run_fuse_for_draft(
         )
 
     if source_c is not None:
-        # v1.1.x: raw .sql schema files belong in `survey`, not `draft`.
-        # `draft` is still on the v1.0 FusionEngine path which consumes
-        # SchemaResult JSON. Fail fast with an actionable message rather
-        # than the cryptic JSON parse error users hit before this guard.
-        if source_c.suffix.lower() == ".sql":
-            console.print(
-                f"[bold red][x] Source C SQL is not accepted by `draft`:[/] {source_c}\n"
-                "  `draft --source-c` still consumes legacy SchemaResult JSON "
-                "on the FusionEngine path.\n"
-                "  In v1.1+, raw `.sql` schema files are ingested by "
-                "`ontozense survey`, not by `draft`.\n"
-                "  If you already ran `survey`, drop `--source-c` here; "
-                "Source C is already reflected in "
-                "`discovery/candidate-graph.json`.\n"
-                "  If you need direct Source C input to `draft`, provide "
-                "an adapter-produced SchemaResult JSON instead."
-            )
-            raise typer.Exit(code=2)
-        # Tycho 1.0+: Source C is a JSON file conforming to the
-        # SchemaResult contract in ontozense.core.source_c. Mirrors
-        # the loader used by the existing ``fuse`` CLI command.
-        from .core.source_c import (
-            SourceCContractError,
-            load_source_c_json,
-        )
-        if source_c.is_dir():
-            console.print(
-                f"[bold red][x] Source C is now a JSON file, "
-                f"not a directory:[/] {source_c}"
-            )
-            console.print(
-                "  In Tycho 1.0 the CLI consumes a SchemaResult JSON "
-                "produced by an adapter. See adapters/README.md."
-            )
-            raise typer.Exit(code=1)
-        try:
-            sc_result = load_source_c_json(source_c)
-        except OSError as e:
-            console.print(
-                f"[bold red][x] Source C file error:[/] {source_c}"
-            )
-            console.print(f"  [dim]{type(e).__name__}: {e}[/]")
-            raise typer.Exit(code=1)
-        except _json.JSONDecodeError as e:
-            console.print(
-                f"[bold red][x] Source C JSON parse error:[/] {source_c}"
-            )
-            console.print(
-                f"  [dim]Line {e.lineno}, col {e.colno}: {e.msg}[/]"
-            )
-            raise typer.Exit(code=1)
-        except SourceCContractError as e:
-            console.print(
-                f"[bold red][x] Source C JSON contract error:[/] "
-                f"{source_c}"
-            )
-            console.print(f"  [dim]{e}[/]")
-            raise typer.Exit(code=1)
+        # v1.1+: --source-c on `draft` is deprecated and ignored.
+        # Source C contributions now reach the draft via
+        # discovery/candidate-graph.json produced by `survey`.
         console.print(
-            f"[bold blue]Source C:[/] {len(sc_result.models)} schema "
-            f"models from {source_c.name}"
+            "[bold yellow][!] --source-c on `draft` is deprecated and ignored.[/]\n"
+            "  Source C is now read from discovery/candidate-graph.json "
+            "(produced by `ontozense survey`).\n"
+            "  If you have a raw .sql schema, run "
+            "`survey --source-c <file>.sql` first.\n"
+            "  If you have a legacy SchemaResult JSON, run an adapter "
+            "through `survey` instead.\n"
+            "  This flag will be removed in a future release."
         )
+        source_c = None
 
     if source_d is not None:
         from .extractors.code_extractor import CodeExtractor

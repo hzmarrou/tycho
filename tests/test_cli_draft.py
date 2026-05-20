@@ -288,14 +288,15 @@ class TestExistingCommandsPointAtNewOrchestrators:
 
 
 # ---------------------------------------------------------------------------
-# Task #96 (v1.1.x patch) – SQL guard regression tests
+# Task #96 (v1.1.x → soft-deprecation refactor) – --source-c deprecation tests
 # ---------------------------------------------------------------------------
 
-def test_draft_source_c_sql_fails_with_actionable_message(tmp_path: Path):
-    """`draft --source-c schema.sql` must fail fast with an actionable
-    error pointing users to `survey`, NOT crash with a JSON parse
-    traceback (the pre-patch behavior).
-    """
+def test_draft_source_c_sql_emits_deprecation_warning_and_succeeds(tmp_path: Path):
+    """`draft --source-c file.sql` is deprecated and ignored.
+    The command must exit 0 (success), print a deprecation warning,
+    and NOT attempt to ingest the SQL or crash with a JSON parse error.
+    Source C contributions come from candidate-graph.json (produced
+    by `survey`), not from this flag."""
     domain_dir = tmp_path / "demo"
     discovery_dir = domain_dir / "discovery"
     discovery_dir.mkdir(parents=True)
@@ -307,15 +308,8 @@ def test_draft_source_c_sql_fails_with_actionable_message(tmp_path: Path):
         '{"concepts": [], "relationships": []}',
         encoding="utf-8",
     )
-
     sql_path = tmp_path / "schema.sql"
-    sql_path.write_text(
-        "CREATE TABLE loan (\n"
-        "  loan_id VARCHAR(32) PRIMARY KEY,\n"
-        "  amount NUMERIC NOT NULL\n"
-        ");\n",
-        encoding="utf-8",
-    )
+    sql_path.write_text("CREATE TABLE loan (id INT PRIMARY KEY);\n", encoding="utf-8")
 
     result = runner.invoke(
         app,
@@ -326,32 +320,59 @@ def test_draft_source_c_sql_fails_with_actionable_message(tmp_path: Path):
             "--source-c", str(sql_path),
         ],
     )
-
-    # Exit code must be 2 (user error / actionable failure).
-    assert result.exit_code == 2, (
-        f"expected exit code 2; got {result.exit_code}\n"
-        f"stdout: {result.stdout}\n"
+    # Success exit code — deprecation is a warning, not an error.
+    assert result.exit_code == 0, (
+        f"expected exit 0; got {result.exit_code}\nstdout: {result.stdout}"
     )
-    # Actionable message present.
+    # Deprecation warning present.
     out = result.stdout
-    assert "Source C SQL is not accepted by `draft`" in out
+    assert "--source-c on `draft` is deprecated and ignored" in out
     assert "ontozense survey" in out
-    assert "candidate-graph.json" in out
-    # Critically: NO cryptic JSON parse traceback wording.
-    assert "JSON parse error" not in out, (
-        "draft should fail with the actionable SQL guard, not the "
-        "legacy JSON parse error path."
-    )
+    # Critically: no SQL/JSON parse traceback wording from the old code paths.
+    assert "JSON parse error" not in out
     assert "Expecting value" not in out
-    assert "JSONDecodeError" not in out
+    assert "Source C SQL is not accepted by" not in out  # the old fail-fast message
 
 
-def test_draft_source_c_json_path_still_handled(tmp_path: Path):
-    """A .json source-c path that doesn't actually exist still surfaces
-    via the JSON parse error code path — confirms the SQL guard didn't
-    accidentally short-circuit the legacy handler. The exact error
-    message isn't pinned here; we just verify the SQL guard is
-    selective (only fires on .sql)."""
+def test_draft_source_c_json_also_emits_deprecation_warning_and_succeeds(tmp_path: Path):
+    """A legacy .json SchemaResult passed to draft is now also
+    deprecated and ignored — same warning as the .sql case.
+    The user should run an adapter through `survey` instead."""
+    domain_dir = tmp_path / "demo"
+    discovery_dir = domain_dir / "discovery"
+    discovery_dir.mkdir(parents=True)
+    (discovery_dir / "candidate-graph.json").write_text(
+        '{"concepts": [], "relationships": [], "audit": []}',
+        encoding="utf-8",
+    )
+    (discovery_dir / "source-a.json").write_text(
+        '{"concepts": [], "relationships": []}',
+        encoding="utf-8",
+    )
+    json_path = tmp_path / "schema.json"
+    json_path.write_text(
+        '{"schema_version": "1.0", "models": [], "source_dir": ""}',
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--source-c", str(json_path),
+        ],
+    )
+    assert result.exit_code == 0
+    assert "--source-c on `draft` is deprecated and ignored" in result.stdout
+    # Confirm we did NOT take the legacy SchemaResult load path.
+    assert "schema models from" not in result.stdout
+
+
+def test_draft_without_source_c_works_unchanged(tmp_path: Path):
+    """`draft` without --source-c (the v1.1+ canonical usage)
+    must NOT print any deprecation warning."""
     domain_dir = tmp_path / "demo"
     discovery_dir = domain_dir / "discovery"
     discovery_dir.mkdir(parents=True)
@@ -364,19 +385,13 @@ def test_draft_source_c_json_path_still_handled(tmp_path: Path):
         encoding="utf-8",
     )
 
-    # A .json file that doesn't conform to SchemaResult — just to
-    # trigger the legacy code path, NOT the new SQL guard.
-    json_path = tmp_path / "schema.json"
-    json_path.write_text('{"not": "a schemaresult"}', encoding="utf-8")
-
     result = runner.invoke(
         app,
         [
             "draft",
             "--domain-dir", str(domain_dir),
             "--output", str(tmp_path / "draft.owl"),
-            "--source-c", str(json_path),
         ],
     )
-    # Must NOT trigger the SQL guard.
-    assert "Source C SQL is not accepted by `draft`" not in result.stdout
+    assert result.exit_code == 0
+    assert "--source-c on `draft` is deprecated" not in result.stdout
