@@ -208,13 +208,43 @@ Three NPL (Non-Performing Loans) walkthroughs are available:
 
 ## Packaging
 
-To produce a curated public Tycho distribution (runtime + bundled NPL example + tutorial), run:
+Tycho uses a **two-branch model** so the GitHub-facing version stays clean while local development keeps the full repo (tests, internal design docs, scratch files):
+
+- **`main`** — full repo. You work here. Pushed to GitHub for collaborators, but not the default visitors see.
+- **`public`** — curated subset: runtime + NPL example + user-facing tutorial only. This is the GitHub default branch; what visitors see when they land on the repo.
+
+### Daily workflow
+
+After you push `main` as usual, sync the `public` branch:
+
+```bash
+git push origin main
+python scripts/publish_public_branch.py
+```
+
+The publish script:
+1. Rebuilds the curated bundle (`dist/tycho-public/`).
+2. Replaces the contents of the `public` branch with that bundle.
+3. Commits and pushes `public`.
+
+Your `main` worktree is never touched — the sync happens in a temp worktree under `.worktrees/public-sync/` that's cleaned up afterwards.
+
+### First-time setup
+
+1. Run `python scripts/publish_public_branch.py` once. This creates the `public` branch as an orphan and pushes it.
+2. On GitHub → Settings → Branches, change the default branch to `public`.
+
+After that, https://github.com/hzmarrou/tycho shows the curated version by default. `main` is still available via the branch picker.
+
+### One-off bundle (no branch sync)
+
+If you just want the curated folder locally (no GitHub push), run only the export step:
 
 ```bash
 python scripts/export_tycho_public.py
 ```
 
-This assembles a clean `dist/tycho-public/` containing only the runtime package, `pyproject.toml`, `README.md`, the NPL tutorial, and the four NPL sources pre-staged under `domains/npl/sources/`. The output is regenerated on demand and not committed to git.
+It writes to `dist/tycho-public/` (gitignored) and stops there.
 
 ## Advanced — running the pipeline by hand
 
