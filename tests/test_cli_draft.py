@@ -285,3 +285,113 @@ class TestExistingCommandsPointAtNewOrchestrators:
     def test_lint_help_mentions_draft(self):
         result = runner.invoke(app, ["lint", "--help"])
         assert "draft" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# Task #96 (v1.1.x → soft-deprecation refactor) – --source-c deprecation tests
+# ---------------------------------------------------------------------------
+
+def test_draft_source_c_sql_emits_deprecation_warning_and_succeeds(tmp_path: Path):
+    """`draft --source-c file.sql` is deprecated and ignored.
+    The command must exit 0 (success), print a deprecation warning,
+    and NOT attempt to ingest the SQL or crash with a JSON parse error.
+    Source C contributions come from candidate-graph.json (produced
+    by `survey`), not from this flag."""
+    domain_dir = tmp_path / "demo"
+    discovery_dir = domain_dir / "discovery"
+    discovery_dir.mkdir(parents=True)
+    (discovery_dir / "candidate-graph.json").write_text(
+        '{"concepts": [], "relationships": [], "audit": []}',
+        encoding="utf-8",
+    )
+    (discovery_dir / "source-a.json").write_text(
+        '{"concepts": [], "relationships": []}',
+        encoding="utf-8",
+    )
+    sql_path = tmp_path / "schema.sql"
+    sql_path.write_text("CREATE TABLE loan (id INT PRIMARY KEY);\n", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--source-c", str(sql_path),
+        ],
+    )
+    # Success exit code — deprecation is a warning, not an error.
+    assert result.exit_code == 0, (
+        f"expected exit 0; got {result.exit_code}\nstdout: {result.stdout}"
+    )
+    # Deprecation warning present.
+    out = result.stdout
+    assert "--source-c on `draft` is deprecated and ignored" in out
+    assert "ontozense survey" in out
+    # Critically: no SQL/JSON parse traceback wording from the old code paths.
+    assert "JSON parse error" not in out
+    assert "Expecting value" not in out
+    assert "Source C SQL is not accepted by" not in out  # the old fail-fast message
+
+
+def test_draft_source_c_json_also_emits_deprecation_warning_and_succeeds(tmp_path: Path):
+    """A legacy .json SchemaResult passed to draft is now also
+    deprecated and ignored — same warning as the .sql case.
+    The user should run an adapter through `survey` instead."""
+    domain_dir = tmp_path / "demo"
+    discovery_dir = domain_dir / "discovery"
+    discovery_dir.mkdir(parents=True)
+    (discovery_dir / "candidate-graph.json").write_text(
+        '{"concepts": [], "relationships": [], "audit": []}',
+        encoding="utf-8",
+    )
+    (discovery_dir / "source-a.json").write_text(
+        '{"concepts": [], "relationships": []}',
+        encoding="utf-8",
+    )
+    json_path = tmp_path / "schema.json"
+    json_path.write_text(
+        '{"schema_version": "1.0", "models": [], "source_dir": ""}',
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--source-c", str(json_path),
+        ],
+    )
+    assert result.exit_code == 0
+    assert "--source-c on `draft` is deprecated and ignored" in result.stdout
+    # Confirm we did NOT take the legacy SchemaResult load path.
+    assert "schema models from" not in result.stdout
+
+
+def test_draft_without_source_c_works_unchanged(tmp_path: Path):
+    """`draft` without --source-c (the v1.1+ canonical usage)
+    must NOT print any deprecation warning."""
+    domain_dir = tmp_path / "demo"
+    discovery_dir = domain_dir / "discovery"
+    discovery_dir.mkdir(parents=True)
+    (discovery_dir / "candidate-graph.json").write_text(
+        '{"concepts": [], "relationships": [], "audit": []}',
+        encoding="utf-8",
+    )
+    (discovery_dir / "source-a.json").write_text(
+        '{"concepts": [], "relationships": []}',
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+        ],
+    )
+    assert result.exit_code == 0
+    assert "--source-c on `draft` is deprecated" not in result.stdout
