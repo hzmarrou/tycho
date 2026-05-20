@@ -387,7 +387,16 @@ def _extract_errors_append_validations(
 
 def _body_is_single_errors_append(body: list[ast.stmt]) -> bool:
     """Return True if body is exactly one Expression node whose value
-    is a Call to `<name>.append(...)`."""
+    is a Call to `errors.append(...)` specifically.
+
+    The receiver MUST be the bare name `errors` — not `warnings`,
+    `findings`, `audit_log`, `self.errors`, etc. This matches the
+    spec §3 contract (`if <guard>: errors.append(...)`) and prevents
+    false promotion of non-error side effects into validation rules.
+
+    Other accumulator names are deferred to a future patch that can
+    explicitly broaden the contract.
+    """
     if len(body) != 1:
         return False
     stmt = body[0]
@@ -398,7 +407,10 @@ def _body_is_single_errors_append(body: list[ast.stmt]) -> bool:
         return False
     if not isinstance(call.func, ast.Attribute):
         return False
-    return call.func.attr == "append"
+    if call.func.attr != "append":
+        return False
+    # NEW: receiver must be the bare name `errors`.
+    return isinstance(call.func.value, ast.Name) and call.func.value.id == "errors"
 
 
 def _validation_rule_from_test(

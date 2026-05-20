@@ -611,3 +611,76 @@ def test_pattern_c_co_emits_with_raise_validation(tmp_path):
     # Raise rule: amount must be > 0 (inverted from <=).
     assert by_subject["amount"].predicate == "gt"
     assert by_subject["amount"].object_value == 0
+
+
+# ---------------------------------------------------------------------------
+# Regression tests — Pattern C receiver narrowing (Codex Medium bug fix)
+# ---------------------------------------------------------------------------
+
+
+def test_pattern_c_rejects_non_errors_receiver_warnings(tmp_path):
+    """`warnings.append(...)` in a validate_* function must NOT emit
+    a validation rule. The receiver must be the bare name `errors`
+    per spec §3. Codex caught this as Medium false-promotion bug."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def validate_payment(payment):\n"
+        "    warnings = []\n"
+        "    errors = []\n"
+        "    if payment['amount'] <= 0:\n"
+        "        warnings.append('amount low')\n"
+        "    return warnings + errors\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    vals = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "validation"]
+    structured = [r for r in vals if r.subject_attribute is not None]
+    assert structured == [], (
+        f"warnings.append must not emit a structured rule; got {structured}"
+    )
+
+
+def test_pattern_c_rejects_self_errors_receiver(tmp_path):
+    """`self.errors.append(...)` is also not the spec'd shape — the
+    receiver must be the bare name `errors`, not an attribute access."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "class Validator:\n"
+        "    def __init__(self):\n"
+        "        self.errors = []\n"
+        "    def validate_payment(self, payment):\n"
+        "        if payment['amount'] <= 0:\n"
+        "            self.errors.append('amount low')\n"
+        "        return self.errors\n"
+    )
+    pm = parse_module(src)
+    # Pattern C is procedural — but inspecting via extract_model is fine
+    # for the receiver-shape check. The key point: `self.errors.append`
+    # must not be interpreted as Pattern C.
+    facts = list(extract_model(pm))
+    vals = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "validation"]
+    structured = [r for r in vals if r.subject_attribute is not None]
+    assert structured == [], (
+        f"self.errors.append must not emit Pattern C rule; got {structured}"
+    )
+
+
+def test_pattern_c_accepts_only_bare_errors_name(tmp_path):
+    """Positive control: `errors.append(...)` (bare `errors` name) still
+    emits a Pattern C rule. This proves the narrowing doesn't kill the
+    legitimate spec'd case."""
+    src = tmp_path / "m.py"
+    src.write_text(
+        "def validate_payment(payment):\n"
+        "    errors = []\n"
+        "    if payment['amount'] <= 0:\n"
+        "        errors.append('amount low')\n"
+        "    return errors\n"
+    )
+    pm = parse_module(src)
+    facts = list(extract_procedural(pm))
+    vals = [r for r in facts if isinstance(r, RuleFact) and r.rule_kind == "validation"]
+    structured = [r for r in vals if r.subject_attribute is not None]
+    assert len(structured) == 1
+    assert structured[0].subject_attribute == "amount"
+    assert structured[0].predicate == "gt"  # inverted from <=
