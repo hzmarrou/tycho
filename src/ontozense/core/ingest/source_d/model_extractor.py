@@ -255,9 +255,12 @@ _CMP_INVERSE: dict[type, str] = {
 
 _ELIGIBILITY_PREFIXES = ("is_", "can_", "may_", "should_", "must_")
 
-_MULTI_ELIGIBILITY_PREFIXES = (
-    "is_", "can_", "may_", "should_", "must_",
-    "classify_", "determine_", "predict_", "decide_", "evaluate_",
+_MULTI_ELIGIBILITY_PREFIXES = _ELIGIBILITY_PREFIXES + (
+    "classify_",
+    "determine_",
+    "predict_",
+    "decide_",
+    "evaluate_",
 )
 
 _UNRESOLVED = object()
