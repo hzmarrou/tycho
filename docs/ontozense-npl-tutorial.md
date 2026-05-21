@@ -1,16 +1,19 @@
 # Ontozense Tutorial — NPL Domain (Non-Performing Loans)
 
 This tutorial walks you through building a domain ontology for the
-**Non-Performing Loans (NPL)** domain using Ontozense. By the end
-you will have:
+**Non-Performing Loans (NPL)** domain using Ontozense.
 
-- Extracted concepts and relationships from a Basel regulatory document
-- Validated those concepts against a governance reference file
-- Extracted business rules from production code
-- Fused all sources into a rich data dictionary
-- Run lint checks on the fused output, including structural gap analysis
-- Used an LLM to suggest bridging concepts for disconnected clusters
-- Queried the dictionary and filed back an expert review
+The tutorial is split into two parts:
+
+- **Part 1 — Fast track (`survey` → `draft`).** Two commands take you
+  from raw sources to a draft OWL ontology. This is the recommended
+  starting point: it runs end-to-end in a few minutes and produces a
+  reviewable artifact you can open in Protégé or Ontology Playground.
+- **Part 2 — Manual pipeline (power-user).** The same flow broken into
+  its underlying primitives (`ingest`, `extract-a`, `fuse`, `lint`,
+  `suggest-bridges`, `query`, `file-back`) for when you need fine
+  control, want to inspect intermediate artifacts, or are iterating
+  on a single stage.
 
 The tutorial uses real fixtures shipped with Ontozense, so everything
 runs without external API calls except the Source A extraction and the
@@ -28,19 +31,69 @@ LLM bridge suggestions (which need an Azure OpenAI key).
 
 ### 1. Install Ontozense
 
-```bash
-cd C:\Users\hzmarrou\OneDrive\python\projects\ontozense
+From the Tycho repo root (where this `docs/` folder lives):
+
+```powershell
+cd C:\Users\hzmarrou\OneDrive\python\evolve\tycho
+```
+
+**With `uv` (recommended — isolated, reproducible):**
+
+```powershell
+uv venv
+.\.venv\Scripts\Activate.ps1
+uv pip install -e ".[dev]"
+```
+
+Re-activate `.venv` whenever you open a new shell. Re-run
+`uv pip install -e ".[dev]"` only when dependencies in
+`pyproject.toml` change.
+
+To skip activation each time, prefix commands with `uv run` from the
+repo root, e.g. `uv run ontozense survey ...`.
+
+**Alternative — plain `pip` global install (faster, but pollutes
+system site-packages and can clash with other editable installs):**
+
+```powershell
 pip install -e ".[dev]"
 ```
 
+Confirm install:
+
+```powershell
+ontozense --help
+```
+
+You should see the command list (`survey`, `draft`, `ingest`,
+`extract-a`, `fuse`, `lint`, ...). If you get
+`ModuleNotFoundError: No module named 'ontozense.cli'`, another
+editable install is pointing at a stale path — re-run
+`uv pip install -e ".[dev]"` (or `pip install -e ".[dev]"`) from this
+directory to override it.
+
 ### 2. Set up Azure OpenAI credentials
 
-Create a `.env` file in the ontozense root directory:
+Create a `.env` file in your working directory. Either naming
+convention works — the CLI aliases Azure SDK names → LiteLLM names
+at load time (`_load_env` in `cli.py`).
+
+**Azure SDK convention (recommended — matches what the Azure portal
+gives you):**
+
+```env
+AZURE_OPENAI_API_KEY=your-azure-openai-key
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
+AZURE_OPENAI_API_VERSION=2024-10-01-preview
+AZURE_OPENAI_CHAT_DEPLOYMENT=gpt-5.4
+```
+
+**LiteLLM convention (also accepted):**
 
 ```env
 AZURE_API_KEY=your-azure-openai-key
 AZURE_API_BASE=https://your-resource.openai.azure.com
-AZURE_API_VERSION=2024-12-01-preview
+AZURE_API_VERSION=2024-10-01-preview
 OPENAI_API_KEY=your-azure-openai-key
 ```
 
@@ -49,109 +102,211 @@ Source A (the LLM-based document extractor) and `suggest-bridges`
 and the other commands are fully deterministic and don't require
 any API key.
 
+The deployment name in `AZURE_OPENAI_CHAT_DEPLOYMENT` must match the
+suffix of the `--model` value (default `azure/gpt-5.4`).
+
 ### 3. Create a domain workspace
 
 ```bash
 mkdir -p domains/npl/sources
-mkdir -p domains/npl/derived/source-a
-mkdir -p domains/npl/derived/fused
 ```
 
 This is where all inputs and outputs for the NPL domain will live.
+`survey` and `draft` create the `discovery/`, `induced-profile/`, and
+derived subdirectories for you on first run.
 
----
+### 4. Stage the NPL sources
 
-## Step 1 — Prepare your sources
-
-> **If you're using a packaged Tycho distribution** (e.g. `dist/tycho-public/`
-> produced by `python scripts/export_tycho_public.py`), the four NPL sources
-> are already staged at `domains/npl/sources/`:
+> **If you're using a packaged Tycho distribution** (e.g.
+> `dist/tycho-public/` produced by
+> `python scripts/export_tycho_public.py`), the four NPL sources are
+> already staged at `domains/npl/sources/`:
 >
 > - `npl-basel-guidelines.md` (Source A — Basel D403 document)
 > - `governance.json` (Source B — governance reference)
 > - `npl-schema.sql` (Source C — OpenNPL database schema)
 > - `npl-code/` (Source D — production Python + SQL)
 >
-> You can skip the `cp` commands in the three Source subsections below
-> and jump to **Step 2 — Route your files**. If you're working from a
-> dev checkout of the repo, run the `cp` commands as written to assemble
-> your domain workspace.
-
-### Source A: Authoritative domain document
-
-Ontozense ships with a Basel D403 regulatory guidelines document. Copy
-it into your domain workspace:
+> Skip ahead to **Part 1**. If you're working from a dev checkout,
+> run the three `cp` commands below first.
 
 ```bash
 cp tests/fixtures/npl-basel-guidelines.md domains/npl/sources/
-```
-
-This is a real regulatory document: *"Prudential treatment of problem
-assets — definitions of non-performing exposures and forbearance"* from
-the Basel Committee on Banking Supervision.
-
-### Source B: Governance reference (optional)
-
-Ontozense ships with an 18-entry governance reference file derived from
-the OpenNPL ontology. It contains canonical terms like Borrower,
-Collateral, Counterparty, Forbearance, Loan, etc. — each with a
-definition, criticality flag, and a citation to "data marketplace".
-
-Copy it into your workspace:
-
-```bash
 cp docs/governance_example.json domains/npl/sources/governance.json
-```
-
-The governance file is a simple JSON array. Each entry has
-`element_name` (required) plus optional `domain_name`, `definition`,
-`is_critical`, and `citation`:
-
-```json
-[
-  {
-    "domain_name": "Risk Management",
-    "element_name": "Borrower",
-    "definition": "A sub-class of Counterparty that applies to lending relations...",
-    "is_critical": true,
-    "citation": "data marketplace"
-  },
-  {
-    "element_name": "Collateral",
-    "definition": "An asset or property pledged by a borrower to secure a loan...",
-    "is_critical": true,
-    "citation": "data marketplace"
-  }
-]
-```
-
-The shipped file has 18 entries (12 critical, 6 non-critical) covering
-the core NPL domain concepts. Source B's role is **validation**: the
-fusion layer uses it to confirm that concepts extracted by Source A
-actually exist in the governance system.
-
-### Source D: Production code (optional)
-
-Ontozense ships with a synthetic NPL codebase containing Python and SQL
-files that implement Basel D403 rules. Copy them into your workspace:
-
-```bash
 cp -r tests/fixtures/synthetic_npl_code domains/npl/sources/npl-code
 ```
 
-This synthetic codebase contains:
-- `classification/npe_classifier.py` — thresholds (`NPE_DPD_THRESHOLD = 90`),
-  classification logic, IFRS stage assignments
-- `transitions/upgrade_rules.py` — probation periods, upgrade conditions
-- `forbearance/forbearance_validator.py` — forbearance detection rules
-- `reporting/finrep_npl_query.sql` — regulatory reporting SQL view
-- `reporting/loan_constraints.sql` — database CHECK constraints
+What each source is:
+
+- **Source A** — Basel D403 regulatory document
+  (*"Prudential treatment of problem assets — definitions of
+  non-performing exposures and forbearance"*).
+- **Source B** — 18-entry governance reference derived from the
+  OpenNPL ontology (Borrower, Collateral, Counterparty, Forbearance,
+  Loan, ...), each with definition, criticality flag, and citation.
+- **Source D** — synthetic NPL codebase: `npe_classifier.py`
+  (`NPE_DPD_THRESHOLD = 90`, IFRS stage assignments),
+  `upgrade_rules.py`, `forbearance_validator.py`,
+  `finrep_npl_query.sql`, `loan_constraints.sql`.
 
 ---
 
-## Step 2 — Route your files (optional preview)
+# Part 1 — Fast track (`survey` → `draft`)
 
-Before extracting, you can preview how the router classifies your files:
+Two commands. Start to finish. Use this path first.
+
+```
+sources/  ──survey──>  discovery/  ──draft──>  draft.owl + summary
+```
+
+## Step 1 — `survey` (Stage 1)
+
+`survey` is the **Stage 1 orchestrator**. It runs `extract-a` on every
+document you point at, merges in governance / schema / code, and
+writes a unified candidate graph under `discovery/`.
+
+```bash
+ontozense survey \
+  --source-a domains/npl/sources/npl-basel-guidelines.md \
+  --source-b domains/npl/sources/governance.json \
+  --source-d domains/npl/sources/npl-code \
+  --domain-dir domains/npl
+```
+
+Expected output (approximate — LLM step is non-deterministic, expect
+±20% on candidate/relationship counts):
+
+```
+Survey: ~50 candidates, ~27 relationships, ~3 cross-source matches.
+See domains\npl\discovery.
+Rules: 9 (eligibility: 9)
+```
+
+**Artifacts produced under `domains/npl/discovery/`:**
+
+- `source-a.json` — concatenated `extract-a` output across all
+  `--source-a` documents.
+- `candidate-graph.json` — unified graph of concepts and relationships
+  with per-source presence flags.
+- `candidate-provenance.json` — per-candidate provenance trail
+  (which file, which line, which extractor).
+
+**What happened:**
+
+1. Each `--source-a` document was passed through `extract-a` (LLM
+   extraction with the SPIRES methodology).
+2. JSON `--source-a` inputs (pre-extracted) are reused as-is.
+3. Source B governance records were merged in by name.
+4. Source D Python files were parsed by the deterministic AST
+   extractor (classes, dataclasses, Pydantic/SQLAlchemy models,
+   Enums, validation functions).
+5. Cross-source matches (concepts present in ≥2 sources) were
+   counted as a quality signal.
+
+`--source-c <file.sql>` adds a schema (parsed via `sqlglot`). Repeat
+flags to add multiple inputs; pass a directory to walk it recursively.
+
+## Step 2 — `draft` (Stage 2)
+
+`draft` is the **Stage 2 orchestrator**. It scores the candidate
+graph, induces a profile (or uses one you supply), fuses the sources,
+runs validation + lint, and emits a draft OWL ontology — the handoff
+artifact for an expert curator.
+
+```bash
+ontozense draft \
+  --domain-dir domains/npl \
+  --source-b domains/npl/sources/governance.json \
+  --source-d domains/npl/sources/npl-code \
+  --output domains/npl/draft.owl
+```
+
+> **Why re-pass `--source-b` / `--source-d`?** `survey` writes only
+> Source A into `discovery/source-a.json`. Source B/D are NOT
+> persisted into `discovery/` yet. For the fusion step inside `draft`
+> to enrich the OWL with governance flags (`is_critical`,
+> `citation`) and code rules (`BusinessRule` objects with line
+> anchors), B and D must be re-loaded directly. `--source-c` on
+> `draft` is deprecated — Source C flows through
+> `discovery/candidate-graph.json` only.
+
+Expected output (approximate):
+
+```
+Source A: ~27 concepts, ~37 relationships from source-a.json
+Source B: 18 governance records from governance.json
+Source D: 50 code rules from domains\npl\sources\npl-code
+Draft written to domains\npl\draft.owl
+  Summary: domains\npl\draft-summary.md
+Open in Ontology Playground or Protégé.
+```
+
+**Artifacts produced:**
+
+- `domains/npl/draft.owl` — the draft ontology (Turtle by default;
+  use `--format json-ld` or `--format owl-xml` to switch).
+- `domains/npl/draft-summary.md` — human-readable summary: profile
+  used, element/relationship counts, validation errors, lint
+  warnings, suggested review priorities.
+- `domains/npl/fused.json` — the fused rich data dictionary that fed
+  the OWL export.
+- `domains/npl/induced-profile/` — induced profile (skipped if you
+  passed `--profile`).
+
+**What happened:**
+
+1. Loaded `discovery/candidate-graph.json` from Step 1.
+2. Scored candidates with default weights + thresholds (override
+   with `--weights` / `--thresholds`).
+3. Wrote an induced profile under `induced-profile/`. To skip
+   induction, pass a hand-authored profile: `--profile <dir>`.
+4. Fused Source A + (optional Source B / D) into `fused.json`.
+5. Validated against the profile (`--mode flag` annotates findings;
+   `--mode filter` drops them).
+6. Linted for contradictions, orphans, coverage gaps, structural
+   gaps.
+7. Serialised to OWL via `rdflib` and wrote `draft-summary.md`.
+
+**Plan without running:**
+
+```bash
+ontozense draft --domain-dir domains/npl --output domains/npl/draft.owl --plan
+```
+
+## Step 3 — Open the draft
+
+`draft.owl` is a standard OWL file. Open it in any OWL editor:
+
+- **Ontology Playground** — drag-and-drop the file.
+- **Protégé** — `File → Open` and point at `draft.owl`.
+
+Read `draft-summary.md` first to know where to start the review.
+
+---
+
+## What's next?
+
+You now have a working draft. For a deeper, step-by-step pass —
+inspecting intermediate artifacts, tuning a single stage, or wiring
+in `file-back` and `suggest-bridges` — continue with Part 2.
+
+---
+
+# Part 2 — Manual pipeline (power-user)
+
+`survey` and `draft` are convenience orchestrators built on top of a
+set of lower-level primitives. Reach for these when you want to
+inspect or replay a single stage in isolation.
+
+```
+ingest  ──>  extract-a  ──>  fuse  ──>  lint  ──>  suggest-bridges
+                                 │
+                                 └──>  query / file-back
+```
+
+## Step M1 — Route your files (`ingest`)
+
+Preview how the router classifies your files before extracting:
 
 ```bash
 ontozense ingest domains/npl/sources/ --dry-run --domain-dir domains/npl
@@ -160,53 +315,58 @@ ontozense ingest domains/npl/sources/ --dry-run --domain-dir domains/npl
 Expected output:
 
 ```
-Routed 7 file(s):
+Routed 8 file(s):
   A - 1 file(s) - Source A - Authoritative domain documents
   B - 1 file(s) - Source B - Governance / data dictionaries
-  C - 1 file(s) - Source C - Database schemas
+  C - 2 file(s) - Source C - Database schemas
   D - 4 file(s) - Source D - Production code
 
   ->      A (95%, extension) npl-basel-guidelines.md
           Markdown file with no significant code blocks; Source A
   ->      B (95%, content_sniff) governance.json
-          JSON contains 'element_name' field - governance reference
-  ->      D (95%, extension) npe_classifier.py
-          File extension '.py' maps to Source D
-  ->      D (95%, extension) forbearance_validator.py
-  ->      D (95%, extension) upgrade_rules.py
+          JSON contains 'element_name' field — governance reference
+  ->      C (90%, content_sniff) npl-schema.sql
+          SQL file with 5 DDL statements (CREATE TABLE/VIEW/...)
   ->      C (90%, content_sniff) finrep_npl_query.sql
           SQL file with 1 DDL statements (CREATE TABLE/VIEW/...)
+  ->      D (95%, extension) npe_classifier.py
+  ->      D (95%, extension) forbearance_validator.py
+  ->      D (95%, extension) upgrade_rules.py
   ->      D (60%, content_sniff) loan_constraints.sql
           SQL file with no clear DDL or procedural pattern
 
-Dry run - no extractors invoked.
+Dry run — no extractors invoked.
 ```
 
 **What the router did:**
-- `.md` file → Source A by extension rule.
-- `governance.json` → Source B by **content sniff** (recognises the
-  `element_name` field in the JSON).
-- `.py` files → Source D by extension.
-- `finrep_npl_query.sql` contains a `CREATE VIEW`, so the SQL content
-  sniffer classifies it as **Source C** (schema DDL) — not Source D.
-- `loan_constraints.sql` has `ALTER TABLE ... CHECK` without a strong
-  DDL signal, so it falls back to Source D at lower confidence (0.60).
-  Worth reviewing manually before dispatch.
 
-This is correct behaviour: SQL files that declare structure (CREATE
-TABLE/VIEW) go to Source C; SQL files that express rules (WHERE
-filters, CHECK constraints, procedural code) go to Source D. No
-extractors ran in this dry run — it was just a preview.
+- `.md` → Source A by extension rule.
+- `governance.json` → Source B by content sniff (`element_name`
+  field).
+- `.py` → Source D by extension.
+- `npl-schema.sql` (5 DDL statements) and `finrep_npl_query.sql`
+  (`CREATE VIEW`) → Source C by content sniff.
+- `loan_constraints.sql` has `ALTER TABLE ... CHECK` without strong
+  DDL signal → Source D at lower confidence (0.60). Worth a manual
+  review before dispatch.
 
----
+SQL that declares structure → Source C; SQL that expresses rules
+(`WHERE`, `CHECK`, procedural code) → Source D.
 
-## Step 3 — Extract from the domain document (Source A)
-
-This is the LLM-powered step. It uses OntoGPT with the SPIRES
-methodology to extract concepts and relationships from the Basel D403
-document:
+Drop `--dry-run` and add `--auto` to actually dispatch to extractors
+for files routed above the 0.9 confidence threshold:
 
 ```bash
+ontozense ingest domains/npl/sources/ --auto --domain-dir domains/npl
+```
+
+## Step M2 — Extract from the domain document (`extract-a`)
+
+The LLM-powered step. Uses OntoGPT with the SPIRES methodology to
+extract concepts and relationships from the Basel D403 document:
+
+```bash
+mkdir -p domains/npl/derived/source-a
 ontozense extract-a \
   domains/npl/sources/npl-basel-guidelines.md \
   --json domains/npl/derived/source-a/basel-d403.json \
@@ -233,46 +393,41 @@ Relationships:
   high (>=80%): ~20   mid (50-79%): ~2   low (<50%): ~2
 ```
 
-Expect ±20% variation on these counts across runs.
+Expect ±20% variation across runs.
 
 **What happened:**
-1. OntoGPT sent the document to the LLM with a LinkML template
-2. The extractor parsed the LLM's `raw_completion_output` (bypassing
-   SPIRES's lossy recursion) to recover all identified concepts
-3. A regex-based second pass found definitions in bold-colon, "means",
-   "is defined as" patterns
-4. Concepts from both passes were merged, with regex-only finds scored
-   at lower confidence (0.40) so the human knows to review them
-5. Every concept carries a confidence score and provenance (source
-   document, section, text snippet)
 
-**If Source A fails:** the CLI now surfaces a clean error message with
-a hint about the likely cause (auth, OntoGPT install, template).
-You should never see a raw Python traceback.
+1. OntoGPT sent the document to the LLM with a LinkML template.
+2. The extractor parsed `raw_completion_output` directly (bypassing
+   SPIRES's lossy recursion) to recover all identified concepts.
+3. A regex-based second pass found definitions in bold-colon,
+   "means", "is defined as" patterns.
+4. Concepts from both passes were merged. Regex-only finds get
+   confidence 0.40 so the reviewer knows to check them.
+5. Every concept carries a confidence score and provenance.
+
+**If `extract-a` fails:** the CLI surfaces a clean error with a hint
+about the likely cause (auth, OntoGPT install, template). You should
+not see a raw Python traceback.
 
 **Inspect the output:**
 
-Open `domains/npl/derived/source-a/basel-d403.xlsx` in Excel. You'll
-see two sheets:
-- **Concepts** — one row per extracted concept, with columns for name,
-  definition, citation, confidence, source document, and a "Needs Review"
-  flag
-- **Relationships** — subject/predicate/object triples with confidence
+Open `basel-d403.xlsx` in Excel:
 
-### If you don't have an Azure OpenAI key
+- **Concepts** — name, definition, citation, confidence, source,
+  "Needs Review" flag.
+- **Relationships** — subject/predicate/object triples with
+  confidence.
 
-You can skip this step and use a pre-generated JSON file for the
-remaining steps. If you have a previous extraction JSON, copy it to
-`domains/npl/derived/source-a/basel-d403.json` and continue from Step 4.
+If you don't have an Azure OpenAI key, drop in a pre-generated
+`basel-d403.json` and continue.
 
----
+## Step M3 — Fuse all sources (`fuse`)
 
-## Step 4 — Fuse all sources
-
-Now combine Source A (domain document), Source B (governance), and
-Source D (code) into a single rich data dictionary:
+Combine Source A, Source B, Source D into one rich data dictionary:
 
 ```bash
+mkdir -p domains/npl/derived/fused
 ontozense fuse \
   --source-a domains/npl/derived/source-a/basel-d403.json \
   --source-b domains/npl/sources/governance.json \
@@ -297,48 +452,37 @@ Fused dictionary saved: domains/npl/derived/fused/v1.json
 ```
 
 **What happened:**
-1. Source A concepts seeded the element list
-2. Source B governance records matched against Source A concepts by
-   name (case-insensitive, underscore/hyphen normalised). Matching
-   concepts got marked as "governance-validated" and enriched with
-   `is_critical` flags and governance citations
-3. Source D code rules were attached as `business_rules` to matching
-   elements (by name or referenced symbol). Unmatched rules (code
-   that doesn't reference any extracted concept) were tracked separately
-4. Conflicts (two sources providing different values for the same field)
-   were resolved by priority order (A > B > C > D by default), with
-   rejected values preserved for audit
 
-**Inspect the fused output:**
+1. Source A concepts seeded the element list.
+2. Source B records matched against Source A by name (case-insensitive,
+   underscore/hyphen normalised). Matches got marked as
+   "governance-validated" and enriched with `is_critical` + citation.
+3. Source D rules attached as `business_rules` on matching elements.
+   Unmatched rules (code that doesn't reference any extracted
+   concept) tracked separately.
+4. Conflicts (two sources, same field, different values) resolved by
+   priority A > B > C > D. Rejected values preserved for audit.
 
-The JSON at `domains/npl/derived/fused/v1.json` contains:
-- `elements[]` — one entry per data element, with fields populated
-  from whichever sources could defensibly provide them
-- `relationships[]` — from Source A and Source C (if schema was provided)
-- `summary` — counts of elements, governance-validated, conflicts, etc.
+### Structure of a fused element
 
-### What's in an element?
+Per [PLAYBOOK §2](PLAYBOOK.md), 17 canonical fields with defined
+semantics (`element_name`, `definition`, `is_critical`, `citation`,
+`data_type`, `enum_values`, `business_rules`, six DQ dimensions,
+etc.). Each has a primary source and a fallback. Extra columns from
+your sources (e.g., a custom `data_steward` in your governance JSON)
+are carried through in `extra_fields`.
 
-The rich data dictionary is **structured but flexible**. Per
-[PLAYBOOK §2](PLAYBOOK.md) there are **17 canonical fields** with
-defined semantics (element_name, definition, is_critical, citation,
-data_type, enum_values, business_rules, the six DQ dimensions, etc.).
-Each has a primary source and a fallback; fusion knows how to merge
-and conflict-resolve them. On top of that, any extra fields the
-sources contributed (e.g., a custom `data_steward` column in your
-governance JSON) are carried through in `extra_fields` without
-interpretation.
+Two dimensions vary:
 
-Two dimensions can vary:
-- **Total element count**: ~42 here with these inputs. A larger
-  regulation or more governance terms could easily push this to
-  200–500.
-- **Fields per element**: depends on which sources contributed for
-  that specific element. A governance-validated concept with a schema
-  match and a code rule could have 10+ fields populated. A name-only
-  concept from a regulation might have just 3.
+- **Total element count**: ~42 here. A larger regulation or more
+  governance terms could push this to 200–500.
+- **Fields per element**: depends on which sources contributed.
+  Governance-validated concept with a schema match and a code rule
+  → 10+ populated fields. Name-only concept from a regulation
+  → maybe 3.
 
-Example element (5 fields populated + provenance):
+Example element:
+
 ```json
 {
   "element_name": "Borrower",
@@ -355,22 +499,15 @@ Example element (5 fields populated + provenance):
 }
 ```
 
-An element with schema + code contributions would also have
-`data_type`, `enum_values`, `business_rules` populated. A minimal
-orphan concept might only have `element_name`, `definition`,
-`confidence`.
+## Step M4 — Lint the fused output (`lint`)
 
----
-
-## Step 5 — Lint the fused output
-
-Run consistency checks to find issues the expert should review:
+Run consistency checks:
 
 ```bash
 ontozense lint domains/npl/derived/fused/v1.json --domain-dir domains/npl
 ```
 
-Expected output (approximate — your numbers will vary):
+Expected output (approximate):
 
 ```
 Lint report for v1.json
@@ -405,32 +542,24 @@ Summary: 0 errors, ~15-20 warnings, ~10-15 info
 ```
 
 **What each check means:**
-- **Contradictions** — two sources provided different values for the
-  same field. The fusion layer resolved them (A wins by priority), but
-  the expert should verify the rejected value isn't better.
-- **Orphan terms** — concepts that exist but aren't connected to
-  anything via relationships. May indicate missing relationships.
+
+- **Contradictions** — two sources, different values for the same
+  field. Fusion resolved them (A wins by priority), but the expert
+  should verify the rejected value isn't better.
+- **Orphan terms** — concepts not referenced by any relationship.
+  May indicate missing relationships.
 - **Coverage gaps** — elements where important fields (definition,
-  citation) are empty. These are the rows the expert should fill during
-  review.
-- **Structural gaps** — concept clusters with no or weak connections
-  between them, detected by graph community analysis (networkx). These
-  indicate areas where the ontology has topological holes — the concepts
-  exist but the relationships between groups are missing. Bridge
-  concepts (high betweenness centrality) are also reported as info —
-  these are the nodes that hold different clusters together. The output
-  is **capped at the 10 worst gaps** (by density) plus an overflow
-  summary — use `--max-gaps N` to see more, or `--max-gaps 0` to
-  disable the gap reporting entirely (no warnings, no overflow
-  summary). Bridge concepts are controlled independently by
-  `--max-bridges N` (default 10; `--max-bridges 0` disables that scan).
+  citation) are empty. Fill during review.
+- **Structural gaps** — concept clusters with no/weak connections,
+  detected by graph community analysis (`networkx`). Capped at 10
+  worst gaps (by density); use `--max-gaps N` to see more or
+  `--max-gaps 0` to disable. Bridge concepts (high betweenness
+  centrality) reported as info — controlled independently by
+  `--max-bridges N`.
 
----
+## Step M5 — Suggest bridging concepts (`suggest-bridges`)
 
-## Step 5b — Suggest bridging concepts for structural gaps
-
-When lint finds structural gaps, you can ask an LLM to suggest
-bridging relationships that would connect the disconnected clusters:
+When lint finds structural gaps, ask an LLM to suggest bridges:
 
 ```bash
 ontozense suggest-bridges \
@@ -461,45 +590,26 @@ include more.
 
 **Rationale:** When a borrower defaults, the lender may initiate
 enforcement proceedings that include liquidating collateral to recover
-losses. This concept naturally bridges the default/NPE cluster with
-the collateral/enforcement cluster.
+losses. ...
 
 Saved: domains/npl/bridge-suggestions.md
 Filed back: derived/analyses/bridge-suggestions.md
 ```
 
-**What happened:**
-1. The command ran the same structural gap analysis as lint (networkx
-   community detection)
-2. For the worst 5 gaps (by density), it constructed a targeted prompt
-   with both clusters' concepts and definitions — one LLM call per gap
-3. The LLM suggested bridging concepts with specific relationships
-   (Subject --[predicate]--> Object format)
-4. The output was saved as markdown and automatically filed back into
-   the knowledge base
+**Cost control:** one LLM call per gap. Default cap of 5 keeps cost
+bounded; raise `--max-gaps` to explore more.
 
-**Cost control:** Each gap is one LLM call. The default cap of 5 keeps
-cost bounded; raise `--max-gaps` if you want to explore more gaps.
+The expert reviews, approves or rejects, and files corrections back.
+This is the **Karpathy feedback loop**: Lint → LLM suggests bridges
+→ Expert reviews → File-back → Re-fuse.
 
-The expert reviews the suggestions, approves or rejects each one, and
-files the corrections back. On the next fusion run, these filed-back
-artifacts are part of the audit trail.
+> Requires an Azure OpenAI key (or another LLM provider via
+> litellm). Skip if you don't have one.
 
-This is the **Karpathy feedback loop** in action: Lint finds gaps ->
-LLM suggests bridges -> Expert reviews -> File-back -> Re-fuse.
+## Step M6 — Query a specific element (`query`)
 
-> **Note:** This step requires an Azure OpenAI key (or another LLM
-> provider configured via litellm). If you don't have one, skip this
-> step — the rest of the tutorial works without it.
-
----
-
-## Step 6 — Query a specific element
-
-Look up everything Ontozense knows about a specific concept. We'll use
-**Borrower** here — it's in both the Basel document (Source A) and the
-governance file (Source B), so the query shows rich cross-source
-output:
+Look up everything Ontozense knows about a concept. **Borrower** is in
+both Source A and Source B, so the query shows cross-source output:
 
 ```bash
 ontozense query "Borrower" --fused domains/npl/derived/fused/v1.json
@@ -512,26 +622,30 @@ Output (approximate):
 
 | Field | Value | Source |
 |---|---|---|
-| domain_name | Risk Management | B |
-| definition | A sub-class of Counterparty that applies to lending relations... | B |
-| is_critical | True | B |
-| citation | data marketplace | B |
+| domain_name | Risk Management |  |
+| definition | A sub-class of Counterparty that applies to lending relations. The party that receives funds under a credit agreement and is obligated to repay. |  |
+| is_critical | True |  |
+| citation | data marketplace |  |
 
 **Governance validated**
 
-**Relationships:**
-- Borrower --[owes_to]--> Lender (source: A)
-- Borrower --[secures_with]--> Collateral (source: A)
-
-*Confidence: 0.88 | Sources: A+B | Needs review: no*
+*Confidence: 0.95 | Sources: B | Needs review: no*
 ```
 
-Your specific output depends on what concepts and relationships the LLM
-extracted. Any term that appears in both Sources A and B — like
-Borrower, Collateral, Counterparty, Forbearance, Loan — should produce
-a similar cross-source result.
+The exact `Sources` set, confidence, and presence of a `Relationships`
+block depend on whether the LLM extracted `Borrower` from the Basel
+document (Source A) on your run. When `Borrower` is governance-only
+(Source B alone), you'll see `Sources: B` and no relationships.
+When the LLM also picked it up, expect `Sources: A+B` plus
+relationships like `Borrower --[owes_to]--> Lender`.
 
-### Save the query result and file it back
+Substring search returns all matching elements:
+
+```bash
+ontozense query "exposure" --fused domains/npl/derived/fused/v1.json
+```
+
+Save the result and file it back in one shot:
 
 ```bash
 ontozense query "Borrower" \
@@ -540,30 +654,14 @@ ontozense query "Borrower" \
   --domain-dir domains/npl
 ```
 
-This saves the markdown result **and** automatically files it back
-into `domains/npl/derived/analyses/borrower-review.md`. The expert can
-now edit this file (add their corrections, approve/reject the
-definition, note missing context) and it becomes part of the knowledge
-base's audit trail.
+This writes the markdown **and** files it back into
+`domains/npl/derived/analyses/borrower-review.md`. The expert edits
+this file (corrections, approvals, missing context) and it joins the
+audit trail.
 
-### Search for related concepts
+## Step M7 — File back an expert review (`file-back`)
 
-```bash
-ontozense query "exposure" --fused domains/npl/derived/fused/v1.json
-```
-
-This finds all elements whose name contains "exposure":
-- Non-Performing Exposure
-- Exposure Classification
-- Past-Due Exposure
-- ...
-
----
-
-## Step 7 — File back an expert review
-
-After reviewing the fused output, the expert writes a markdown file
-with their corrections and observations:
+After review, the expert writes a markdown file with corrections:
 
 ```markdown
 # NPL Domain Review — Expert Notes
@@ -588,7 +686,7 @@ Coverage gap: definition is missing. Adding from Basel D403 Section 22:
 Status: FILLED
 ```
 
-Save this as `domains/npl/expert-review-v1.md` and file it back:
+Save as `domains/npl/expert-review-v1.md` and file it back:
 
 ```bash
 ontozense file-back \
@@ -603,54 +701,54 @@ Filed back: derived/analyses/expert-review-v1.md
 Log entry appended to domains/npl/log.md
 ```
 
-The expert review is now part of the knowledge base. The audit log at
+The expert review is part of the knowledge base. The audit log at
 `domains/npl/log.md` records every operation:
 
 ```
+## [2026-04-22] survey | sources=A+B+D | candidates=~42 | ...
 ## [2026-04-22] extract-a | source=npl-basel-guidelines.md | concepts=~30 | ...
 ## [2026-04-22] fuse | sources=A+B+D | elements=~42 | conflicts=~3 | ...
 ## [2026-04-22] lint | contradiction=~3 | orphan=~6 | coverage_gap=~8 | ...
 ## [2026-04-22] file-back | source=expert-review-v1.md | destination=derived/analyses/expert-review-v1.md
 ```
 
----
+## Step M8 — Iterate (the feedback loop)
 
-## Step 8 — Iterate (the feedback loop)
-
-When a new document arrives (a regulation update, an internal policy
-change, a new codebase module), the cycle repeats:
+When a new document arrives (regulation update, internal policy
+change, new codebase module), the cycle repeats. The fast track makes
+re-runs cheap:
 
 ```bash
-# 1. Ingest the new file
-ontozense ingest domains/npl/sources/new-eba-guidelines.pdf \
-  --auto --domain-dir domains/npl
+# 1. Drop the new file into sources
+cp eba-guidelines.pdf domains/npl/sources/
 
-# 2. Re-fuse with all available sources
-ontozense fuse \
-  --source-a domains/npl/derived/source-a/basel-d403.json \
-  --source-a domains/npl/derived/source-a/eba-guidelines.json \
+# 2. Re-survey (extracts new doc, refreshes candidate graph)
+ontozense survey \
+  --source-a domains/npl/sources/npl-basel-guidelines.md \
+  --source-a domains/npl/sources/eba-guidelines.pdf \
   --source-b domains/npl/sources/governance.json \
   --source-d domains/npl/sources/npl-code \
-  --output domains/npl/derived/fused/v2.json \
   --domain-dir domains/npl
 
-# 3. Lint the new version
-ontozense lint domains/npl/derived/fused/v2.json --domain-dir domains/npl
+# 3. Re-draft (induces a fresh profile, emits v2 ontology)
+ontozense draft \
+  --domain-dir domains/npl \
+  --output domains/npl/draft-v2.owl
 
-# 4. Query, review, file back
+# 4. Spot-check a concept
 ontozense query "Forbearance" \
-  --fused domains/npl/derived/fused/v2.json \
+  --fused domains/npl/fused.json \
   --output domains/npl/forbearance-review.md \
   --domain-dir domains/npl
 ```
 
-Each iteration enriches the knowledge base. The domain expert's
-corrections accumulate as filed-back analyses. The audit log tracks
-every operation. The ontology grows by accretion, not replacement.
+Each iteration enriches the knowledge base. Expert corrections
+accumulate as filed-back analyses. The audit log tracks every
+operation. The ontology grows by accretion, not replacement.
 
 ---
 
-## Directory structure after the tutorial
+## Directory structure after the full tutorial
 
 ```
 domains/npl/
@@ -664,15 +762,23 @@ domains/npl/
 │       └── reporting/
 │           ├── finrep_npl_query.sql
 │           └── loan_constraints.sql
-├── derived/
+├── discovery/                           (written by `survey`)
+│   ├── source-a.json
+│   ├── candidate-graph.json
+│   └── candidate-provenance.json
+├── induced-profile/                     (written by `draft`)
+├── fused.json                           (written by `draft`)
+├── draft.owl                            (written by `draft`)
+├── draft-summary.md                     (written by `draft`)
+├── derived/                             (written by manual pipeline)
 │   ├── source-a/
-│   │   └── basel-d403.json              (Source A extraction)
+│   │   └── basel-d403.json
 │   ├── fused/
-│   │   └── v1.json                      (fused rich data dictionary)
+│   │   └── v1.json
 │   └── analyses/
-│       ├── borrower-review.md           (filed-back query result)
-│       ├── bridge-suggestions.md        (LLM-suggested bridges)
-│       └── expert-review-v1.md          (filed-back expert review)
+│       ├── borrower-review.md
+│       ├── bridge-suggestions.md
+│       └── expert-review-v1.md
 └── log.md                               (append-only audit trail)
 ```
 
@@ -680,51 +786,59 @@ domains/npl/
 
 ## CLI Reference (quick)
 
+### Stage orchestrators (recommended)
+
 | Command | What it does |
 |---|---|
-| `ontozense extract-a <doc> --json out.json` | Extract concepts + relationships from a domain document (Source A) |
-| `ontozense ingest <path> --dry-run` | Preview how the router classifies files |
-| `ontozense ingest <path> --auto` | Route and auto-dispatch to extractors (confidence > 0.9) |
-| `ontozense fuse --source-a a.json --source-b b.json -o fused.json` | Fuse sources into a rich data dictionary |
-| `ontozense lint fused.json [--max-gaps N]` | Run consistency checks (contradictions, orphans, structural gaps) |
-| `ontozense suggest-bridges fused.json -o bridges.md [--max-gaps N]` | Ask LLM to suggest bridging concepts for structural gaps |
-| `ontozense query "term" --fused fused.json` | Look up an element or search by substring |
-| `ontozense file-back review.md --domain-dir domain/` | Save an expert review into the knowledge base |
+| `ontozense survey --source-a … --source-b … --domain-dir D` | **Stage 1.** Run `extract-a` on documents, merge Sources B/C/D, write `discovery/{source-a,candidate-graph,candidate-provenance}.json`. |
+| `ontozense draft --domain-dir D --output draft.owl` | **Stage 2.** Score the candidate graph, induce a profile, fuse + validate + lint, emit OWL + `draft-summary.md`. Use `--plan` to preview. |
+
+### Lower-level primitives
+
+| Command | What it does |
+|---|---|
+| `ontozense ingest <path> --dry-run` | Preview how the router classifies files. |
+| `ontozense ingest <path> --auto` | Route and auto-dispatch to extractors (confidence > 0.9). |
+| `ontozense extract-a <doc> --json out.json` | Extract concepts + relationships from a domain document (Source A). |
+| `ontozense fuse --source-a a.json --source-b b.json -o fused.json` | Fuse sources into a rich data dictionary. |
+| `ontozense lint fused.json [--max-gaps N]` | Consistency checks (contradictions, orphans, structural gaps). |
+| `ontozense suggest-bridges fused.json -o bridges.md [--max-gaps N]` | Ask LLM to suggest bridging concepts for structural gaps. |
+| `ontozense query "term" --fused fused.json` | Look up an element or search by substring. |
+| `ontozense file-back review.md --domain-dir D` | Save an expert review into the knowledge base. |
 
 ---
 
 ## Troubleshooting
 
-- **`extract-a` fails with auth error** → check `AZURE_API_KEY`,
-  `AZURE_API_BASE`, `AZURE_API_VERSION` in `.env`. The CLI prints
-  a hint when it detects an auth-related error message.
-- **Lint reports too many structural gaps** → this is capped at 10
-  by default. Raise with `--max-gaps N` to see more, or set
-  `--max-gaps 0` to disable gap reporting entirely (no warnings, no
-  overflow summary). Bridges are controlled separately via
-  `--max-bridges N`.
-- **`query "Default"` returns no match** → try a concept that's in the
-  governance file: `Borrower`, `Collateral`, `Counterparty`,
-  `Forbearance`, `Loan`, etc. Not every regulation term lands in
-  governance; only curated ones.
+- **`survey` / `extract-a` fails with auth error** → check
+  `AZURE_API_KEY`, `AZURE_API_BASE`, `AZURE_API_VERSION` in `.env`.
+  CLI prints a hint when it detects an auth-related error.
+- **`draft` exits with "No candidate-graph.json under …/discovery"**
+  → run `ontozense survey` first.
+- **`--source-c` on `draft` is ignored** → deprecated. Source C
+  reaches `draft` via `discovery/candidate-graph.json`. Pass schema
+  files to `survey --source-c <file>.sql` instead.
+- **Lint reports too many structural gaps** → capped at 10 by
+  default. Raise with `--max-gaps N`; set `--max-gaps 0` to disable
+  gap reporting. Bridges controlled separately via `--max-bridges N`.
+- **`query "Default"` returns no match** → try a concept in the
+  governance file (`Borrower`, `Collateral`, `Counterparty`,
+  `Forbearance`, `Loan`). Not every regulation term lands in
+  governance — only curated ones.
 - **Windows terminal shows garbled characters** → all CLI output is
-  ASCII-only. If you see garbled output, check your terminal encoding
-  settings — Ontozense's output itself should never produce cp1252
-  encoding errors.
+  ASCII-only. Check your terminal encoding settings.
 
 ---
 
 ## What Ontozense does NOT do
 
-- **It does not replace the expert.** It produces 60-70% of the data
+- **Not a replacement for the expert.** Produces 60-70% of the data
   dictionary; the expert reviews and fills the rest.
-- **It does not invent definitions.** Every field carries a confidence
-  score and provenance. If the evidence is weak, the confidence is low
-  and the element is flagged for review.
-- **It does not silently succeed with bad output.** Exit code 2 means
-  zero elements were extracted; exit code 3 means all elements are
+- **Does not invent definitions.** Every field carries a confidence
+  score and provenance. Weak evidence → low confidence → flagged.
+- **Does not silently succeed with bad output.** Exit code 2 means
+  zero elements extracted; exit code 3 means all elements are
   low-confidence. Scripts can rely on these codes.
-- **It does not lock you into one domain.** The core engine is
-  domain-neutral (enforced by a regression test). NPL, healthcare,
-  manufacturing, telecom — the same pipeline works. Only the input
-  documents change.
+- **Not locked to one domain.** Core engine is domain-neutral
+  (enforced by a regression test). NPL, healthcare, manufacturing,
+  telecom — same pipeline, different inputs.
