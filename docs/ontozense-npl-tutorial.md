@@ -163,12 +163,14 @@ sources/  ──survey──>  discovery/  ──draft──>  draft.owl + summa
 
 `survey` is the **Stage 1 orchestrator**. It runs `extract-a` on every
 document you point at, merges in governance / schema / code, and
-writes a unified candidate graph under `discovery/`.
+writes a unified candidate graph plus typed Source C/D field
+metadata under `discovery/`.
 
 ```bash
 ontozense survey \
   --source-a domains/npl/sources/npl-basel-guidelines.md \
   --source-b domains/npl/sources/governance.json \
+  --source-c domains/npl/sources/npl-schema.sql \
   --source-d domains/npl/sources/npl-code \
   --domain-dir domains/npl
 ```
@@ -190,6 +192,13 @@ Rules: 9 (eligibility: 9)
   with per-source presence flags.
 - `candidate-provenance.json` — per-candidate provenance trail
   (which file, which line, which extractor).
+- `source-c.json` — typed `SchemaResult` (tables, columns, types,
+  PKs, FKs, CHECK-derived enum values) when `--source-c` was
+  provided. Loaded later by `draft` for property fusion (Phase A).
+- `source-d.json` — typed `SourceDResult` (Python classes,
+  Pydantic/dataclass/SQLAlchemy fields with descriptions, types,
+  PK/nullable/enum metadata) when `--source-d` was provided.
+  Loaded later by `draft` for property fusion (Phase A).
 
 **What happened:**
 
@@ -197,14 +206,22 @@ Rules: 9 (eligibility: 9)
    extraction with the SPIRES methodology).
 2. JSON `--source-a` inputs (pre-extracted) are reused as-is.
 3. Source B governance records were merged in by name.
-4. Source D Python files were parsed by the deterministic AST
+4. Source C SQL DDL was parsed via `sqlglot`, producing a typed
+   `SchemaResult` written to `discovery/source-c.json`. Suppression
+   rules (per-domain `source-c.yaml` + default audit/history
+   patterns) are honoured.
+5. Source D Python files were parsed by the deterministic AST
    extractor (classes, dataclasses, Pydantic/SQLAlchemy models,
-   Enums, validation functions).
-5. Cross-source matches (concepts present in ≥2 sources) were
+   Enums, validation functions), producing a typed `SourceDResult`
+   written to `discovery/source-d.json`. Path suppressions
+   (`tests/**`, `migrations/**`, generated-code markers) are honoured.
+6. Cross-source matches (concepts present in ≥2 sources) were
    counted as a quality signal.
 
 `--source-c <file.sql>` adds a schema (parsed via `sqlglot`). Repeat
 flags to add multiple inputs; pass a directory to walk it recursively.
+Skip `--source-c` / `--source-d` to get a doc-only run — neither
+discovery file is written and `draft` produces a properties-free OWL.
 
 ## Step 2 — `draft` (Stage 2)
 
@@ -218,17 +235,24 @@ ontozense draft \
   --domain-dir domains/npl \
   --source-b domains/npl/sources/governance.json \
   --source-d domains/npl/sources/npl-code \
+  --format owl-xml \
   --output domains/npl/draft.owl
 ```
 
-> **Why re-pass `--source-b` / `--source-d`?** `survey` writes only
-> Source A into `discovery/source-a.json`. Source B/D are NOT
-> persisted into `discovery/` yet. For the fusion step inside `draft`
-> to enrich the OWL with governance flags (`is_critical`,
-> `citation`) and code rules (`BusinessRule` objects with line
-> anchors), B and D must be re-loaded directly. `--source-c` on
-> `draft` is deprecated — Source C flows through
-> `discovery/candidate-graph.json` only.
+> **Why re-pass `--source-b` / `--source-d`?** `survey` writes Source
+> A into `discovery/source-a.json` and (in Phase A) typed Source C/D
+> field metadata into `discovery/source-c.json` and
+> `discovery/source-d.json`. Source B governance records, however,
+> are still not persisted. The fusion step inside `draft` needs the
+> raw governance file for the element-level enrichment (the
+> `is_critical` / `citation` fields and the governance-validated
+> flag). The raw `--source-d` directory is also still needed because
+> the existing fusion path attaches `BusinessRule` objects from
+> Python code rules (via `CodeExtractor`) — that's separate from the
+> Phase A attribute fusion which reads `discovery/source-d.json`.
+> `--source-c` on `draft` is deprecated for the raw-SQL path; the
+> typed `SchemaResult` flows in via `discovery/source-c.json` (written
+> by `survey`), so the command above intentionally omits it.
 
 Expected output (approximate):
 
@@ -243,13 +267,20 @@ Open in Ontology Playground or Protégé.
 
 **Artifacts produced:**
 
-- `domains/npl/draft.owl` — the draft ontology (Turtle by default;
-  use `--format json-ld` or `--format owl-xml` to switch).
+- `domains/npl/draft.owl` — the draft ontology. Default format is
+  Turtle (file starts with `@prefix ...`); pass `--format owl-xml`
+  (recommended, as shown above) for RDF/XML with typed `<owl:Class>` /
+  `<owl:DatatypeProperty>` nodes that most editors render best, or
+  `--format json-ld` for JSON-LD.
 - `domains/npl/draft-summary.md` — human-readable summary: profile
   used, element/relationship counts, validation errors, lint
   warnings, suggested review priorities.
 - `domains/npl/fused.json` — the fused rich data dictionary that fed
-  the OWL export.
+  the OWL export. **Phase A:** each fused element now carries an
+  `attributes[]` array with one typed property per matched
+  SQL column / Python field, including XSD type, ID flag, nullability,
+  enum values, and per-attribute provenance (which source supplied
+  what).
 - `domains/npl/induced-profile/` — induced profile (skipped if you
   passed `--profile`).
 
@@ -261,11 +292,23 @@ Open in Ontology Playground or Protégé.
 3. Wrote an induced profile under `induced-profile/`. To skip
    induction, pass a hand-authored profile: `--profile <dir>`.
 4. Fused Source A + (optional Source B / D) into `fused.json`.
-5. Validated against the profile (`--mode flag` annotates findings;
+5. **Phase A property fusion:** loaded `discovery/source-c.json` and
+   `discovery/source-d.json` (when present) and projected the typed
+   field metadata into each FusedElement's `attributes[]`. Match
+   uses exact + normalised name only (no fuzzy match in Phase A).
+   Source C wins on storage facts (type, nullable, PK, FK, enum from
+   DB CHECK); Source D wins on description; Source B fills in only
+   when both C and D are silent.
+6. Validated against the profile (`--mode flag` annotates findings;
    `--mode filter` drops them).
-6. Linted for contradictions, orphans, coverage gaps, structural
+7. Linted for contradictions, orphans, coverage gaps, structural
    gaps.
-7. Serialised to OWL via `rdflib` and wrote `draft-summary.md`.
+8. Serialised to OWL via `rdflib`. Each `Attribute` becomes one
+   `owl:DatatypeProperty` with `rdfs:domain` pointing at the parent
+   class and `rdfs:range` set to an XSD type; ID attributes additionally
+   carry `owl:FunctionalProperty`. Object property URIs live under
+   `{base}/rel/` so a datatype property named after a predicate cannot
+   collide with the predicate's URI.
 
 **Plan without running:**
 
@@ -279,6 +322,29 @@ ontozense draft --domain-dir domains/npl --output domains/npl/draft.owl --plan
 
 - **Ontology Playground** — drag-and-drop the file.
 - **Protégé** — `File → Open` and point at `draft.owl`.
+
+**What you'll see (Phase A):**
+
+- One `owl:Class` per fused element (named after the concept).
+- For each class backed by a SQL table or Python class, one
+  `owl:DatatypeProperty` per column / field — name, XSD-typed range,
+  `rdfs:comment` from descriptions, `owl:FunctionalProperty` on PKs.
+  This is the cosmic-coffee entity-card pattern: editor sidebars
+  now show typed property lists (`shipmentId: string (ID)`,
+  `weight: decimal`, `status: enum`, ...) rather than property-blank
+  entries. The reference visual in
+  [`docs/PROPERTY_EXTRACTION_DESIGN.md §1`](./PROPERTY_EXTRACTION_DESIGN.md)
+  shows the expected layout.
+- Per-attribute cardinality + enum encoded as `ontozense:` annotations
+  (`ontozense:required`, `ontozense:enumValues`, `ontozense:rawType`,
+  `ontozense:multivalued`). Curator-visible; reasoners ignore unknown
+  annotation properties.
+- One `owl:ObjectProperty` per discovered predicate, with URIs under
+  `{base}/rel/` so a class attribute named after a predicate cannot
+  collide with the predicate's URI.
+- One `owl:Ontology` declaration at the top with the domain label.
+  Editors that reject "no ontology metadata" files now accept the
+  output without hand-editing.
 
 > **Heads-up on serialisation.** The default output is **Turtle**
 > (the file starts with `@prefix ...`). Protégé auto-detects it, but
@@ -771,6 +837,7 @@ domains/npl/
 ├── sources/
 │   ├── npl-basel-guidelines.md          (Source A input)
 │   ├── governance.json                  (Source B input)
+│   ├── npl-schema.sql                   (Source C input — SQL DDL)
 │   └── npl-code/                        (Source D input)
 │       ├── classification/npe_classifier.py
 │       ├── transitions/upgrade_rules.py
@@ -780,11 +847,15 @@ domains/npl/
 │           └── loan_constraints.sql
 ├── discovery/                           (written by `survey`)
 │   ├── source-a.json
+│   ├── source-c.json                    (Phase A — typed SchemaResult)
+│   ├── source-d.json                    (Phase A — typed SourceDResult)
 │   ├── candidate-graph.json
 │   └── candidate-provenance.json
 ├── induced-profile/                     (written by `draft`)
-├── fused.json                           (written by `draft`)
-├── draft.owl                            (written by `draft`)
+├── fused.json                           (written by `draft`, now carries
+│                                         `attributes[]` per element)
+├── draft.owl                            (written by `draft`, now emits
+│                                         `owl:DatatypeProperty` per attr)
 ├── draft-summary.md                     (written by `draft`)
 ├── derived/                             (written by manual pipeline)
 │   ├── source-a/
@@ -806,8 +877,8 @@ domains/npl/
 
 | Command | What it does |
 |---|---|
-| `ontozense survey --source-a … --source-b … --domain-dir D` | **Stage 1.** Run `extract-a` on documents, merge Sources B/C/D, write `discovery/{source-a,candidate-graph,candidate-provenance}.json`. |
-| `ontozense draft --domain-dir D --output draft.owl` | **Stage 2.** Score the candidate graph, induce a profile, fuse + validate + lint, emit OWL + `draft-summary.md`. Use `--plan` to preview. |
+| `ontozense survey --source-a … --source-b … --source-c … --source-d … --domain-dir D` | **Stage 1.** Run `extract-a` on documents, merge Sources B/C/D, write `discovery/{source-a,candidate-graph,candidate-provenance}.json` + (Phase A) `discovery/{source-c,source-d}.json` when those sources were provided. |
+| `ontozense draft --domain-dir D --output draft.owl` | **Stage 2.** Score the candidate graph, induce a profile, fuse + validate + lint, emit OWL + `draft-summary.md`. Phase A: auto-loads the discovery `source-c.json` / `source-d.json` for attribute fusion; each fused element gets typed `attributes[]`, and the OWL output gets one `owl:DatatypeProperty` per attribute. Use `--plan` to preview, `--format owl-xml` for RDF/XML. |
 
 ### Lower-level primitives
 
@@ -831,9 +902,10 @@ domains/npl/
   CLI prints a hint when it detects an auth-related error.
 - **`draft` exits with "No candidate-graph.json under …/discovery"**
   → run `ontozense survey` first.
-- **`--source-c` on `draft` is ignored** → deprecated. Source C
-  reaches `draft` via `discovery/candidate-graph.json`. Pass schema
-  files to `survey --source-c <file>.sql` instead.
+- **`--source-c` on `draft` is ignored** → deprecated. Raw SQL is
+  not read by `draft`. Source C reaches `draft` via
+  `discovery/source-c.json` (written by `survey`). Pass schema files
+  to `survey --source-c <file>.sql` instead.
 - **Lint reports too many structural gaps** → capped at 10 by
   default. Raise with `--max-gaps N`; set `--max-gaps 0` to disable
   gap reporting. Bridges controlled separately via `--max-bridges N`.
