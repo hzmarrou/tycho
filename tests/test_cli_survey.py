@@ -658,4 +658,3 @@ def test_survey_source_c_yaml_exclude_tables_drops_from_discovery_source_c_json(
     names = {m["name"] for m in payload["models"]}
     assert "customer" in names
     assert "legacy_loans" not in names
-
