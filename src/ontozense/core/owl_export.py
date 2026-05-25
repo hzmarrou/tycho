@@ -93,6 +93,10 @@ def fused_to_owl(
     g.bind("xsd", XSD)
     g.bind("ontozense", ontozense_ns)
 
+    ont_uri = URIRef(base_iri)
+    g.add((ont_uri, RDF.type, OWL.Ontology))
+    g.add((ont_uri, RDFS.label, Literal(domain.replace("_", " ").title())))
+
     for element in fused.elements:
         class_fragment = _id_fragment(element.element_name)
         uri = ns[class_fragment]

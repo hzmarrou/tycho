@@ -280,6 +280,22 @@ ontozense draft --domain-dir domains/npl --output domains/npl/draft.owl --plan
 - **Ontology Playground** — drag-and-drop the file.
 - **Protégé** — `File → Open` and point at `draft.owl`.
 
+> **Heads-up on serialisation.** The default output is **Turtle**
+> (the file starts with `@prefix ...`). Protégé auto-detects it, but
+> some editors that accept `.rdf` / `.owl` / `.iq` uploads expect
+> **RDF/XML** and will fail with errors like
+> `RDF parse error: Malformed XML: Start tag expected, '<' not found`.
+> Re-emit as RDF/XML by adding `--format owl-xml` to Step 2:
+>
+> ```bash
+> ontozense draft \
+>   --domain-dir domains/npl \
+>   --source-b domains/npl/sources/governance.json \
+>   --source-d domains/npl/sources/npl-code \
+>   --format owl-xml \
+>   --output domains/npl/draft.owl
+> ```
+
 Read `draft-summary.md` first to know where to start the review.
 
 ---
