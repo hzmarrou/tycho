@@ -29,9 +29,12 @@ older adapters.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 
 # JSON schema version for the Source C contract. Bumped when the
@@ -381,3 +384,279 @@ def apply_profile_to_schema(result: SchemaResult, profile: Any) -> SchemaResult:
                 f.id = ""
 
     return result
+
+
+# ─── SQL DDL → SchemaResult builder ──────────────────────────────────────────
+#
+# Property extraction Phase A (PR1b) needs to persist a typed
+# SchemaResult to ``discovery/source-c.json`` so PR2's fusion engine
+# can read it back. ``SourceCIngester`` already parses .sql files via
+# sqlglot but only yields ``IntermediateCandidate`` — the per-field
+# metadata (type, nullable, pk, fk) lives in its internal ``tables``
+# dict and never escapes. Rather than expose that internal state (or
+# refactor the ingester in PR1b), this builder runs an independent
+# sqlglot pass and produces a typed ``SchemaResult`` directly. The
+# two passes parse the same files redundantly; the cost is acceptable
+# for Phase A and a single-pass refactor can land later without
+# changing this contract.
+
+
+def build_schema_from_sql_files(
+    file_paths: list[Path] | tuple[Path, ...],
+    source_dir: str = "",
+    config: dict[str, Any] | None = None,
+) -> SchemaResult:
+    """Parse a list of ``.sql`` DDL files and return a typed ``SchemaResult``.
+
+    Recognised constructs (per CREATE TABLE):
+      - column name + native SQL type → ``SchemaField.field_type`` +
+        ``SchemaField.playground_type`` via ``xsd_type_for_sql()``.
+      - PRIMARY KEY constraint (inline or table-level) → ``is_primary_key``.
+      - NOT NULL constraint → ``is_nullable = False``.
+      - VARCHAR(n) / CHAR(n) → ``max_length = n``.
+      - CHECK (col IN ('a', 'b')) → ``choices_values`` populated.
+      - FOREIGN KEY → ``SchemaModel.relationships`` entry pointing at
+        the referenced table.
+
+    **Suppression parity (PR1b r1 — Codex blocker 1):** when ``config``
+    is supplied (typically loaded from
+    ``<domain-dir>/source-c.yaml``), the builder mirrors the filtering
+    semantics of :class:`ontozense.core.ingest.ingest_c.SourceCIngester`
+    so the persisted ``discovery/source-c.json`` cannot resurrect
+    tables / columns the survey orchestrator intentionally suppresses:
+
+      - ``config["exclude_tables"]`` — user-suppressed table name globs.
+      - ``config["include_tables"]`` — overrides default suppression.
+      - ``config["exclude_columns"]`` — user-suppressed column globs.
+      - :data:`DEFAULT_SOURCE_C_TABLE_SUPPRESSIONS` — default table noise
+        patterns (``*_audit``, ``*_history``, ``tmp_*``, ...) unless
+        the table is in ``include_tables``.
+      - :data:`column_is_suppressed` — default column noise patterns
+        (``created_at``, ``updated_at``, ``etag``, ...) with
+        domain-bearing-prefix exemption (``birth_date`` survives).
+
+    Non-``.sql`` files are silently skipped. Files that fail to parse
+    are skipped with a WARNING log entry, matching the tolerance of
+    :class:`ontozense.core.ingest.ingest_c.SourceCIngester`.
+
+    ``source_dir`` populates ``SchemaResult.source_dir`` for downstream
+    provenance.
+    """
+    import sqlglot
+    from sqlglot import expressions as exp
+
+    from .attribute import xsd_type_for_sql
+    from .ingest.filters import (
+        DEFAULT_SOURCE_C_TABLE_SUPPRESSIONS,
+        column_is_suppressed,
+        glob_match,
+    )
+
+    config = config or {}
+    user_exclude_tables: list[str] = list(config.get("exclude_tables", []) or [])
+    user_include_tables: list[str] = list(config.get("include_tables", []) or [])
+    user_exclude_columns: list[str] = list(config.get("exclude_columns", []) or [])
+
+    def _xsd_to_playground(xsd: str) -> str:
+        """Project an XSD URI back to the legacy Tycho ``playground_type``
+        label used by ``SchemaField``. The set of labels here mirrors
+        the in-tree values produced by the Django adapter."""
+        return {
+            "xsd:string": "string",
+            "xsd:integer": "integer",
+            "xsd:decimal": "decimal",
+            "xsd:double": "decimal",
+            "xsd:date": "date",
+            "xsd:time": "time",
+            "xsd:dateTime": "datetime",
+            "xsd:dateTimeStamp": "datetime",
+            "xsd:duration": "string",
+            "xsd:boolean": "boolean",
+            "xsd:base64Binary": "string",
+        }.get(xsd, "string")
+
+    models: list[SchemaModel] = []
+
+    for path in file_paths:
+        if path.suffix.lower() != ".sql":
+            continue
+        try:
+            statements = sqlglot.parse(
+                path.read_text(encoding="utf-8", errors="replace")
+            )
+        except Exception as exc:  # sqlglot.errors.ParseError is too narrow
+            # Match SourceCIngester tolerance: log at WARNING and skip.
+            # PR1b r1 (Codex nit): code/doc parity — previously silent.
+            _logger.warning(
+                "Source C persistence: could not parse %s (%s); skipping.",
+                path, exc,
+            )
+            continue
+
+        for stmt in statements or []:
+            if not isinstance(stmt, exp.Create):
+                continue
+            if (stmt.args.get("kind") or "").upper() != "TABLE":
+                continue
+            table = stmt.this
+            if isinstance(table, exp.Schema):
+                # CREATE TABLE name (cols, constraints) — table is a Schema
+                table_name_node = table.this
+            else:
+                table_name_node = table
+            if isinstance(table_name_node, exp.Table):
+                table_name = table_name_node.name
+            else:
+                table_name = str(table_name_node)
+            if not table_name:
+                continue
+
+            # ── Table-level suppression (PR1b r1) ─────────────────────
+            # Mirror SourceCIngester semantics: user exclude wins,
+            # user include overrides defaults, defaults catch noise.
+            if glob_match(table_name, user_exclude_tables):
+                continue
+            if (
+                not glob_match(table_name, user_include_tables)
+                and glob_match(table_name, DEFAULT_SOURCE_C_TABLE_SUPPRESSIONS)
+            ):
+                continue
+
+            fields: list[SchemaField] = []
+            relationships: list[SchemaRelationship] = []
+
+            # Pull every column + constraint expression from the schema.
+            schema = table if isinstance(table, exp.Schema) else None
+            if schema is None:
+                models.append(SchemaModel(
+                    name=table_name,
+                    source_file=str(path),
+                ))
+                continue
+
+            pk_columns: set[str] = set()
+            check_choices: dict[str, list[str]] = {}
+            seen_columns: list[str] = []
+
+            for expr in schema.expressions:
+                if isinstance(expr, exp.ColumnDef):
+                    col_name = expr.this.name
+                    if not col_name:
+                        continue
+                    # ── Column-level suppression (PR1b r1) ────────────
+                    # column_is_suppressed enforces user exclude_columns
+                    # AND default noise patterns (created_at, etag, ...)
+                    # with domain-bearing-prefix exemption.
+                    if column_is_suppressed(
+                        col_name,
+                        user_exclude=user_exclude_columns,
+                        user_include=[],
+                    ):
+                        continue
+                    seen_columns.append(col_name)
+                    raw_type = expr.args.get("kind")
+                    raw_type_str = raw_type.sql() if raw_type is not None else ""
+                    xsd = xsd_type_for_sql(raw_type_str)
+
+                    # Inline constraints (NOT NULL, PRIMARY KEY, CHECK).
+                    constraints = expr.args.get("constraints") or []
+                    is_pk = False
+                    is_nullable = True
+                    max_length: int | None = None
+
+                    # Strip max length from VARCHAR(n) / CHAR(n).
+                    if raw_type is not None:
+                        params = raw_type.args.get("expressions") or []
+                        if params and isinstance(params[0], exp.DataTypeParam):
+                            inner = params[0].this
+                            if isinstance(inner, exp.Literal) and inner.is_int:
+                                try:
+                                    max_length = int(inner.this)
+                                except (TypeError, ValueError):
+                                    max_length = None
+
+                    for con in constraints:
+                        kind = con.kind if hasattr(con, "kind") else None
+                        if isinstance(kind, exp.PrimaryKeyColumnConstraint):
+                            is_pk = True
+                        elif isinstance(kind, exp.NotNullColumnConstraint):
+                            is_nullable = False
+                        elif isinstance(kind, exp.CheckColumnConstraint):
+                            this = kind.this
+                            # IN (...) → choices
+                            if isinstance(this, exp.In):
+                                values: list[str] = []
+                                for v in this.args.get("expressions") or []:
+                                    if isinstance(v, exp.Literal):
+                                        values.append(str(v.this))
+                                if values:
+                                    check_choices[col_name] = values
+
+                    fields.append(SchemaField(
+                        name=col_name,
+                        field_type=raw_type_str,
+                        playground_type=_xsd_to_playground(xsd),
+                        is_primary_key=is_pk,
+                        is_nullable=is_nullable,
+                        max_length=max_length,
+                    ))
+
+                elif isinstance(expr, exp.PrimaryKey):
+                    # Table-level PRIMARY KEY (col1, col2, ...).
+                    for col in expr.args.get("expressions") or []:
+                        if isinstance(col, exp.Column):
+                            pk_columns.add(col.name)
+                        elif isinstance(col, exp.Identifier):
+                            pk_columns.add(col.name)
+
+                elif isinstance(expr, exp.ForeignKey):
+                    # FK column on this table → referenced table.
+                    cols = [
+                        c.name if isinstance(c, exp.Identifier) else getattr(c, "name", "")
+                        for c in expr.args.get("expressions") or []
+                    ]
+                    ref = expr.args.get("reference")
+                    ref_table = ""
+                    if ref is not None:
+                        ref_inner = ref.this
+                        if isinstance(ref_inner, exp.Schema):
+                            ref_table_node = ref_inner.this
+                        else:
+                            ref_table_node = ref_inner
+                        if isinstance(ref_table_node, exp.Table):
+                            ref_table = ref_table_node.name
+                        else:
+                            ref_table = str(ref_table_node) if ref_table_node else ""
+                    for col_name in cols:
+                        if not col_name:
+                            continue
+                        relationships.append(SchemaRelationship(
+                            field_name=col_name,
+                            from_model=table_name,
+                            to_model=ref_table,
+                        ))
+
+                elif isinstance(expr, exp.Constraint):
+                    # CHECK named at table level; rare in tutorial-grade
+                    # DDL — column-level CHECK above is the common form.
+                    pass
+
+            # Apply table-level PK to the relevant SchemaFields.
+            if pk_columns:
+                for f in fields:
+                    if f.name in pk_columns:
+                        f.is_primary_key = True
+
+            # Apply CHECK IN (...) choices to the relevant SchemaFields.
+            for f in fields:
+                if f.name in check_choices:
+                    f.choices_values = list(check_choices[f.name])
+
+            models.append(SchemaModel(
+                name=table_name,
+                fields=fields,
+                relationships=relationships,
+                source_file=str(path),
+            ))
+
+    return SchemaResult(models=models, source_dir=source_dir)
