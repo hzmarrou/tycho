@@ -38,6 +38,19 @@ class AttributeFact:
     subject_entity: str | None = None
     annotation: str | None = None
     has_default: bool = False
+    # PR1a (property extraction Phase A): additional metadata carried
+    # through the IR so PR1b can persist it and PR2 can fuse it with
+    # Source C / B into typed owl:DatatypeProperty declarations. All
+    # fields are additive with backwards-compatible defaults — every
+    # existing call site that constructs AttributeFact without the
+    # new keyword arguments behaves identically to pre-PR1a.
+    description: str = ""
+    is_multivalued: bool = False
+    default_factory: str | None = None
+    enum_values: list[str] = field(default_factory=list)
+    is_pk: bool = False
+    is_nullable: bool = True
+    raw_type: str = ""
 
 
 @dataclass
