@@ -99,6 +99,286 @@ def _enum_members(cls: ast.ClassDef) -> list[str]:
     return members
 
 
+# ─── PR1a property-extraction helpers ───────────────────────────────────────
+#
+# These helpers populate the new AttributeFact metadata (description,
+# is_multivalued, default_factory, enum_values, is_pk, is_nullable,
+# raw_type) introduced for property extraction Phase A. They run at IR
+# construction time only — no behavioural change for existing
+# consumers, which see additional fields with sensible defaults.
+#
+# Resolution sources, in priority order:
+#   1. Value-side call kwargs: Pydantic ``Field(...)``, dataclass
+#      ``field(...)``, SQLAlchemy ``Column(...)`` / ``mapped_column(...)``.
+#   2. Annotation: ``list[T]`` / ``Sequence[T]`` / ``set[T]`` →
+#      multivalued; ``Optional[T]`` / ``T | None`` → nullable;
+#      ``Literal["a", "b"]`` → enum_values; class name reference →
+#      enum_values via the module-level Enum members map.
+#   3. Inline ``# comment`` on the field line as the last description
+#      fallback.
+
+
+_MULTIVALUE_TYPES = {
+    "list", "List", "set", "Set", "frozenset", "FrozenSet",
+    "Sequence", "MutableSequence", "Iterable", "Tuple", "tuple",
+}
+
+# Wrappers that carry no metadata of their own and should be transparently
+# unwrapped so the inner type's signals (enum_values, nullability,
+# multivalued) propagate to the AttributeFact. SQLAlchemy 2.0's
+# ``Mapped[T]`` is the prime example — without unwrapping,
+# ``id: Mapped[int]`` would never see ``int`` and a
+# ``status: Mapped[Literal["a", "b"]]`` would never see the Literal.
+# Codex r1: ClassVar and Final included for safety; they're not common
+# AttributeFact bearers but unwrap cheaply.
+_TRANSPARENT_WRAPPERS = {"Mapped", "ClassVar", "Final", "Annotated"}
+
+
+def _collect_enum_members_map(pm: ParsedModule) -> dict[str, list[str]]:
+    """Pre-pass: build {EnumClassName: [member_names...]} for the module.
+
+    Used to resolve ``status: LoanStatus`` annotations into the
+    AttributeFact.enum_values list. Cross-module references are out of
+    scope for Phase A — the map only covers Enums defined in the same
+    file.
+    """
+    out: dict[str, list[str]] = {}
+    for name, cls in pm.classes.items():
+        if _is_enum(cls):
+            out[name] = _enum_members(cls)
+    return out
+
+
+def _is_none_constant(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value is None
+
+
+def _head_name(node: ast.AST) -> str:
+    """Return the head identifier of a Name/Attribute, or "" for others."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return ""
+
+
+def _inspect_annotation(ann: ast.AST, enum_members: dict[str, list[str]]) -> dict:
+    """Recursively unwrap annotation wrappers and accumulate metadata.
+
+    Returns a dict with optional keys ``is_multivalued``,
+    ``is_nullable``, ``enum_values``. Missing keys mean the
+    corresponding signal was absent; caller layers defaults.
+
+    Codex r1: the walker recurses through wrappers (``Mapped[T]``,
+    ``Optional[T]``, ``T | None``, ``list[T]`` / ``Sequence[T]`` /
+    ``set[T]`` / ``tuple[T]``) so that wrapped forms like
+    ``Optional[Priority]``, ``Mapped[Literal["open","closed"]]``, and
+    ``list[Priority]`` propagate inner-type signals to the
+    AttributeFact. Signals are accumulated, not overwritten — any
+    nullable or multivalued wrapper anywhere in the chain flips the
+    flag.
+    """
+    out: dict = {}
+    _walk_annotation(ann, out, enum_members)
+    return out
+
+
+def _walk_annotation(node: ast.AST, out: dict, enum_members: dict[str, list[str]]) -> None:
+    """Depth-first recursive walker over annotation AST."""
+    # PEP 604 union: T | U  (handle before Subscript checks).
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        # X | None  /  None | X → nullable + recurse on the non-None side.
+        if _is_none_constant(node.left):
+            out["is_nullable"] = True
+            _walk_annotation(node.right, out, enum_members)
+            return
+        if _is_none_constant(node.right):
+            out["is_nullable"] = True
+            _walk_annotation(node.left, out, enum_members)
+            return
+        # Plain union of two real types — recurse on the left side only.
+        # Mixing enum_values from two real types is ambiguous; Phase A
+        # picks the left arm deterministically and Source C / B may
+        # override in PR2.
+        _walk_annotation(node.left, out, enum_members)
+        return
+
+    # Subscripted generic: Mapped[X], Optional[X], Literal[...], list[X],
+    # Annotated[X, ...], or any other Generic[X, Y, ...].
+    if isinstance(node, ast.Subscript):
+        head = _head_name(node.value)
+
+        # Transparent wrapper: just recurse through.
+        if head in _TRANSPARENT_WRAPPERS:
+            # Annotated[T, ...] passes through to T (the first slice elt
+            # when slice is a Tuple); other transparent wrappers take the
+            # whole slice.
+            if head == "Annotated" and isinstance(node.slice, ast.Tuple) and node.slice.elts:
+                _walk_annotation(node.slice.elts[0], out, enum_members)
+            else:
+                _walk_annotation(node.slice, out, enum_members)
+            return
+
+        # Optional[T] → nullable + recurse on T.
+        if head == "Optional":
+            out["is_nullable"] = True
+            _walk_annotation(node.slice, out, enum_members)
+            return
+
+        # Container[T] → multivalued + recurse on element type for
+        # enum/nullable. Don't propagate multivalued from nested
+        # containers (list[list[X]] is still one "multivalued" signal at
+        # the attribute level).
+        if head in _MULTIVALUE_TYPES:
+            out["is_multivalued"] = True
+            # Take the first element of a Tuple slice (e.g. tuple[int, str])
+            # for the enum/nullable scan; otherwise the whole slice.
+            target = node.slice
+            if isinstance(target, ast.Tuple) and target.elts:
+                target = target.elts[0]
+            _walk_annotation(target, out, enum_members)
+            return
+
+        # Literal["a", "b", ...] → terminal, extract enum_values.
+        if head == "Literal":
+            slc = node.slice
+            values: list[str] = []
+            if isinstance(slc, ast.Tuple):
+                for elt in slc.elts:
+                    if isinstance(elt, ast.Constant):
+                        values.append(str(elt.value))
+            elif isinstance(slc, ast.Constant):
+                values.append(str(slc.value))
+            if values:
+                out.setdefault("enum_values", values)
+            return
+
+        # Unknown subscripted generic (e.g. dict[str, int]) — don't
+        # recurse, no signal.
+        return
+
+    # Plain name reference to a same-module Enum → enum_values.
+    if isinstance(node, ast.Name) and node.id in enum_members:
+        out.setdefault("enum_values", list(enum_members[node.id]))
+        return
+
+    # Anything else (plain types like str/int, Attribute refs to
+    # external classes, complex expressions) — no signal.
+
+
+def _const_str(node: ast.AST) -> str | None:
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+
+def _const_bool(node: ast.AST) -> bool | None:
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, bool) else None
+
+
+def _inspect_value_call(value: ast.AST) -> dict:
+    """Extract metadata from the right-hand-side call of an AnnAssign.
+
+    Recognises:
+        - Pydantic   ``Field(description=..., default_factory=...)``
+        - dataclass  ``field(metadata={"description": ...}, default_factory=...)``
+        - SQLAlchemy ``Column(..., comment=..., primary_key=..., nullable=...)``
+        - SQLAlchemy ``mapped_column(..., comment=..., primary_key=..., nullable=...)``
+
+    Returns a dict with any of ``description``, ``default_factory``,
+    ``is_pk``, ``is_nullable``, ``is_multivalued``. Missing keys mean
+    the corresponding signal was absent.
+    """
+    out: dict = {}
+    if not isinstance(value, ast.Call):
+        return out
+
+    func = value.func
+    func_name = ""
+    if isinstance(func, ast.Name):
+        func_name = func.id
+    elif isinstance(func, ast.Attribute):
+        func_name = func.attr
+
+    is_pydantic_field = func_name == "Field"
+    is_dataclass_field = func_name == "field"
+    is_sqla_column = func_name in ("Column", "mapped_column")
+
+    if not (is_pydantic_field or is_dataclass_field or is_sqla_column):
+        return out
+
+    for kw in value.keywords:
+        if kw.arg is None:  # **kwargs spread
+            continue
+        if kw.arg == "description" and (is_pydantic_field or is_sqla_column):
+            s = _const_str(kw.value)
+            if s is not None:
+                out["description"] = s
+        elif kw.arg == "comment" and is_sqla_column:
+            s = _const_str(kw.value)
+            if s is not None:
+                out["description"] = s
+        elif kw.arg == "default_factory":
+            # Capture the literal source (e.g. "list", "lambda: []") so
+            # downstream consumers know the factory; mark multivalued
+            # when factory is a known collection constructor.
+            out["default_factory"] = ast.unparse(kw.value)
+            if isinstance(kw.value, ast.Name) and kw.value.id in _MULTIVALUE_TYPES:
+                out["is_multivalued"] = True
+        elif kw.arg == "metadata" and is_dataclass_field:
+            # dataclass field(metadata={"description": "..."})
+            if isinstance(kw.value, ast.Dict):
+                for k_node, v_node in zip(kw.value.keys, kw.value.values):
+                    if _const_str(k_node) == "description":
+                        s = _const_str(v_node)
+                        if s is not None:
+                            out["description"] = s
+        elif kw.arg == "primary_key" and is_sqla_column:
+            b = _const_bool(kw.value)
+            if b is True:
+                out["is_pk"] = True
+        elif kw.arg == "nullable" and is_sqla_column:
+            b = _const_bool(kw.value)
+            if b is False:
+                out["is_nullable"] = False
+            elif b is True:
+                out["is_nullable"] = True
+
+    return out
+
+
+def _extract_inline_comment(stmt: ast.AST, source: str) -> str:
+    """Return the trailing ``# comment`` on the same physical line as the
+    statement, or an empty string. Last-resort description fallback.
+    """
+    line_no = getattr(stmt, "lineno", None)
+    if line_no is None:
+        return ""
+    lines = source.splitlines()
+    if line_no < 1 or line_no > len(lines):
+        return ""
+    line = lines[line_no - 1]
+    hash_pos = line.find("#")
+    if hash_pos == -1:
+        return ""
+    return line[hash_pos + 1:].strip()
+
+
+def _attribute_metadata(stmt: ast.AnnAssign, source: str, enum_members: dict[str, list[str]]) -> dict:
+    """Merge metadata signals from annotation + value-side call + inline
+    comment. Returns kwargs the AttributeFact constructor accepts.
+    """
+    md: dict = {}
+    if stmt.annotation is not None:
+        md["raw_type"] = ast.unparse(stmt.annotation)
+        md.update(_inspect_annotation(stmt.annotation, enum_members))
+    if stmt.value is not None:
+        md.update(_inspect_value_call(stmt.value))
+    if "description" not in md:
+        comment = _extract_inline_comment(stmt, source)
+        if comment:
+            md["description"] = comment
+    return md
+
+
 def extract_model(pm: ParsedModule, config: dict | None = None) -> Iterable[object]:
     """Extract entity, attribute, vocabulary, behavior, and inline rule facts
     from class definitions in a parsed module.
@@ -125,6 +405,9 @@ def extract_model(pm: ParsedModule, config: dict | None = None) -> Iterable[obje
     user_force_vocab: list[str] = list(config.get("force_vocabulary", []) or [])
     file = str(pm.path)
     constants = _collect_module_constants(pm)
+    # PR1a: pre-collect enum members so AttributeFact annotations like
+    # ``status: LoanStatus`` can populate enum_values via cross-class lookup.
+    enum_members = _collect_enum_members_map(pm)
 
     for cls_name, cls in pm.classes.items():
         # ── Private-class skip ────────────────────────────────────────────
@@ -187,6 +470,7 @@ def extract_model(pm: ParsedModule, config: dict | None = None) -> Iterable[obje
                         extractor_family="model",
                         annotation=ast.unparse(stmt.annotation) if stmt.annotation else None,
                         has_default=stmt.value is not None,
+                        **_attribute_metadata(stmt, pm.source, enum_members),
                     )
             continue
 
@@ -216,6 +500,7 @@ def extract_model(pm: ParsedModule, config: dict | None = None) -> Iterable[obje
                     extractor_family="model",
                     annotation=ast.unparse(stmt.annotation) if stmt.annotation else None,
                     has_default=stmt.value is not None,
+                    **_attribute_metadata(stmt, pm.source, enum_members),
                 )
             elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and not stmt.name.startswith("_"):
                 yield BehaviorFact(

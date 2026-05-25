@@ -542,3 +542,119 @@ def test_format_rule_summary_handles_zero_rules():
 
     summary = _format_rule_summary([])
     assert summary == "Rules: 0"
+
+
+# ─── PR1b r1 (Codex follow-up) — discovery/source-c.json + source-d.json ───
+#
+# Survey orchestration: when --source-c (.sql) is passed, discovery
+# must contain a typed source-c.json (the SchemaResult contract); when
+# --source-d (.py) is passed, discovery must contain source-d.json
+# (the SourceDResult contract). When neither flag is passed, neither
+# file appears — silent skip preserves backwards-compat for old
+# invocations.
+
+
+def test_survey_writes_discovery_source_c_json_when_source_c_passed(tmp_path):
+    domain_dir = tmp_path / "domains" / "test"
+    domain_dir.mkdir(parents=True)
+    sa = tmp_path / "source-a.json"
+    _write_source_a_json(sa, [{"name": "Customer", "definition": "C"}])
+    schema = tmp_path / "schema.sql"
+    schema.write_text(
+        "CREATE TABLE customer (id INT PRIMARY KEY, email VARCHAR(255) NOT NULL);",
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, [
+        "survey",
+        "--source-a", str(sa),
+        "--source-c", str(schema),
+        "--domain-dir", str(domain_dir),
+    ])
+    assert result.exit_code == 0, result.output
+    sc_path = domain_dir / "discovery" / "source-c.json"
+    assert sc_path.exists(), "expected discovery/source-c.json to be written"
+    payload = json.loads(sc_path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "1.0"
+    assert any(m["name"] == "customer" for m in payload["models"])
+    customer = next(m for m in payload["models"] if m["name"] == "customer")
+    assert {f["name"] for f in customer["fields"]} == {"id", "email"}
+
+
+def test_survey_writes_discovery_source_d_json_when_source_d_passed(tmp_path):
+    domain_dir = tmp_path / "domains" / "test"
+    domain_dir.mkdir(parents=True)
+    sa = tmp_path / "source-a.json"
+    _write_source_a_json(sa, [{"name": "Customer", "definition": "C"}])
+    py = tmp_path / "customer.py"
+    py.write_text(
+        "from dataclasses import dataclass\n"
+        "@dataclass\n"
+        "class Customer:\n"
+        "    id: int\n"
+        "    email: str\n",
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, [
+        "survey",
+        "--source-a", str(sa),
+        "--source-d", str(py),
+        "--domain-dir", str(domain_dir),
+    ])
+    assert result.exit_code == 0, result.output
+    sd_path = domain_dir / "discovery" / "source-d.json"
+    assert sd_path.exists(), "expected discovery/source-d.json to be written"
+    payload = json.loads(sd_path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "1.0"
+    assert any(e["name"] == "Customer" for e in payload["entities"])
+    customer = next(e for e in payload["entities"] if e["name"] == "Customer")
+    assert {a["name"] for a in customer["attributes"]} == {"id", "email"}
+
+
+def test_survey_silent_skip_when_no_source_c_and_no_source_d(tmp_path):
+    """Old-style invocation without --source-c / --source-d: discovery
+    dir must NOT contain source-c.json or source-d.json."""
+    domain_dir = tmp_path / "domains" / "test"
+    domain_dir.mkdir(parents=True)
+    sa = tmp_path / "source-a.json"
+    _write_source_a_json(sa, [{"name": "Customer", "definition": "C"}])
+    result = runner.invoke(app, [
+        "survey",
+        "--source-a", str(sa),
+        "--domain-dir", str(domain_dir),
+    ])
+    assert result.exit_code == 0, result.output
+    assert not (domain_dir / "discovery" / "source-c.json").exists()
+    assert not (domain_dir / "discovery" / "source-d.json").exists()
+
+
+def test_survey_source_c_yaml_exclude_tables_drops_from_discovery_source_c_json(tmp_path):
+    """Codex PR1b r1 blocker 1 regression guard: a per-domain
+    source-c.yaml excludes legacy_* tables; discovery/source-c.json
+    must NOT contain them."""
+    domain_dir = tmp_path / "domains" / "test"
+    domain_dir.mkdir(parents=True)
+    sa = tmp_path / "source-a.json"
+    _write_source_a_json(sa, [{"name": "Customer", "definition": "C"}])
+    schema = tmp_path / "schema.sql"
+    schema.write_text(
+        "CREATE TABLE customer (id INT PRIMARY KEY);\n"
+        "CREATE TABLE legacy_loans (id INT PRIMARY KEY);\n",
+        encoding="utf-8",
+    )
+    (domain_dir / "source-c.yaml").write_text(
+        "source_c:\n  exclude_tables:\n    - legacy_*\n",
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, [
+        "survey",
+        "--source-a", str(sa),
+        "--source-c", str(schema),
+        "--domain-dir", str(domain_dir),
+    ])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(
+        (domain_dir / "discovery" / "source-c.json").read_text(encoding="utf-8")
+    )
+    names = {m["name"] for m in payload["models"]}
+    assert "customer" in names
+    assert "legacy_loans" not in names

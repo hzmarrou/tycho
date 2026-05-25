@@ -40,7 +40,6 @@ from typing import Any, Optional
 from ..extractors.domain_doc_extractor import (
     Concept,
     DomainDocumentExtractionResult,
-    Relationship,
 )
 from ..extractors.governance_extractor import (
     GovernanceExtractionResult,
@@ -48,6 +47,13 @@ from ..extractors.governance_extractor import (
 )
 from .source_c import SchemaField, SchemaModel, SchemaResult
 from ..extractors.code_extractor import CodeExtractionResult, CodeRule
+from .attribute import (
+    Attribute,
+    FieldProvenance as AttrFieldProvenance,
+    xsd_type_for_python,
+    xsd_type_for_sql,
+)
+from .source_d import SourceDAttribute, SourceDEntity, SourceDResult
 
 
 # ─── Name normalisation ─────────────────────────────────────────────────────
@@ -187,6 +193,16 @@ class FusedElement:
     field_provenance: dict[str, FieldProvenance] = field(default_factory=dict)
     conflicts: list[FieldConflict] = field(default_factory=list)
     governance_validated: bool = False
+
+    # ── Per-attribute typed properties (PR2 of property extraction) ──
+    # Populated by ``attach_attributes_to_elements`` from the deterministic
+    # Source C / D / B discovery artifacts. Empty when no matching
+    # Source C table / Source D class / Source B record carries
+    # attribute metadata. PR3 projects each Attribute into one
+    # ``owl:DatatypeProperty`` on the OWL output. Default ``[]`` so
+    # legacy code paths and fused.json files without an attributes key
+    # round-trip cleanly.
+    attributes: list[Attribute] = field(default_factory=list)
 
     # ── Confidence (average across populated fields) ──
     confidence: float = 0.0
@@ -1010,3 +1026,365 @@ class FusionEngine:
             el.data_type = value
         elif field_name == "mandatory_optional":
             el.extra_fields["mandatory_optional"] = value
+
+
+# ─── PR2: attribute-level fusion ────────────────────────────────────────────
+#
+# Property extraction Phase A (PR2). Mutates an existing FusionResult
+# in place, populating ``FusedElement.attributes`` from the deterministic
+# discovery artifacts:
+#
+#   - Source C ``SchemaResult``   (typed columns + PKs + FKs + enum from CHECK)
+#   - Source D ``SourceDResult``  (typed fields + descriptions + Pydantic /
+#                                   dataclass / SQLA metadata captured by PR1a)
+#   - Source B ``GovernanceExtractionResult`` (governance records whose
+#     ``extra_fields["data_type"]`` and ``extra_fields["enum_values"]``
+#     carry attribute info — Codex r3 fallback)
+#
+# Precedence (per design §5 + Codex r1 resolution of Open Question #4):
+#   * Source C wins storage facts:
+#       xsd_type, is_nullable, is_id (PK), enum_values from DB CHECK.
+#   * Source D wins description and contributes is_multivalued when
+#     C is silent.
+#   * Source B is a silent fallback used only when C and D are both
+#     absent for a given attribute; B-only attributes carry
+#     confidence = 0.7 (lower than the 1.0 used for deterministic
+#     C / D extractions).
+#
+# Matching is **exact + normalised name only** (Codex hard constraint
+# for Phase A — no fuzzy match). Element-to-table-or-class match keys
+# the lookup; attribute-name match within the entity uses the same
+# rule.
+#
+# B-only attributes have an extra wrinkle: governance records expose
+# their data via ``extra_fields["data_type"]`` (str) and
+# ``extra_fields["enum_values"]`` (list[str] | comma-string |
+# semicolon-string | malformed). The helper deterministically
+# normalises every supported shape and skips silently for malformed
+# input.
+
+
+_B_ATTR_DEFAULT_CONFIDENCE = 0.7
+
+
+def _normalise_b_enum_values(raw: Any) -> list[str] | None:
+    """Coerce ``extra_fields["enum_values"]`` to a list[str].
+
+    Per Codex round-3 implementation caution, governance.json may
+    supply enum_values as:
+      - ``list``                → use as-is (stringified)
+      - ``str``                 → split on ``;`` first, then ``,``
+      - anything else           → unsupported; return None
+
+    Returns ``None`` when the shape is unsupported so the caller can
+    skip the attribute and log via the existing conflicts channel.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, list):
+        return [str(v).strip() for v in raw if str(v).strip()]
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return None
+        delim = ";" if ";" in s else ","
+        return [tok.strip() for tok in s.split(delim) if tok.strip()]
+    return None
+
+
+def _normalise_b_data_type(raw: Any) -> str | None:
+    """Coerce ``extra_fields["data_type"]`` to a str.
+
+    Non-str input → None (caller skips the attribute).
+    """
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return None
+
+
+def _attribute_from_schema_field(
+    sf: "SchemaField", model_name: str, artifact: str,
+) -> Attribute:
+    """Build an Attribute from a Source C SchemaField — the C-side of
+    the precedence rule (storage facts)."""
+    enum = list(sf.choices_values) if sf.choices_values else []
+    raw_type = sf.field_type or ""
+    return Attribute(
+        name=sf.name,
+        xsd_type=xsd_type_for_sql(raw_type) if raw_type else "xsd:string",
+        description="",
+        is_id=bool(sf.is_primary_key),
+        is_multivalued=False,
+        is_nullable=bool(sf.is_nullable),
+        enum_values=enum,
+        raw_type=raw_type,
+        field_provenance=[AttrFieldProvenance(
+            source="C",
+            artifact=artifact,
+            line=0,
+            confidence=1.0,
+            extractor="ddl",
+        )],
+        confidence=1.0,
+    )
+
+
+def _attribute_from_source_d(
+    sa: "SourceDAttribute", entity_name: str, artifact: str,
+) -> Attribute:
+    """Build an Attribute from a Source D SourceDAttribute — the D-side
+    of the precedence rule (description + multivalued fallback)."""
+    py = (sa.raw_type or "").strip()
+    return Attribute(
+        name=sa.name,
+        xsd_type=xsd_type_for_python(py) if py else "xsd:string",
+        description=sa.description,
+        is_id=bool(sa.is_pk),
+        is_multivalued=bool(sa.is_multivalued),
+        is_nullable=bool(sa.is_nullable),
+        enum_values=list(sa.enum_values),
+        raw_type=py,
+        field_provenance=[AttrFieldProvenance(
+            source="D",
+            artifact=artifact,
+            line=sa.line,
+            confidence=1.0,
+            extractor="ast",
+        )],
+        confidence=1.0,
+    )
+
+
+def _merge_attribute_c_into_d(
+    c_attr: Attribute, d_attr: Attribute,
+) -> tuple[Attribute, list[FieldConflict]]:
+    """Merge a C-side Attribute and a D-side Attribute for the same
+    column / field name.
+
+    Returns the merged Attribute and a list of any FieldConflict
+    records produced when C and D disagreed on a storage fact.
+
+    Precedence (design §5 / Codex r1):
+      * xsd_type    — C wins (storage truth). D-side recorded in
+                      conflicts when types differ.
+      * is_id       — C wins.
+      * is_nullable — C wins.
+      * enum_values — C wins when populated; else D.
+      * raw_type    — C wins.
+      * description — D wins when populated; else C.
+      * is_multivalued — D wins when True (collection annotation is a
+                      strong signal C-side rarely carries cleanly).
+      * field_provenance — both contributing sources retained.
+    """
+    conflicts: list[FieldConflict] = []
+
+    merged = Attribute(
+        name=c_attr.name,
+        xsd_type=c_attr.xsd_type,
+        description=d_attr.description or c_attr.description,
+        is_id=c_attr.is_id,
+        is_multivalued=d_attr.is_multivalued or c_attr.is_multivalued,
+        is_nullable=c_attr.is_nullable,
+        enum_values=(
+            list(c_attr.enum_values) if c_attr.enum_values
+            else list(d_attr.enum_values)
+        ),
+        raw_type=c_attr.raw_type or d_attr.raw_type,
+        field_provenance=list(c_attr.field_provenance) + list(d_attr.field_provenance),
+        confidence=1.0,
+    )
+
+    if c_attr.xsd_type != d_attr.xsd_type:
+        c_fp = c_attr.field_provenance[0] if c_attr.field_provenance else None
+        d_fp = d_attr.field_provenance[0] if d_attr.field_provenance else None
+        if c_fp and d_fp:
+            conflicts.append(FieldConflict(
+                field_name=f"{c_attr.name}.xsd_type",
+                winner=FieldProvenance(
+                    source=c_fp.source,
+                    confidence=c_fp.confidence,
+                    original_value=c_attr.xsd_type,
+                ),
+                rejected=[FieldProvenance(
+                    source=d_fp.source,
+                    confidence=d_fp.confidence,
+                    original_value=d_attr.xsd_type,
+                )],
+                resolution="priority",
+            ))
+
+    return merged, conflicts
+
+
+def _attach_b_only_attributes(
+    element: FusedElement,
+    governance_records: list["GovernanceRecord"],
+) -> None:
+    """Populate B-only attributes on ``element`` from governance records
+    whose ``extra_fields["data_type"]`` is populated, when C and D
+    haven't already supplied an attribute set.
+
+    Shape guards (per Codex r1 review on PR2):
+      * ``extra_fields["data_type"]`` present but non-str → skip + log
+        a FieldConflict so the curator sees the malformed input.
+      * ``extra_fields["enum_values"]`` present but malformed (dict /
+        number / nested object) → skip + log.
+      * Both keys absent → silent no-op (the governance record carried
+        no attribute hint).
+    """
+    if element.attributes:
+        return  # C/D already populated; B is silent fallback
+    if not governance_records:
+        return
+    target = normalise_name(element.element_name)
+    for rec in governance_records:
+        if normalise_name(rec.element_name) != target:
+            continue
+        data_type_raw = rec.extra_fields.get("data_type")
+        data_type = _normalise_b_data_type(data_type_raw)
+        enum_raw = rec.extra_fields.get("enum_values")
+        enum_values = _normalise_b_enum_values(enum_raw)
+
+        # Shape guards: present-but-malformed → log + skip.
+        # "Malformed" means the wrong type (non-str for data_type,
+        # not-list-or-str for enum_values). An empty string is a
+        # *valid* type that simply carries no content — that's a
+        # silent no-op, not a contract violation, so we don't log it.
+        data_type_malformed = (
+            data_type_raw is not None
+            and not isinstance(data_type_raw, str)
+        )
+        enum_malformed = enum_raw is not None and enum_values is None
+        if data_type_malformed:
+            element.conflicts.append(FieldConflict(
+                field_name=f"{element.element_name}.b_data_type",
+                winner=FieldProvenance("B", 0.0, ""),
+                rejected=[],
+                resolution="unresolved",
+            ))
+        if enum_malformed:
+            element.conflicts.append(FieldConflict(
+                field_name=f"{element.element_name}.b_enum_values",
+                winner=FieldProvenance("B", 0.0, ""),
+                rejected=[],
+                resolution="unresolved",
+            ))
+        if data_type_malformed or enum_malformed:
+            # Don't materialise an attribute from a malformed record —
+            # the conflict is logged and the curator gets a chance to
+            # fix the governance JSON.
+            continue
+
+        if data_type is None and enum_values is None:
+            continue
+        # Surface as a single Attribute named after the governance
+        # record's element so B carries some signal forward. Phase A
+        # treats B as a fallback marker, not a column enumerator.
+        xsd = xsd_type_for_sql(data_type) if data_type else "xsd:string"
+        element.attributes.append(Attribute(
+            name=rec.element_name,
+            xsd_type=xsd,
+            description=rec.definition or "",
+            is_id=False,
+            is_multivalued=False,
+            is_nullable=True,
+            enum_values=enum_values or [],
+            raw_type=data_type or "",
+            field_provenance=[AttrFieldProvenance(
+                source="B",
+                artifact="governance.json",
+                line=0,
+                confidence=_B_ATTR_DEFAULT_CONFIDENCE,
+                extractor="governance",
+            )],
+            confidence=_B_ATTR_DEFAULT_CONFIDENCE,
+        ))
+        break  # one B record per element
+
+
+def attach_attributes_to_elements(
+    fused: FusionResult,
+    *,
+    schema: SchemaResult | None = None,
+    source_d: SourceDResult | None = None,
+    governance: GovernanceExtractionResult | None = None,
+) -> None:
+    """Mutate ``fused`` in place, populating each FusedElement's
+    ``attributes`` list from the deterministic Source C/D/B discovery
+    artifacts.
+
+    Matching is exact + normalised name only (Codex hard constraint).
+    Element-to-table-or-class match keys the lookup; attribute-name
+    match within the entity uses the same rule.
+
+    Per-attribute conflict between C and D on storage facts is logged
+    to the FusedElement.conflicts list using the existing
+    FieldConflict shape.
+
+    Phase A scope: only attaches attributes to elements that already
+    exist in the FusionResult. Source-D-only entities (a Python class
+    present in code but with no matching FusedElement) are not
+    promoted to new elements here — that's deferred.
+    """
+    # Build name → SchemaModel / SourceDEntity lookup tables.
+    c_index: dict[str, "SchemaModel"] = {}
+    if schema is not None:
+        for m in schema.models:
+            c_index[normalise_name(m.name)] = m
+
+    d_index: dict[str, "SourceDEntity"] = {}
+    if source_d is not None:
+        for e in source_d.entities:
+            d_index[normalise_name(e.name)] = e
+
+    governance_records: list["GovernanceRecord"] = (
+        list(governance.records) if governance is not None else []
+    )
+
+    for element in fused.elements:
+        key = normalise_name(element.element_name)
+        c_model = c_index.get(key)
+        d_entity = d_index.get(key)
+
+        if c_model is None and d_entity is None:
+            # Neither C nor D matched: try Source B fallback.
+            _attach_b_only_attributes(element, governance_records)
+            continue
+
+        # Collect C-side attributes by normalised column name.
+        c_attrs: dict[str, Attribute] = {}
+        if c_model is not None:
+            for sf in c_model.fields:
+                c_attrs[normalise_name(sf.name)] = _attribute_from_schema_field(
+                    sf, model_name=c_model.name,
+                    artifact=c_model.source_file or "",
+                )
+
+        # Collect D-side attributes by normalised attribute name.
+        d_attrs: dict[str, Attribute] = {}
+        if d_entity is not None:
+            for da in d_entity.attributes:
+                d_attrs[normalise_name(da.name)] = _attribute_from_source_d(
+                    da, entity_name=d_entity.name,
+                    artifact=d_entity.source_file or "",
+                )
+
+        # Merge by name. C-only / D-only kept as-is; C+D merged with
+        # conflicts surfaced on the element.
+        merged: list[Attribute] = []
+        all_keys = sorted(set(c_attrs.keys()) | set(d_attrs.keys()))
+        for k in all_keys:
+            c_attr = c_attrs.get(k)
+            d_attr = d_attrs.get(k)
+            if c_attr and d_attr:
+                merged_attr, conflicts = _merge_attribute_c_into_d(
+                    c_attr, d_attr,
+                )
+                merged.append(merged_attr)
+                element.conflicts.extend(conflicts)
+            elif c_attr:
+                merged.append(c_attr)
+            elif d_attr:
+                merged.append(d_attr)
+
+        element.attributes = merged
