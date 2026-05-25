@@ -1076,6 +1076,12 @@ def _reconstruct_fusion_result(raw: dict) -> "FusionResult":
             anchor=_anchor_from_dict(item.get("anchor")),
         )
 
+    # PR2 (property extraction): defensively deserialise the new
+    # ``attributes`` key on each element. Legacy fused.json files
+    # (written before PR2 landed) have no key — default to ``[]`` so
+    # reload remains backwards-compatible.
+    from .core.attribute import Attribute
+
     elements = []
     for re_ in raw.get("elements", []):
         el = FusedElement(
@@ -1094,6 +1100,9 @@ def _reconstruct_fusion_result(raw: dict) -> "FusionResult":
             sources=re_.get("sources", []),
             governance_validated=re_.get("governance_validated", False),
             confidence=re_.get("confidence", 0.0),
+            attributes=[
+                Attribute.from_json_dict(a) for a in re_.get("attributes", []) or []
+            ],
         )
         for rc in re_.get("conflicts", []):
             w = rc.get("winner", {})
@@ -1405,6 +1414,11 @@ def _serialize_element(el) -> dict:
 
     Mirrors the shape produced by the fuse command so validate's output
     is compatible with downstream lint / consumers.
+
+    PR2 (property extraction): adds ``attributes`` to the whitelist so
+    the typed properties land in fused.json. Empty list when nothing
+    matched the element — preserves backwards-compat for fixtures
+    without attributes.
     """
     return {
         "element_name": el.element_name,
@@ -1433,6 +1447,9 @@ def _serialize_element(el) -> dict:
             for c in el.conflicts
         ],
         "extra_fields": el.extra_fields,
+        "attributes": [
+            a.to_json_dict() for a in getattr(el, "attributes", []) or []
+        ],
     }
 
 
@@ -1943,6 +1960,12 @@ def fuse(
         )
 
     # ── Write output ──
+    # PR2 r1 (Codex blocker 1): use the shared _serialize_element helper
+    # so standalone `fuse` produces the same element shape as
+    # `_run_fuse_for_draft` / validate / lint paths. Pre-PR2 r1 this
+    # block built the dict by hand and silently omitted ``attributes``,
+    # making fuse-produced fused.json structurally diverge from
+    # draft-produced fused.json (per PR2 r0 review).
     out_data = {
         "fusion_timestamp": result.fusion_timestamp,
         "sources_used": result.sources_used,
@@ -1955,37 +1978,7 @@ def fuse(
             "unmatched_schema_fields": len(result.unmatched_schema_fields),
             "unmatched_code_rules": len(result.unmatched_code_rules),
         },
-        "elements": [
-            {
-                "element_name": el.element_name,
-                "domain_name": el.domain_name,
-                "definition": el.definition,
-                "is_critical": el.is_critical,
-                "citation": el.citation,
-                "data_type": el.data_type,
-                "enum_values": el.enum_values,
-                "business_rules": [
-                    _serialize_business_rule(br) for br in el.business_rules
-                ],
-                "governance_validated": el.governance_validated,
-                "confidence": round(el.confidence, 3),
-                "sources": el.sources,
-                "needs_review": el.needs_review(),
-                "conflicts": [
-                    {
-                        "field": c.field_name,
-                        "winner": _serialize_field_provenance(c.winner),
-                        "rejected": [
-                            _serialize_field_provenance(r) for r in c.rejected
-                        ],
-                        "resolution": c.resolution,
-                    }
-                    for c in el.conflicts
-                ],
-                "extra_fields": el.extra_fields,
-            }
-            for el in result.elements
-        ],
+        "elements": [_serialize_element(el) for el in result.elements],
         "relationships": [
             {
                 "subject": r.subject,
@@ -3670,6 +3663,7 @@ def draft(
         source_b=source_b,
         source_c=source_c,
         source_d=source_d,
+        discovery_dir=discovery_dir,
     )
 
     validation_report = run_validate(fused, loaded_profile, mode=mode)
@@ -3708,6 +3702,7 @@ def _run_fuse_for_draft(
     source_b: Path | None = None,
     source_c: Path | None = None,
     source_d: Path | None = None,
+    discovery_dir: Path | None = None,
 ):
     """Run fusion programmatically and persist ``fused.json``.
 
@@ -3718,11 +3713,20 @@ def _run_fuse_for_draft(
     ``fuse`` command uses and passed to ``engine.fuse()`` so the
     Stage 2 contract — "fuse the resolved profile + all source
     inputs" — is satisfied.
+
+    PR2 (property extraction): when ``discovery_dir`` is supplied,
+    the helper reads ``discovery/source-c.json`` and
+    ``discovery/source-d.json`` (the typed contracts written by
+    ``survey`` in PR1b) and calls
+    :func:`ontozense.core.fusion.attach_attributes_to_elements` so
+    each FusedElement gains an ``attributes`` list. Missing
+    discovery files are tolerated silently — the element-level
+    fusion remains unchanged and ``attributes`` stays empty.
     """
     import json as _json
     from dataclasses import asdict
 
-    from .core.fusion import FusionEngine
+    from .core.fusion import FusionEngine, attach_attributes_to_elements
 
     sa_result = _load_source_a_json(source_a_path)
 
@@ -3769,6 +3773,48 @@ def _run_fuse_for_draft(
         source_c=sc_result,
         source_d=sd_result,
     )
+
+    # PR2: attach per-attribute properties from the deterministic
+    # discovery artifacts. Missing files yield empty attributes; no
+    # exception. Survey-time suppression (applied by PR1b) flows
+    # naturally because we read what survey persisted.
+    if discovery_dir is not None:
+        from .core.source_c import (
+            SourceCContractError,
+            load_source_c_json,
+        )
+        from .core.source_d import (
+            SourceDContractError,
+            load_source_d_json,
+        )
+
+        schema = None
+        sd_typed = None
+        sc_path = discovery_dir / "source-c.json"
+        sd_path = discovery_dir / "source-d.json"
+        if sc_path.exists():
+            try:
+                schema = load_source_c_json(sc_path)
+            except SourceCContractError as err:
+                console.print(
+                    f"[yellow]Source C discovery file invalid:[/] {err}\n"
+                    f"  Attribute fusion will skip Source C contributions."
+                )
+        if sd_path.exists():
+            try:
+                sd_typed = load_source_d_json(sd_path)
+            except SourceDContractError as err:
+                console.print(
+                    f"[yellow]Source D discovery file invalid:[/] {err}\n"
+                    f"  Attribute fusion will skip Source D contributions."
+                )
+        attach_attributes_to_elements(
+            result,
+            schema=schema,
+            source_d=sd_typed,
+            governance=sb_result,
+        )
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
         _json.dumps(asdict(result), indent=2, default=str),
