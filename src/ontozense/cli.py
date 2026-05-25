@@ -3331,6 +3331,53 @@ def survey(
         encoding="utf-8",
     )
 
+    # ─── PR1b: persist Source C / D field-level metadata ──
+    # Property extraction Phase A. The candidate-graph drops per-column
+    # SQL type / per-field Python type metadata; PR2's fusion engine
+    # needs it to build typed Attribute records on each FusedElement.
+    # We write parallel discovery files with the full typed contracts
+    # so the lossy projection in candidate-graph.json doesn't constrain
+    # downstream property emission. Skipped silently when the source
+    # was not provided — preserves byte-identical behaviour for old
+    # survey invocations (--source-c / --source-d absent).
+    if c_files:
+        sql_inputs = [p for p in c_files if p.suffix.lower() == ".sql"]
+        if sql_inputs:
+            from .core.source_c import (
+                build_schema_from_sql_files,
+                dump_source_c_json,
+            )
+            # PR1b r1 (Codex blocker 1): pass source_c_config so the
+            # persistence path applies the same exclude_tables /
+            # include_tables / exclude_columns + default suppressions
+            # SourceCIngester enforces for the candidate-graph build.
+            schema_result = build_schema_from_sql_files(
+                sql_inputs,
+                source_dir=str(sql_inputs[0].parent),
+                config=source_c_config,
+            )
+            dump_source_c_json(
+                schema_result, discovery_dir / "source-c.json",
+            )
+    if d_files:
+        py_inputs = [p for p in d_files if p.suffix.lower() == ".py"]
+        if py_inputs:
+            from .core.source_d import (
+                build_source_d_from_files,
+                dump_source_d_json,
+            )
+            # PR1b r1 (Codex blocker 2): source_d_config carries
+            # exclude_paths + class-level filters the builder now
+            # mirrors against SourceDIngester (default path
+            # suppressions + generated-code markers applied
+            # unconditionally; YAML adds the user layer).
+            sd_result = build_source_d_from_files(
+                py_inputs, config=source_d_config,
+            )
+            dump_source_d_json(
+                sd_result, discovery_dir / "source-d.json",
+            )
+
     cross = sum(
         1 for c in graph.concepts
         if c.source_presence.get("A") and c.source_presence.get("B")
