@@ -2,7 +2,7 @@
 
 **Status:** Draft for review, revised 2026-05-25 per Codex review rounds 1 and 2
 **Author:** Generated via Claude Code session, 2026-05-25
-**Reviewers:** Codex (r1 APPROVE-WITH-CHANGES, r2 REJECT — addressed in implementation plan r2; design doc unchanged at r2)
+**Reviewers:** Codex (r1 APPROVE-WITH-CHANGES, r2 REJECT — addressed in implementation plan r2; r3 APPROVE — design doc unchanged at r3)
 **Related docs:** [PROFILE_INDUCTION_ARCHITECTURE.md](./PROFILE_INDUCTION_ARCHITECTURE.md),
 [PROFILE_SPEC.md](./PROFILE_SPEC.md), [SPIRES.md](./SPIRES.md),
 [PROPERTY_EXTRACTION_IMPLEMENTATION_PLAN.md](./PROPERTY_EXTRACTION_IMPLEMENTATION_PLAN.md)

@@ -4,10 +4,18 @@
 **Scope:** Phase A only (deterministic Source C/D/B path).
 Phases B and C get their own plans once Phase A is merged and validated
 end-to-end.
-**Target reviewer:** Codex (round 3 after revision)
+**Reviewer status:** Codex APPROVE on r3 (2026-05-25). r3 patches address final nit + impl caution.
 **Branch:** `feat/property-extraction`
 
 **Revisions:**
+- 2026-05-25 r3: Codex round-3 review (APPROVE). Minor changes:
+  - §6 wording tightened — removed self-contradictory "fully
+    independent" claim. Revert units are internally atomic; ordering
+    across units is reverse-merge.
+  - §3 PR2 gains an "enum_values input normalisation" subsection
+    covering list / comma-string / semicolon-string / malformed
+    shapes (Codex implementation caution). `data_type` shape guard
+    added too. Test list extended to cover each variant.
 - 2026-05-25 r2: Codex round-2 review (REJECT → addressed). Changes:
   - PR1a's `AttributeFact` extension now includes
     `description: str = ""`, so the "D wins description" rule in PR2
@@ -296,6 +304,22 @@ until PR2.
   `_attribute_from_governance(rec)` that returns `None` when neither
   key is present, so B-only attributes only materialise when the
   governance JSON actually carries the data.
+
+  **enum_values input normalisation (r3 — Codex impl caution):** the
+  `extra_fields["enum_values"]` value may arrive from governance.json
+  as either a `list[str]` (canonical) or as a delimiter-separated
+  `str` ("open,closed" / "open;closed"). PR2's
+  `_attribute_from_governance(rec)` normalises deterministically:
+    - `list` → use as-is, stringify each element.
+    - `str` → split on `;` first, then `,`, strip whitespace, drop
+      empties.
+    - any other type (dict, number, None) → skip the field, log via
+      the existing conflicts channel ("source B enum_values: unsupported
+      shape, ignored"). No attribute materialises from B for this
+      record. The same coercion rule applies to `extra_fields["data_type"]`
+      (must be str; non-str → skip + log).
+  Test list extended with a dedicated normalisation case (string,
+  list, malformed).
   - Per-attribute provenance (`field_provenance: list[FieldProvenance]`)
     populated from contributing sources.
   - Conflicts logged into the existing `FusedElement.conflicts` list.
@@ -311,7 +335,10 @@ until PR2.
 - Tests:
   - `test_fusion_attributes.py` covering C-only, D-only, C+D
     agreement, C+D type conflict (C wins), B-only via
-    `extra_fields["data_type"]`, B with `extra_fields["enum_values"]`,
+    `extra_fields["data_type"]`, B with `extra_fields["enum_values"]`
+    as `list[str]`, B with `enum_values` as comma-separated `str`,
+    B with `enum_values` as semicolon-separated `str`,
+    B with malformed `enum_values` (dict / number → skip + log),
     governance record with neither key (no attribute materialises),
     enum extraction from Source D.
   - `test_fusion_serialization.py` — round-trip fused.json with
@@ -479,9 +506,11 @@ and round-trips; `draft.owl` is unchanged.
 
 ---
 
-## 6. Rollback plan (revised r2)
+## 6. Rollback plan (revised r2, tightened r3)
 
-Three revert units, each fully independent:
+Three revert units. Each unit is internally atomic (revert the unit as
+a whole, never a single PR within it). Units must be reverted in
+reverse merge order — see "Rollback ordering across units" below.
 
 | Unit | What it covers | What reverting it leaves behind |
 |---|---|---|
