@@ -1,10 +1,18 @@
 # Property Extraction — Design Proposal
 
-**Status:** Draft for review
+**Status:** Draft for review, revised 2026-05-25 per Codex review (APPROVE-WITH-CHANGES)
 **Author:** Generated via Claude Code session, 2026-05-25
-**Reviewers:** [assign]
+**Reviewers:** Codex (round 1: APPROVE-WITH-CHANGES on 2026-05-25)
 **Related docs:** [PROFILE_INDUCTION_ARCHITECTURE.md](./PROFILE_INDUCTION_ARCHITECTURE.md),
-[PROFILE_SPEC.md](./PROFILE_SPEC.md), [SPIRES.md](./SPIRES.md)
+[PROFILE_SPEC.md](./PROFILE_SPEC.md), [SPIRES.md](./SPIRES.md),
+[PROPERTY_EXTRACTION_IMPLEMENTATION_PLAN.md](./PROPERTY_EXTRACTION_IMPLEMENTATION_PLAN.md)
+
+**Revisions:**
+- 2026-05-25 r1: incorporated Codex review — XSD table expanded, UUID
+  corrected to `xsd:string`, `Attribute` dataclass gains `description`,
+  Source C/D precedence rewritten around storage-vs-semantic split, OWL
+  emission moved off on-property restrictions, URI scheme adds `/rel/`
+  branch for object properties to avoid attribute/predicate collision.
 
 ---
 
@@ -294,33 +302,58 @@ entity_types:
 class Attribute:
     name: str                                  # "customerId"
     xsd_type: str                              # "xsd:string"
+    description: str = ""                      # human-readable, from D docstrings / SQL COMMENT
     is_id: bool = False                        # PK or @id
-    is_multivalued: bool = False               # collection / list
+    is_multivalued: bool = False               # collection / list / ARRAY
     is_nullable: bool = True                   # NOT NULL → False
     enum_values: list[str] = field(default_factory=list)
+    raw_type: str = ""                         # original SQL/Python type verbatim (for curator)
     field_provenance: list[FieldProvenance] = field(default_factory=list)
     confidence: float = 1.0                    # 1.0 for deterministic
 ```
 
+Revision note (r1): `description` and `raw_type` added per Codex review.
+Without `description` the Source C/D precedence rule (§6 / Open Question #4)
+was not implementable. `raw_type` lets the curator see the original
+SQL/Python type when the XSD mapping was lossy (e.g. `DECIMAL(10,2)` →
+`xsd:decimal`).
+
 ### XSD type mapping
 
-| Source type              | XSD output       |
-|--------------------------|------------------|
-| VARCHAR / TEXT / str     | `xsd:string`     |
-| INT / BIGINT / int       | `xsd:integer`    |
-| DECIMAL / NUMERIC / Decimal | `xsd:decimal` |
-| FLOAT / REAL / float     | `xsd:double`     |
-| DATE                     | `xsd:date`       |
-| TIMESTAMP / datetime     | `xsd:dateTime`   |
-| BOOLEAN / bool           | `xsd:boolean`    |
-| BLOB / bytes             | `xsd:base64Binary` |
-| UUID                     | `xsd:anyURI`     |
-| Enum / Literal[...]      | `owl:oneOf` set  |
+Revised table (r1) — adds 11 types Codex flagged as missing; corrects
+UUID from `xsd:anyURI` to `xsd:string`.
 
-Unknown / complex types default to `xsd:string` with a
-`rdfs:comment` recording the original type for the curator.
+| Source type                                    | XSD output         | Notes                              |
+|------------------------------------------------|--------------------|------------------------------------|
+| VARCHAR / TEXT / CHAR / str / CITEXT           | `xsd:string`       |                                    |
+| SMALLINT / INT / BIGINT / SERIAL / BIGSERIAL / int | `xsd:integer`  | All integer widths collapse        |
+| DECIMAL / NUMERIC / MONEY / Decimal            | `xsd:decimal`      | Precision recorded in `raw_type`   |
+| FLOAT / REAL / DOUBLE PRECISION / float        | `xsd:double`       |                                    |
+| DATE                                           | `xsd:date`         |                                    |
+| TIME                                           | `xsd:time`         |                                    |
+| TIMESTAMP / datetime                           | `xsd:dateTime`     |                                    |
+| TIMESTAMPTZ / `timestamp with time zone`       | `xsd:dateTimeStamp`| Carries timezone                   |
+| INTERVAL                                       | `xsd:duration`     |                                    |
+| BOOLEAN / bool                                 | `xsd:boolean`      |                                    |
+| BLOB / BYTEA / bytes                           | `xsd:base64Binary` |                                    |
+| UUID                                           | `xsd:string`       | r1: was `xsd:anyURI`               |
+| JSON / JSONB                                   | `xsd:string`       | Annotated `rdfs:comment "json"`    |
+| GEOMETRY / GEOGRAPHY                           | `xsd:string`       | WKT serialisation assumed; flagged |
+| ARRAY / list[T] / `T[]`                        | XSD of element T   | `is_multivalued = True`            |
+| Enum / Literal[...]                            | XSD of member type | `enum_values` populated            |
+| Anything else                                  | `xsd:string`       | `rdfs:comment` records original    |
+
+Unknown / vendor-specific types default to `xsd:string`. The original
+type string is preserved in both `raw_type` (machine-readable) and an
+`rdfs:comment` on the property (curator-visible).
 
 ### OWL emission rules (Phase A)
+
+Revision note (r1): Codex flagged on-property `owl:minCardinality` and
+`owl:oneOf` as not idiomatic OWL2-DL. Phase A uses **annotations only**
+for cardinality and enum (curator-visible, no reasoner impact); proper
+class-restriction encoding moves to Phase C alongside the profile
+schema work that already lives in `core/validation.py`.
 
 For each `Attribute a` on `FusedElement e`:
 
@@ -329,15 +362,37 @@ For each `Attribute a` on `FusedElement e`:
     rdfs:label "{a.name}" ;
     rdfs:domain <{base}/{e.id}> ;
     rdfs:range {a.xsd_type} ;
-    {if a.is_id} a owl:FunctionalProperty ; {endif}
-    {if not a.is_nullable} owl:minCardinality "1"^^xsd:nonNegativeInteger ; {endif}
-    {if a.enum_values} owl:oneOf ( {literals} ) ; {endif}
+    {if a.description}    rdfs:comment "{a.description}" ; {endif}
+    {if a.is_id}          a owl:FunctionalProperty ; {endif}
+    {if not a.is_nullable} ontozense:required "true"^^xsd:boolean ; {endif}
+    {if a.enum_values}    ontozense:enumValues "{v1};{v2};..." ; {endif}
+    {if a.raw_type}       ontozense:rawType "{a.raw_type}" ; {endif}
     .
 ```
 
-URI naming: `{ontology_base}/{class_fragment}/{attr_fragment}`
-matches the cosmic-coffee pattern
-(`http://example.org/ontology/cosmic-coffee-company/customer_customerId`).
+`ontozense:` is a custom annotation namespace bound in the graph
+header. Curators see the cardinality/enum information; reasoners
+ignore unknown annotation properties, so no DL inconsistency is
+introduced.
+
+### URI naming (revised r1)
+
+Revised per Codex review to give object properties a separate URI
+branch so attributes named after predicates don't collide.
+
+| Element kind         | URI pattern                          | Example                                           |
+|----------------------|--------------------------------------|---------------------------------------------------|
+| `owl:Class`          | `{base}/{class_fragment}`            | `https://tycho.local/npl/borrower`               |
+| `owl:DatatypeProperty` | `{base}/{class}/{attr}`            | `https://tycho.local/npl/borrower/email`         |
+| `owl:ObjectProperty` | `{base}/rel/{predicate_fragment}`    | `https://tycho.local/npl/rel/has_collateral`     |
+
+Matches the cosmic-coffee pattern for classes and datatype properties,
+adds the `/rel/` branch as a Codex-recommended improvement. Migration
+note: existing draft.owl files (pre-r1) have object properties at
+`{base}/{predicate}`. The new scheme is a one-way URI break; consumers
+generating reports off old URIs need to update. No data migration
+needed because Tycho's OWL output is a handoff artefact, not a stored
+identifier source.
 
 ---
 
@@ -357,10 +412,16 @@ matches the cosmic-coffee pattern
    exactly 2 FKs and no other non-PK columns. Open: should we also
    detect SQLAlchemy `secondary=` and Pydantic `list[ForeignRef]`
    patterns, or defer to a later phase?
-4. **Source C precedence over Source D.** When both define the same
-   attribute, which wins? Current proposal: Source C wins for the
-   XSD type (closer to storage), Source D wins for `description`
-   (closer to business semantics). Open for review.
+4. **Source C precedence over Source D.** Resolved r1 (Codex review).
+   Rule: **Source C wins all storage facts** — `xsd_type`,
+   `is_nullable`, `is_id` (PK), foreign-key targets, `enum_values`
+   when derived from `CHECK IN (...)`. **Source D wins for
+   `description`** (closer to business semantics — read from Python
+   docstrings, field-level comments, Pydantic `Field(description=...)`)
+   and contributes `is_multivalued` evidence when Python uses
+   `list[T]` / `default_factory=list` and Source C is silent. Source B
+   `data_type` is consulted only when both C and D are silent; B-only
+   attributes get `confidence = 0.7` instead of `1.0`.
 5. **Profile induction churn.** If Phase A emits attributes and Phase
    C induces a profile that declares them as `required: true`, a
    subsequent rerun without those source files would flag everything.
@@ -385,18 +446,19 @@ matches the cosmic-coffee pattern
 
 ---
 
-## 8. Decision needed from reviewers
+## 8. Decisions (round 1 — Codex review 2026-05-25)
 
-1. **Approve Phase A scope** as the first deliverable (deterministic
-   path only)?
-2. **Approve Phase B as opt-in** behind `--property-induction llm`?
-3. **Approve the XSD type mapping table** in §5, or propose changes?
-4. **Approve the URI naming pattern** `{base}/{class}/{attr}`?
-5. **Type-mapping ambiguity (open question #1)** — pick leftmost
-   non-`None` or emit `owl:unionOf`?
-6. **Source precedence (open question #4)** — Source C wins for type,
-   Source D for description?
+| § | Question | Decision |
+|---|---|---|
+| 1 | Phase A scope (deterministic only) | **Approved.** |
+| 2 | Phase B opt-in via `--property-induction llm` | **Approved.** Concrete plan deferred to a separate Phase B doc. |
+| 3 | XSD type mapping table | **Revised** (see §5). UUID corrected to `xsd:string`; 11 types added. |
+| 4 | URI naming | **Revised** (see §5). Object properties move to `/rel/` branch to avoid collision with datatype properties named after predicates. |
+| 5 | Pydantic union types | **Leftmost non-`None`**; full union preserved in `raw_type` and `rdfs:comment`. `owl:unionOf` deferred — too heavy for Phase A. |
+| 6 | Source C / D precedence | **Revised** (see §5 / §6.4). Storage facts from C; description from D; B is silent-fallback only. |
 
-Once the above are decided, a separate
-`PROPERTY_EXTRACTION_IMPLEMENTATION_PLAN.md` will follow with concrete
-file-level edits, test fixtures, and a phase-A PR breakdown.
+Round-2 decisions (if any) will be appended below.
+
+The implementation plan in
+[PROPERTY_EXTRACTION_IMPLEMENTATION_PLAN.md](./PROPERTY_EXTRACTION_IMPLEMENTATION_PLAN.md)
+has been revised against these decisions and Codex's plan audit.
