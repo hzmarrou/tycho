@@ -33,6 +33,8 @@ When loaded into a standard ontology editor (Protégé, IRIS, the
 `cosmic-coffee-company-ontology.rdf` reference editor), each entity card
 shows a name and label, but no fields. The reference pattern looks like:
 
+![Reference entity card — Shipment with 5 properties and 3 relationships](../images/example-entity.png)
+
 ```
 ENTITY TYPE: Shipment
   Properties (5):

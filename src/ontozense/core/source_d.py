@@ -237,7 +237,43 @@ def load_source_d_json(path: Path) -> SourceDResult:
             f"{type(raw['entities']).__name__}."
         )
 
-    return SourceDResult.from_json_dict(raw)
+    # Nested validation. ``from_json_dict`` does ``.get(...)`` on each
+    # entity / attribute; if any item is the wrong type
+    # (``entities=[123]`` or ``attributes=[null]``) it would crash with
+    # a raw AttributeError that bypasses draft's catch-and-warn path.
+    # Mirror the source_c.py nested-validation pattern so the contract
+    # error surfaces here instead.
+    for i, entity in enumerate(raw["entities"]):
+        if not isinstance(entity, dict):
+            raise SourceDContractError(
+                f"Source D entities[{i}] must be an object, got "
+                f"{type(entity).__name__}."
+            )
+        attrs = entity.get("attributes")
+        if attrs is None:
+            continue
+        if not isinstance(attrs, list):
+            raise SourceDContractError(
+                f"Source D entities[{i}].attributes must be a list, "
+                f"got {type(attrs).__name__}."
+            )
+        for j, attr in enumerate(attrs):
+            if not isinstance(attr, dict):
+                raise SourceDContractError(
+                    f"Source D entities[{i}].attributes[{j}] must be "
+                    f"an object, got {type(attr).__name__}."
+                )
+
+    try:
+        return SourceDResult.from_json_dict(raw)
+    except (AttributeError, TypeError) as e:
+        # Belt-and-braces: any remaining shape error during
+        # reconstruction surfaces as a clean contract error rather
+        # than a raw traceback.
+        raise SourceDContractError(
+            f"Source D JSON has unexpected shape during reconstruction: "
+            f"{type(e).__name__}: {e}"
+        ) from e
 
 
 # ─── Builder: extract IR from .py files and project into SourceDResult ──────

@@ -184,6 +184,97 @@ def test_load_source_d_json_rejects_missing_entities_key(tmp_path):
     assert "entities" in str(excinfo.value)
 
 
+# ─── Nested-shape validation (umbrella cleanup — Codex finding 1) ──────────
+#
+# load_source_d_json previously only checked the root + entities-list
+# type, then delegated to from_json_dict() which crashes with raw
+# AttributeError on nested malformed payloads. That bypassed draft's
+# catch-and-warn path. These tests guard the now-promised behaviour:
+# any nested type violation raises SourceDContractError so draft can
+# log a yellow warning and continue.
+
+
+def test_load_rejects_non_dict_entity(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text(
+        '{"schema_version": "1.0", "entities": [123]}',
+        encoding="utf-8",
+    )
+    with pytest.raises(SourceDContractError) as excinfo:
+        load_source_d_json(bad)
+    assert "entities[0]" in str(excinfo.value)
+    assert "object" in str(excinfo.value) or "dict" in str(excinfo.value).lower()
+
+
+def test_load_rejects_non_dict_entity_in_middle_of_list(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text(
+        '{"schema_version": "1.0", "entities": ['
+        '{"name": "ok", "attributes": []}, "string", '
+        '{"name": "also_ok", "attributes": []}'
+        ']}',
+        encoding="utf-8",
+    )
+    with pytest.raises(SourceDContractError) as excinfo:
+        load_source_d_json(bad)
+    assert "entities[1]" in str(excinfo.value)
+
+
+def test_load_rejects_non_list_attributes(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text(
+        '{"schema_version": "1.0", "entities": ['
+        '{"name": "Bad", "attributes": "not-a-list"}'
+        ']}',
+        encoding="utf-8",
+    )
+    with pytest.raises(SourceDContractError) as excinfo:
+        load_source_d_json(bad)
+    assert "entities[0].attributes" in str(excinfo.value)
+
+
+def test_load_rejects_non_dict_attribute(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text(
+        '{"schema_version": "1.0", "entities": ['
+        '{"name": "Bad", "attributes": [42]}'
+        ']}',
+        encoding="utf-8",
+    )
+    with pytest.raises(SourceDContractError) as excinfo:
+        load_source_d_json(bad)
+    assert "entities[0].attributes[0]" in str(excinfo.value)
+
+
+def test_load_rejects_null_attribute(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text(
+        '{"schema_version": "1.0", "entities": ['
+        '{"name": "Bad", "attributes": [null]}'
+        ']}',
+        encoding="utf-8",
+    )
+    with pytest.raises(SourceDContractError) as excinfo:
+        load_source_d_json(bad)
+    assert "entities[0].attributes[0]" in str(excinfo.value)
+
+
+def test_load_tolerates_missing_attributes_key(tmp_path):
+    """Entity without an ``attributes`` key is valid — the writer
+    elides empty lists. Reload must default to empty."""
+    good = tmp_path / "good.json"
+    good.write_text(
+        '{"schema_version": "1.0", "entities": ['
+        '{"name": "MinimalEntity"}'
+        ']}',
+        encoding="utf-8",
+    )
+    result = load_source_d_json(good)
+    assert len(result.entities) == 1
+    assert result.entities[0].name == "MinimalEntity"
+    assert result.entities[0].attributes == []
+
+
 # ─── Suppression parity (PR1b r1 — Codex blocker 2) ────────────────────────
 #
 # The persistence builder must mirror SourceDIngester's file-level

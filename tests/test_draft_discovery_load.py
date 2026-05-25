@@ -226,3 +226,42 @@ def test_draft_tolerates_invalid_source_d_json(tmp_path):
     )
     assert fused.get_element("Y") is not None
     assert fused.get_element("Y").attributes == []
+
+
+def test_draft_tolerates_nested_malformed_source_d_json(tmp_path):
+    """Umbrella cleanup (Codex finding 1): nested malformed shapes in
+    source-d.json must surface as SourceDContractError so draft's
+    catch-and-warn path handles them — not a raw AttributeError."""
+    domain = tmp_path / "domain"
+    discovery = domain / "discovery"
+    sa_path = discovery / "source-a.json"
+    _write_source_a_json(sa_path, ["Z"])
+    # entities[0] is an int, not a dict.
+    (discovery / "source-d.json").write_text(
+        '{"schema_version": "1.0", "entities": [123]}', encoding="utf-8",
+    )
+    fused = _run_fuse_for_draft(
+        sa_path, domain / "fused.json", discovery_dir=discovery,
+    )
+    assert fused.get_element("Z") is not None
+    assert fused.get_element("Z").attributes == []
+
+
+def test_draft_tolerates_nested_malformed_attributes_in_source_d_json(tmp_path):
+    """Umbrella cleanup: attributes[i] of the wrong shape also gets
+    caught and warned, not crashed."""
+    domain = tmp_path / "domain"
+    discovery = domain / "discovery"
+    sa_path = discovery / "source-a.json"
+    _write_source_a_json(sa_path, ["W"])
+    (discovery / "source-d.json").write_text(
+        '{"schema_version": "1.0", "entities": ['
+        '{"name": "W", "attributes": [42]}'
+        ']}',
+        encoding="utf-8",
+    )
+    fused = _run_fuse_for_draft(
+        sa_path, domain / "fused.json", discovery_dir=discovery,
+    )
+    assert fused.get_element("W") is not None
+    assert fused.get_element("W").attributes == []
