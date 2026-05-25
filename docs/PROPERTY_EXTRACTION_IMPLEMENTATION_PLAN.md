@@ -4,10 +4,24 @@
 **Scope:** Phase A only (deterministic Source C/D/B path).
 Phases B and C get their own plans once Phase A is merged and validated
 end-to-end.
-**Target reviewer:** Codex (round 2 after revision)
+**Target reviewer:** Codex (round 3 after revision)
 **Branch:** `feat/property-extraction`
 
 **Revisions:**
+- 2026-05-25 r2: Codex round-2 review (REJECT → addressed). Changes:
+  - PR1a's `AttributeFact` extension now includes
+    `description: str = ""`, so the "D wins description" rule in PR2
+    is wired end-to-end (Codex finding #1).
+  - §3 sequencing and §6 rollback rewritten: PR1a + PR1b form a
+    single revert unit. The earlier "all four independently
+    revertable" claim was self-contradictory (Codex finding #2).
+  - §3 PR2 now specifies the Source B contract seam: reads
+    `rec.extra_fields["data_type"]` and
+    `rec.extra_fields["enum_values"]` on `GovernanceRecord`; no
+    contract change in Phase A (Codex finding #3).
+  - Doc nits: `serialise(...)` → `dump_source_c_json(...)`; added
+    `core/source_d.py` (typed `SourceDResult` contract) to replace
+    the r1 "ad hoc JSON" approach Codex called out as debt risk.
 - 2026-05-25 r1: Codex round-1 review. Major changes:
   - PR1 split into PR1a (Source D IR contract extension) +
     PR1b (persistence) because the current IR
@@ -100,14 +114,15 @@ property fusion. Phase A wires the seam. No new flags.
 src/ontozense/
 ├── core/
 │   ├── attribute.py                              NEW   Attribute dataclass + XSD type map
-│   ├── source_c.py                               EDIT  if SchemaField needs new fields
+│   ├── source_c.py                               EDIT  if SchemaField needs new fields (likely no-op)
+│   ├── source_d.py                               NEW   typed contract for discovery/source-d.json (r2)
 │   ├── fusion.py                                 EDIT  FusedElement.attributes + attr-level fusion
 │   ├── owl_export.py                             EDIT  emit owl:DatatypeProperty + /rel/ branch
 │   ├── ingest/
 │   │   ├── ingest_c.py                           EDIT  surface SchemaResult to survey orchestrator
 │   │   ├── ingest_d.py                           EDIT  hook persistence before emit flattens
 │   │   └── source_d/
-│   │       ├── ir.py                             EDIT  AttributeFact: multivalued, default_factory, enum, is_pk
+│   │       ├── ir.py                             EDIT  AttributeFact: description, multivalued, default_factory, enum, is_pk, is_nullable, raw_type
 │   │       ├── model_extractor.py                EDIT  populate new IR fields from Pydantic/SQLA/dataclass
 │   │       └── emit.py                           READ-ONLY  unchanged; persistence hooks BEFORE this
 └── cli.py                                        EDIT  multiple sites — see breakdown below
@@ -146,8 +161,12 @@ serializer fixes, and additional tests were not previously counted.
 
 ## 3. Step-by-step PR breakdown (revised r1)
 
-Phase A lands as **four sequential PRs**. PR1 was split into PR1a +
-PR1b per Codex review. Each remains independently revertable.
+Phase A lands as **four sequential PRs**, grouped into **three revert
+units**: PR1a+PR1b together (Source D IR extension is meaningless
+without the persistence that exercises it; PR1b's persistence writer
+expects PR1a's fields), then PR2 alone, then PR3 alone. Within a
+revert unit the PRs still merge sequentially for review ergonomics, but
+a rollback reverts the whole unit. See §6 for the revert matrix.
 
 ### PR1a — `feat(source-d): extend AttributeFact IR for property metadata`
 
@@ -161,6 +180,7 @@ on top of the current IR would deliver an empty payload.
 **Adds:**
 - `AttributeFact` new fields with backwards-compatible defaults:
   ```python
+  description: str = ""        # r2: was missing; needed for D-wins-description rule
   is_multivalued: bool = False
   default_factory: str | None = None
   enum_values: list[str] = field(default_factory=list)
@@ -171,13 +191,21 @@ on top of the current IR would deliver an empty payload.
 - `model_extractor.py` populates the new fields from Pydantic, dataclass,
   and SQLAlchemy column metadata (uses the existing AST visit; no new
   walks). Specifically:
+  - `description`: populated from, in order of priority:
+    1. Pydantic `Field(description="...")` literal argument.
+    2. dataclass `field(metadata={"description": "..."})` literal.
+    3. SQLAlchemy `Column(..., comment="...")` literal.
+    4. The inline `# comment` on the field line (last fallback).
+    Empty string when none of those are present. AST extraction only —
+    no source-text round-trip beyond the line comment.
   - `is_multivalued`: detected from `list[...]`, `Sequence[...]`,
     `set[...]`, or `default_factory=list`.
   - `enum_values`: detected from `Literal["a", "b"]` and Enum subclasses.
   - `is_pk`: detected from SQLAlchemy `primary_key=True`.
   - `is_nullable`: detected from `Optional[T]`, `T | None`, or
     SQLAlchemy `nullable=False`.
-- Tests: `test_source_d_ir_extension.py` covering each populated field.
+- Tests: `test_source_d_ir_extension.py` covering each populated field
+  (including a dedicated description-from-each-source case).
 
 **Does not touch:** persistence layer, fusion, owl_export. Behaviour
 observable to users unchanged.
@@ -198,13 +226,22 @@ observable to users unchanged.
   Pure functions `xsd_type_for_sql(sql_type, vendor_hint)` and
   `xsd_type_for_python(py_type)` using the revised mapping table.
 - `cli.py` survey orchestrator: when `--source-c` is passed, write
-  `discovery/source-c.json` via the existing
-  `core/source_c.py::serialise(...)` helper. Reusing the existing
+  `discovery/source-c.json` via the existing helper
+  `core/source_c.py::dump_source_c_json(result, path)`
+  (`src/ontozense/core/source_c.py:223`). Reuses the existing
   `SchemaResult` contract instead of inventing a parallel schema
   (Codex's call-out).
-- `cli.py` survey orchestrator: when `--source-d` is passed, write
-  `discovery/source-d.json` (new file format, documented inline at the
-  top of the writer function; ties out to the PR1a IR).
+- `src/ontozense/core/source_d.py` (NEW, r2 fix per Codex doc nit):
+  typed contract for the persisted Source D artefact, mirroring
+  `core/source_c.py`. Declares `SourceDAttribute`, `SourceDEntity`,
+  `SourceDResult` dataclasses with a `schema_version` field and
+  `dump_source_d_json(result, path)` / `load_source_d_json(path)`
+  helpers. Replaces the r1 "ad hoc JSON documented inline at writer"
+  approach, which Codex flagged as debt risk and divergence from the
+  repo pattern set by `source_c.py`.
+- `cli.py` survey orchestrator: when `--source-d` is passed, populate
+  a `SourceDResult` from the (PR1a-extended) IR and write
+  `discovery/source-d.json` via `dump_source_d_json(...)`.
 - Tests: `test_attribute.py`, `test_source_c_persistence.py`,
   `test_source_d_persistence.py`, plus fixtures.
 
@@ -240,9 +277,25 @@ until PR2.
     rules:
     - **Storage facts from C** (type, nullable, PK, FK target,
       DB-derived enum_values).
-    - **Description from D** (docstrings, Pydantic
-      `Field(description=...)`).
+    - **Description from D** (carried on `AttributeFact.description`
+      after PR1a — from Pydantic `Field(description=...)`, dataclass
+      `field(metadata={"description": ...})`, or SQLAlchemy
+      `Column(comment=...)`).
     - **B as silent fallback** when both C and D are absent.
+
+  **Source B contract seam (r2 — Codex finding #3):** PR2 reads
+  `rec.extra_fields["data_type"]` and `rec.extra_fields["enum_values"]`
+  on `GovernanceRecord`. No change to the `GovernanceRecord` dataclass
+  in Phase A. Rationale: the existing contract in
+  `src/ontozense/extractors/governance_extractor.py:57-64` deliberately
+  shoves unknown keys into `extra_fields`; reading them there preserves
+  backwards compatibility for governance.json files that already use
+  `data_type` ad hoc. Promotion of `data_type` / `enum_values` to
+  first-class fields on `GovernanceRecord` is deferred to Phase C
+  alongside the profile schema work. PR2 includes a helper
+  `_attribute_from_governance(rec)` that returns `None` when neither
+  key is present, so B-only attributes only materialise when the
+  governance JSON actually carries the data.
   - Per-attribute provenance (`field_provenance: list[FieldProvenance]`)
     populated from contributing sources.
   - Conflicts logged into the existing `FusedElement.conflicts` list.
@@ -257,7 +310,10 @@ until PR2.
   output of `fuse` round-trips through `validate` / `lint` / `query`.
 - Tests:
   - `test_fusion_attributes.py` covering C-only, D-only, C+D
-    agreement, C+D type conflict (C wins), B-only, enum extraction.
+    agreement, C+D type conflict (C wins), B-only via
+    `extra_fields["data_type"]`, B with `extra_fields["enum_values"]`,
+    governance record with neither key (no attribute materialises),
+    enum extraction from Source D.
   - `test_fusion_serialization.py` — round-trip fused.json with
     attributes.
   - `test_legacy_fused_json_reload.py` — reload a pre-Phase-A fixture
@@ -423,24 +479,29 @@ and round-trips; `draft.owl` is unchanged.
 
 ---
 
-## 6. Rollback plan
+## 6. Rollback plan (revised r2)
 
-Each PR is independently revertable:
+Three revert units, each fully independent:
 
-- **Revert PR3** → `draft.owl` reverts to the cosmic-pattern OWL
-  fixes baseline (no DatatypeProperty), fused.json still carries
-  attributes (harmless extra data downstream consumers ignore).
-- **Revert PR2** → `fused.json.attributes` empties out, OWL emission
-  produces no DatatypeProperty regardless of PR3 state. Serializer
-  patch reverts cleanly because the field has a default.
-- **Revert PR1b** → discovery files no longer written; no downstream
-  breakage because PR2 reads them defensively (missing file → empty
-  list, covered by the missing-file fallback test).
-- **Revert PR1a** → Source D IR shrinks back; PR1b's persistence
-  writer reads the smaller IR and writes fewer fields. PR1a can
-  only be reverted while PR1b is still off — if PR1b is in place,
-  the writer would still expect the new fields. Codex-flagged
-  rollback ordering constraint.
+| Unit | What it covers | What reverting it leaves behind |
+|---|---|---|
+| **Unit 1: PR1a + PR1b** (reverted together) | Source D IR extension + Attribute dataclass + survey writes `discovery/source-c.json` / `source-d.json` | discovery dir no longer carries the new files; PR2 reads them defensively (missing file → empty attributes) so the fused.json shape stays valid but empty |
+| **Unit 2: PR2** | Attribute-level fusion + serializer/reconstructor + draft load wiring | `fused.json.attributes` empties out; OWL emission still emits no DatatypeProperty regardless of PR3 state (PR3 reads `element.attributes` which is now `[]`) |
+| **Unit 3: PR3** | OWL DatatypeProperty emission + `/rel/` URI branch | `draft.owl` reverts to the cosmic-pattern OWL fixes baseline; `fused.json` still carries attributes (harmless extra data downstream consumers ignore) |
+
+**Why PR1a and PR1b are one revert unit (r2 fix):** PR1b's
+persistence writer in `model_extractor.py` populates fields that only
+exist on `AttributeFact` after PR1a. Reverting PR1a while PR1b is
+still in place would leave the writer referencing non-existent fields
+(`AttributeError`). Treat them as a single revert unit; for review
+ergonomics they still merge as two separate PRs.
+
+**Rollback ordering across units:** revert in reverse merge order
+(Unit 3 → Unit 2 → Unit 1). Skipping a middle unit is unsupported
+(e.g. reverting Unit 1 while Unit 2 is still in place would leave
+the fusion path trying to load discovery files that are no longer
+written — empty attributes result, no exception, but the test for
+"draft auto-loads discovery files" would fail in CI).
 
 No data migration. No external API impact (Tycho has no external API).
 
@@ -490,8 +551,8 @@ Before merging each PR:
 - [ ] Manual smoke test: NPL fixture run, import draft.owl in Protégé,
       verify entity cards.
 - [ ] Reviewer ack on `feat/property-extraction` PR.
-- [ ] Rollback ordering preserved (PR1a only revertable while PR1b
-      is also reverted — flag in PR descriptions).
+- [ ] PR descriptions reference §6 revert unit they belong to (Unit 1
+      = PR1a+PR1b paired, Unit 2 = PR2, Unit 3 = PR3).
 
 Final Phase A acceptance (after PR3):
 
