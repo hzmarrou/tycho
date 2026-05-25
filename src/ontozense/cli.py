@@ -3670,9 +3670,12 @@ def draft(
     lint_report = run_lint(fused)
 
     # Translate the user-facing format name "owl-xml" to rdflib's
-    # internal name "xml" (RDF/XML serialisation). "turtle" and
-    # "json-ld" pass through unchanged.
-    rdflib_format = "xml" if format == "owl-xml" else format
+    # "pretty-xml" serialiser. pretty-xml emits typed nodes
+    # (<owl:Class>, <owl:ObjectProperty>) instead of the expanded
+    # <rdf:Description> + <rdf:type> form that the default "xml"
+    # serialiser produces — many OWL editors only recognise the typed
+    # form. "turtle" and "json-ld" pass through unchanged.
+    rdflib_format = "pretty-xml" if format == "owl-xml" else format
 
     owl_text = fused_to_owl(
         fused, profile=loaded_profile, format=rdflib_format,
