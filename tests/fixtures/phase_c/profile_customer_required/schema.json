@@ -1,0 +1,62 @@
+{
+  "profile_name": "phase_c_customer_required",
+  "profile_version": "1.0.0",
+  "description": "Phase C VR007 acceptance fixture. Customer entity type with two required typed attributes (customerId, email). Used by the required-missing-fires + complete-silent + B-LLM-counts-toward-presence cases.",
+
+  "entity_types": {
+    "Customer": {
+      "required": [],
+      "optional": [],
+      "attributes": [
+        {
+          "name": "customerId",
+          "xsd_type": "xsd:string",
+          "is_id": true,
+          "required": true,
+          "description": "Stable external identifier."
+        },
+        {
+          "name": "email",
+          "xsd_type": "xsd:string",
+          "required": true,
+          "description": "Primary contact email."
+        },
+        {
+          "name": "createdAt",
+          "xsd_type": "xsd:dateTime",
+          "required": false,
+          "description": "Optional registration timestamp."
+        }
+      ]
+    },
+    "Order": {
+      "required": [],
+      "optional": [],
+      "attributes": [
+        {
+          "name": "orderId",
+          "xsd_type": "xsd:string",
+          "is_id": true,
+          "required": true
+        }
+      ]
+    },
+    "Note": {
+      "required": [],
+      "optional": []
+    }
+  },
+
+  "predicates": {
+    "Places": {
+      "subject_types": ["Customer"],
+      "object_types": ["Order"],
+      "cardinality": "1:N"
+    }
+  },
+
+  "id_format": {
+    "strategy": "type_label_hash",
+    "hash_length": 6
+  }
+}
