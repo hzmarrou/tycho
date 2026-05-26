@@ -39,6 +39,29 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class ProfileAttribute:
+    """A typed property declaration on an entity type (Phase C).
+
+    Mirrors the runtime ``Attribute`` dataclass produced by Phase A /
+    Phase B extraction so a profile-declared attribute is structurally
+    comparable to an extracted one. Validation rule VR007 (PR C2)
+    consumes the ``required`` flag and the ``name`` field.
+    """
+    name: str
+    xsd_type: str
+    description: str = ""
+    required: bool = False
+    is_id: bool = False
+    is_multivalued: bool = False
+    enum_values: list[str] = field(default_factory=list)
+
+    @property
+    def name_key(self) -> str:
+        """Lowercased + stripped name, used for case-insensitive lookup."""
+        return self.name.strip().lower()
+
+
+@dataclass(frozen=True)
 class EntityType:
     """An entity type declared in a profile's schema.
 
@@ -53,11 +76,15 @@ class EntityType:
     subtypes : list[str]
         Sub-classifications (e.g. Metric has DirectMetric, CalculatedMetric,
         InputMetric). Empty for leaf types.
+    attributes : list[ProfileAttribute]
+        Typed property declarations introduced in Phase C. Defaults to
+        an empty list so pre-Phase-C profiles parse unchanged.
     """
     name: str
     required_fields: list[str] = field(default_factory=list)
     optional_fields: list[str] = field(default_factory=list)
     subtypes: list[str] = field(default_factory=list)
+    attributes: list[ProfileAttribute] = field(default_factory=list)
 
     @property
     def all_fields(self) -> list[str]:
@@ -192,6 +219,25 @@ _REQUIRED_SCHEMA_KEYS = {"profile_name", "profile_version", "entity_types", "pre
 # Supported id_format strategies
 _SUPPORTED_ID_STRATEGIES = {"type_label_hash"}
 
+# Accepted XSD identifiers on ``entity_types[*].attributes[*].xsd_type``.
+# Aligned with the Phase A XSD mapping table in
+# ``docs/PROPERTY_EXTRACTION_DESIGN.md`` §5 so a profile-declared type
+# is always one an extractor can produce.
+_ACCEPTED_XSD_TYPES = frozenset({
+    "xsd:string",
+    "xsd:integer",
+    "xsd:decimal",
+    "xsd:double",
+    "xsd:date",
+    "xsd:time",
+    "xsd:dateTime",
+    "xsd:dateTimeStamp",
+    "xsd:duration",
+    "xsd:boolean",
+    "xsd:base64Binary",
+    "xsd:anyURI",
+})
+
 
 def load_profile(profile_path: str | Path) -> Profile:
     """Load and validate a profile from a directory.
@@ -311,6 +357,7 @@ def _parse_entity_types(raw: Any) -> dict[str, EntityType]:
             required_fields=_string_list(spec.get("required", []), f"entity_types[{name}].required"),
             optional_fields=_string_list(spec.get("optional", []), f"entity_types[{name}].optional"),
             subtypes=_string_list(spec.get("subtypes", []), f"entity_types[{name}].subtypes"),
+            attributes=_parse_profile_attributes(name, spec.get("attributes", [])),
         )
 
     # Reject subtype/top-level name collisions. If "DirectMetric" is
@@ -429,6 +476,133 @@ def _string_list(value: Any, where: str) -> list[str]:
             )
         out.append(item)
     return out
+
+
+def _parse_profile_attributes(
+    entity_type_name: str,
+    raw: Any,
+) -> list[ProfileAttribute]:
+    """Parse ``entity_types[X].attributes`` into typed ``ProfileAttribute`` records.
+
+    Phase C addition. Pre-Phase-C profiles omit the ``attributes`` key
+    entirely; callers pass ``spec.get("attributes", [])`` so omission
+    arrives here as an empty list and produces an empty result.
+
+    Validation rules (see ``docs/PROPERTY_EXTRACTION_DESIGN.md`` §5
+    Phase C contracts, "Loader validation rules added by Phase C"):
+
+    * ``raw`` must be a list (omitted = empty list, which is valid).
+    * Every entry must be an object.
+    * ``name`` and ``xsd_type`` must be present and non-empty strings.
+    * ``xsd_type`` must be in :data:`_ACCEPTED_XSD_TYPES`.
+    * ``description`` (when present) must be a string.
+    * ``required`` / ``is_id`` / ``is_multivalued`` (when present) must be bools.
+    * ``enum_values`` (when present) must be a list of strings.
+    * Within one entity type, attribute ``name`` values must be
+      case-insensitively unique.
+    * At most one entry per entity type may set ``is_id: true``.
+    """
+    where = f"entity_types[{entity_type_name!r}].attributes"
+    if not isinstance(raw, list):
+        raise ProfileError(f"{where} must be a list (or omitted)")
+
+    out: list[ProfileAttribute] = []
+    seen_keys: set[str] = set()
+    id_attr_names: list[str] = []
+
+    for index, entry in enumerate(raw):
+        loc = f"{where}[{index}]"
+        if not isinstance(entry, dict):
+            raise ProfileError(
+                f"{loc} must be an object (got {type(entry).__name__})"
+            )
+
+        # name (required, non-empty string)
+        if "name" not in entry:
+            raise ProfileError(f"{loc}.name is required")
+        name = entry["name"]
+        if not isinstance(name, str) or not name.strip():
+            raise ProfileError(
+                f"{loc}.name must be a non-empty string (got {name!r})"
+            )
+
+        # xsd_type (required, non-empty string, in accepted set)
+        if "xsd_type" not in entry:
+            raise ProfileError(f"{loc}.xsd_type is required")
+        xsd_type = entry["xsd_type"]
+        if not isinstance(xsd_type, str) or not xsd_type.strip():
+            raise ProfileError(
+                f"{loc}.xsd_type must be a non-empty string (got {xsd_type!r})"
+            )
+        if xsd_type not in _ACCEPTED_XSD_TYPES:
+            accepted = ", ".join(sorted(_ACCEPTED_XSD_TYPES))
+            raise ProfileError(
+                f"{loc}.xsd_type {xsd_type!r} is not an accepted XSD type. "
+                f"Accepted values: {accepted}."
+            )
+
+        # description (optional, string)
+        description = entry.get("description", "")
+        if not isinstance(description, str):
+            raise ProfileError(
+                f"{loc}.description must be a string (got {type(description).__name__})"
+            )
+
+        # required / is_id / is_multivalued (optional, bool)
+        required = _bool_flag(entry, "required", loc)
+        is_id = _bool_flag(entry, "is_id", loc)
+        is_multivalued = _bool_flag(entry, "is_multivalued", loc)
+
+        # enum_values (optional, list[str])
+        enum_values = _string_list(
+            entry.get("enum_values", []),
+            f"{loc}.enum_values",
+        )
+
+        attr = ProfileAttribute(
+            name=name,
+            xsd_type=xsd_type,
+            description=description,
+            required=required,
+            is_id=is_id,
+            is_multivalued=is_multivalued,
+            enum_values=enum_values,
+        )
+
+        # Case-insensitive duplicate-name check
+        if attr.name_key in seen_keys:
+            raise ProfileError(
+                f"{loc}.name duplicates an earlier entry "
+                f"(case-insensitive match on {attr.name_key!r}). "
+                f"Each attribute name within one entity type must be unique."
+            )
+        seen_keys.add(attr.name_key)
+
+        if is_id:
+            id_attr_names.append(name)
+
+        out.append(attr)
+
+    if len(id_attr_names) > 1:
+        raise ProfileError(
+            f"{where} declares more than one attribute with "
+            f"is_id=true: {id_attr_names}. At most one is_id "
+            f"attribute is allowed per entity type."
+        )
+
+    return out
+
+
+def _bool_flag(entry: dict, key: str, loc: str) -> bool:
+    """Read an optional bool flag from a parsed attribute object."""
+    if key not in entry:
+        return False
+    value = entry[key]
+    if not isinstance(value, bool):
+        raise ProfileError(
+            f"{loc}.{key} must be a bool (got {type(value).__name__}: {value!r})"
+        )
+    return value
 
 
 def _normalise_lower_dict(raw: Any) -> dict[str, str]:
