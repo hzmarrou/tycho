@@ -111,6 +111,104 @@ Per type:
   inherit the parent's required/optional fields. The engine treats
   `is_known_type("DirectMetric")` as true if "DirectMetric" is a
   subtype of any declared type.
+- `attributes` (list[object], optional — Phase C addition): typed
+  property declarations per entity type. See
+  [`attributes` per entity type](#attributes-per-entity-type) below.
+  Profiles authored before Phase C omit this key entirely and continue
+  to load unchanged.
+
+#### `attributes` per entity type
+
+Phase C adds a per-entity-type typed property contract that
+complements `required` / `optional` (which are field-name-only) by
+also carrying an XSD type, an ID flag, multivaluedness, and an
+optional enum set. The contract mirrors the runtime `Attribute`
+dataclass already produced by Phase A / B (see
+[PROPERTY_EXTRACTION_DESIGN.md §5](./PROPERTY_EXTRACTION_DESIGN.md#5-design-contracts))
+so a profile-declared attribute is structurally comparable to an
+extracted one.
+
+```json
+"entity_types": {
+  "Customer": {
+    "required": [],
+    "optional": [],
+    "attributes": [
+      {
+        "name": "customerId",
+        "xsd_type": "xsd:string",
+        "is_id": true,
+        "required": true,
+        "description": "Stable external identifier."
+      },
+      {
+        "name": "email",
+        "xsd_type": "xsd:string",
+        "required": true
+      },
+      {
+        "name": "tags",
+        "xsd_type": "xsd:string",
+        "is_multivalued": true,
+        "required": false
+      },
+      {
+        "name": "status",
+        "xsd_type": "xsd:string",
+        "required": false,
+        "enum_values": ["open", "closed", "suspended"]
+      }
+    ]
+  }
+}
+```
+
+Per attribute entry:
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `name`           | non-empty string         | yes | —     | Attribute name as it will appear on a `FusedElement.attributes[*]`. Case-insensitive when matched against extracted attributes (see VR007 below). |
+| `xsd_type`       | non-empty string         | yes | —     | Canonical XSD identifier (e.g. `xsd:string`, `xsd:integer`, `xsd:decimal`, `xsd:date`, `xsd:dateTime`, `xsd:boolean`, `xsd:anyURI`). Must match a row in the Phase A XSD mapping table. Unknown XSD identifiers raise `ProfileError` at load time. |
+| `description`    | string                   | no  | `""`  | Human-readable note. Surfaced in tooling; not used by VR007. |
+| `required`       | bool                     | no  | `false` | When `true`, VR007 (see [§4](#validation-behaviour--phase-c)) fires for any fused element of this entity type that lacks an extracted attribute with this `name`. |
+| `is_id`          | bool                     | no  | `false` | Marks the attribute as the entity's identifier. Informational at the profile layer; consumed by the OWL exporter (Phase A) when extraction sets the same flag. Phase C does **not** add any uniqueness rule on this field. |
+| `is_multivalued` | bool                     | no  | `false` | Whether the attribute may carry a collection of values. Informational; no separate validation rule in Phase C. |
+| `enum_values`    | list[string]             | no  | `[]`  | Closed value set, if any. Informational at the profile layer; no separate enum-membership rule in Phase C. |
+
+**Defaults and shape rules:**
+
+- The whole `attributes` key may be **omitted** from any entity type.
+  Omission means "no profile-declared typed property contract for
+  this type" — VR007 cannot fire for it.
+- An entity type that declares `attributes: []` is semantically
+  identical to omitting the key (empty list = no required attrs).
+- Within a single entity type, `name` values must be **unique**
+  case-insensitively. Duplicate names raise `ProfileError` at load
+  time so an author notices the conflict immediately.
+- An entity type may declare **at most one** attribute with
+  `is_id: true`. Duplicate `is_id` flags raise `ProfileError`.
+- Subtypes inherit their parent's `attributes` list (matching the
+  inheritance rule for `required` / `optional`). Subtypes may not
+  override or extend the list in Phase C — declare attribute
+  contracts on the parent only. Subtype-level attribute overrides
+  are an explicit non-goal (see
+  [PROPERTY_EXTRACTION_DESIGN.md §7](./PROPERTY_EXTRACTION_DESIGN.md#7-out-of-scope-this-design)).
+
+**Backward compatibility:**
+
+- Profiles authored before Phase C have no `attributes` key on any
+  entity type. They continue to load and validate **byte-identically**
+  to pre-Phase-C behaviour. VR001-VR006 are unchanged; VR007 is a
+  no-op for any entity type that does not declare `attributes`.
+- The Phase C parser additions are purely additive — no top-level
+  field renamed, no field removed, no field-shape change to the
+  existing `required` / `optional` / `subtypes` keys.
+- A `profile_version` bump is **not required** when adding an
+  `attributes` declaration to an existing profile, because the
+  addition does not invalidate previously-fused outputs. (The
+  general guidance in [Versioning your profile](#versioning-your-profile)
+  still applies if the author considers VR007 a breaking change for
+  their downstream consumers.)
 
 ### `predicates`
 
@@ -201,24 +299,67 @@ prompt during constrained extraction. It should:
 The engine appends this fragment to the standard system prompt; you
 don't need to repeat the JSON output schema or the task framing.
 
-## Validation behaviour (preview — Phase 4)
+## Validation behaviour (Phase 4)
 
-When the validation stage lands (Phase 4), it will check the fused
-output against the profile schema:
+The validation stage runs after fusion and checks the fused output
+against the profile schema:
 
-- **Entity uniqueness** — IDs are unique
-- **Type membership** — every entity has a type declared in
-  `entity_types` or a subtype thereof
-- **Required fields** — every entity has all `required` fields
-  populated for its type
-- **Predicate vocabulary** — every relationship predicate is in
-  `predicates`
-- **Predicate domains** — every relationship's subject/object types
-  match the predicate's declared `subject_types` / `object_types`
-- **Cardinality** — relationship counts respect `cardinality`
+- **VR001 Entity uniqueness** (error) — IDs are unique
+- **VR002 Type membership** (error) — every entity has a type
+  declared in `entity_types` or a subtype thereof
+- **VR003 Required fields** (warning) — every entity has all
+  `required` fields populated for its type
+- **VR004 Predicate vocabulary** (error) — every relationship
+  predicate is in `predicates`
+- **VR005 Predicate domains** (warning) — every relationship's
+  subject/object types match the predicate's declared `subject_types`
+  / `object_types`
+- **VR006 Cardinality** (warning) — relationship counts respect
+  `cardinality`
 
 Cascade filtering: when an entity is dropped (e.g. unknown type),
 relationships referencing it are dropped too.
+
+### Validation behaviour — Phase C
+
+Phase C adds one rule that consumes the new `attributes` declarations
+documented above:
+
+- **VR007 Required attributes present** (warning) — every entity of
+  a known type has, on its `FusedElement.attributes[]` list, an
+  `Attribute` whose `name` matches each profile-declared
+  `attributes[*]` entry marked `required: true`. Name matching is
+  case-insensitive after lowercasing and trimming on both sides;
+  XSD type, multivaluedness, and enum membership are **not** checked
+  by VR007 in Phase C (informational fields only — see [§5 Phase C
+  contracts](./PROPERTY_EXTRACTION_DESIGN.md#phase-c-contracts--profile-declared-attribute-schemas)
+  for rationale).
+
+Severity, output shape, ordering, and B-LLM handling are specified in
+detail in [PROPERTY_EXTRACTION_DESIGN.md §5 Phase C contracts](./PROPERTY_EXTRACTION_DESIGN.md#phase-c-contracts--profile-declared-attribute-schemas).
+
+VR007 is a **no-op** when either of the following holds:
+
+- The profile declares no `attributes` on any entity type, or
+- No entity type has any attribute with `required: true`.
+
+In both cases, validation output is byte-identical to a pre-Phase-C
+run on the same inputs.
+
+**Pre-Phase-A fused.json reload behaviour:** when a fused result
+predates Phase A and therefore carries no `attributes[]` on any
+element (the legacy shape from before
+`FusedElement.attributes: list[Attribute] = []` was introduced), the
+element-level field defaults to `[]` on reload. If the loaded
+profile declares `required: true` attributes for that element's
+type, VR007 **fires** for each declared required attribute that has
+no matching entry on the (empty) `el.attributes[]` list. Same shape,
+same severity, same finding granularity as for any other empty
+attribute list. This is the intended Phase C contract — see
+[PROPERTY_EXTRACTION_DESIGN.md §5 Phase C contracts](./PROPERTY_EXTRACTION_DESIGN.md#phase-c-contracts--profile-declared-attribute-schemas)
+("Present" definition) and the
+[Phase C implementation plan §12.3 / §12.4 pre-Phase-A regression
+test](./PROPERTY_EXTRACTION_IMPLEMENTATION_PLAN.md#12-phase-c-implementation-plan-pending-codex-review).
 
 ## Example: minimal profile
 

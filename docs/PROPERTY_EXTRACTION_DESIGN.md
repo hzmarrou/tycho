@@ -340,45 +340,146 @@ classes (cache hit = skip the LLM call; refresh via
 ### Phase C — Profile-declared attribute schemas
 
 **What:** extend the profile schema (`PROFILE_SPEC.md`) to allow
-declaring expected attributes per entity type, drive both extraction
-priors and validation.
+declaring expected typed attributes per entity type, and add a single
+validation rule (VR007) that flags fused elements whose extracted
+`attributes[]` list does not satisfy the profile-declared `required:
+true` attributes for their type.
 
-**Profile additions:**
+#### Pre-spec scope lock (5-gate)
 
-```yaml
-entity_types:
-  Customer:
-    description: A person who purchases products.
-    attributes:
-      - name: customerId
-        xsd_type: xsd:string
-        is_id: true
-        required: true
-      - name: name
-        xsd_type: xsd:string
-        required: true
-      - name: createdAt
-        xsd_type: xsd:dateTime
-        required: false
+Phase C is deliberately the smallest reviewable wedge of
+profile-driven attribute validation. Each gate is a hard limit, not
+a guideline. The goal is a single PR-pair that ships a parser
+addition + one new validation rule + three acceptance fixtures.
+
+**Gate 1 — scope.** Phase C ships exactly two things and nothing else:
+
+1. A new `entity_types[*].attributes[]` declaration on
+   `schema.json` (parser + dataclass + load-time validation).
+2. A new `VR007` (Required attributes present) entry in the existing
+   `core/validation.py` six-rule pipeline.
+
+Out of scope inside the gate: any change to extraction priors
+(Phase B SPIRES template stays untouched), any change to
+profile-induction's draft-profile emission (draft profiles will not
+yet suggest attribute schemas — that lands in Phase C v2), any
+change to OWL emission, any change to fusion-layer behaviour.
+
+**Gate 2 — opt-in.** Profile-driven: there is no new CLI flag. A
+profile that does not declare `attributes` on any entity type makes
+VR007 a guaranteed no-op (no finding can fire). The CLI surface of
+`ontozense validate` is unchanged. Reruns on profiles authored
+before Phase C produce byte-identical validation output to a
+pre-Phase-C run on the same inputs (the regression guarantee — see
+Gate 4).
+
+**Gate 3 — Phase E independence.** Phase C emits **no** SHACL
+shapes, **no** SWRL Horn-clause rules, **no** `owl:Restriction`
+axioms on attributes (cardinality, value range, enum membership),
+**no** SPIN, and triggers **no** reasoner integration. The `is_id`
+/ `is_multivalued` / `enum_values` profile fields are stored on
+the loaded `Profile` and surfaced via tooling, but **no Phase C
+rule consumes them** — they are informational data for downstream
+consumers and for the OWL exporter to potentially leverage in the
+future. Adding cardinality / enum / type checks against extracted
+attributes is the Phase E surface, blocked on the same contract
+upgrade that gates L2 / L3 rule projection (see §4 Phase E
+placeholder).
+
+**Gate 4 — backward compatibility.** All pre-Phase-C profiles
+parse byte-identically. The loader change is purely additive:
+`EntityType.attributes` defaults to `[]`. VR007 walks zero
+attribute specs on those profiles and produces zero findings.
+The dedicated regression fixture (Fixture 3 below) proves this.
+No `profile_version` bump is required for Phase C; existing
+profiles that opt in to `attributes` may bump their version per
+their own author policy, but Tycho neither enforces nor rejects
+either choice.
+
+**Gate 5 — backlog isolation.** The following items are
+**explicitly out of Phase C scope** and will be tracked separately
+if and when they're picked up:
+
+- Profile-induction emission of suggested `attributes` blocks in
+  the auto-generated draft profile. (Currently profile-induction
+  in `core/profile_induction.py` emits `entity_types` blocks
+  without `attributes`. Extending it is a separate, value-additive
+  workstream.)
+- Phase B SPIRES template using profile-declared attribute names as
+  priors to improve LLM recall. (Today's Phase B template is
+  prior-free per design §4 Phase B Mechanism step 1; introducing
+  priors is a Phase B v2 / Phase C v2 question, not Phase C v1.)
+- Per-attribute XSD-type mismatch checks (extracted attribute
+  declares `xsd:integer` but profile declares `xsd:string`).
+  Gate 3 places this in Phase E territory.
+- Per-attribute cardinality / multivaluedness / enum-membership
+  checks against extracted values. Gate 3 places these in Phase E.
+- Subtype-level attribute overrides (a subtype declaring its own
+  `attributes` list distinct from the parent). PROFILE_SPEC.md
+  explicitly says subtypes inherit and may not override in Phase C.
+
+#### Profile additions
+
+```json
+"entity_types": {
+  "Customer": {
+    "required": [],
+    "optional": [],
+    "attributes": [
+      { "name": "customerId", "xsd_type": "xsd:string", "is_id": true,  "required": true },
+      { "name": "email",      "xsd_type": "xsd:string",                  "required": true },
+      { "name": "createdAt",  "xsd_type": "xsd:dateTime",                "required": false }
+    ]
+  }
+}
 ```
 
-**Effects:**
+Full schema, defaults, shape rules, and backward-compat policy live
+in [PROFILE_SPEC.md `attributes` per entity type](./PROFILE_SPEC.md#attributes-per-entity-type).
 
-- Phase B's SPIRES template uses the declared attributes as priors —
-  prompts the LLM "the following attributes are expected; extract
-  values for them or mark missing", improving recall.
-- A new validation rule **VR007 (Required attributes present)** flags
-  fused elements missing any `required: true` attribute.
-- Profile induction (existing pipeline) extended to *suggest* attribute
-  declarations based on Phase A output, so the draft profile already
-  carries attribute schemas the user can edit.
+#### Mechanism
 
-**Acceptance:**
+1. `core/profile.py::_parse_entity_types` reads the optional
+   `attributes` list per entity type, parses each entry into a new
+   `ProfileAttribute` dataclass (see §5 contracts), and rejects
+   load-time errors (unknown `xsd_type`, duplicate `name` within a
+   type, multiple `is_id: true`).
+2. `EntityType.attributes: list[ProfileAttribute] = []` carries the
+   parsed declarations through to the rest of the engine.
+3. `core/validation.py::validate` gains a new call to
+   `_check_vr007_required_attributes(elements, profile, result)`
+   after the existing `_check_vr003_required_fields` call.
+4. VR007 walks every element of a known entity type, looks up the
+   type's `attributes`, and for each entry with `required: true`
+   checks that an `Attribute` with a name-matching `name` appears
+   on `element.attributes[]`. Missing entries produce one
+   `ValidationFinding(rule_id="VR007", severity="warning", ...)`
+   per element per missing attribute name.
+5. `core/profile_induction.py` is **not** touched in Phase C.
+   Profile-induction continues to emit `entity_types` blocks
+   without `attributes` — extending it is in Gate 5 backlog.
 
-- Profiles with attribute declarations parse without error.
-- VR007 fires on a fixture where required attributes are missing.
-- Profile induction emits attribute suggestions in the draft profile
-  when Phase A or B produced attributes.
+#### Acceptance
+
+- **Fixture 1 — required missing fires:** a profile declaring
+  `Customer.attributes[]` with `customerId` and `email` both
+  `required: true`. A fused result where the `Customer` element
+  carries only `email` on its `attributes[]`. Running `validate`
+  produces exactly one VR007 finding listing `customerId` as the
+  missing required attribute, severity `warning`, with the
+  element's ID as `target_id`.
+- **Fixture 2 — complete profile silent:** the same profile. A
+  fused result where the `Customer` element carries both
+  `customerId` and `email` on its `attributes[]`. Running
+  `validate` produces zero VR007 findings.
+- **Fixture 3 — no-attrs default regression:** a profile that
+  declares no `attributes` on any entity type (the pre-Phase-C
+  shape — e.g. the minimal profile from PROFILE_SPEC.md
+  "Example: minimal profile"). Any fused result. Running
+  `validate` produces validation output byte-identical
+  (`ValidationResult.findings`, surviving `elements`, surviving
+  `relationships`, and summary counts) to a pre-Phase-C run on
+  the same inputs. VR007 must not appear anywhere in the output.
 
 ### Phase D — Source D business-rule projection to OWL (annotation layer)
 
@@ -763,6 +864,173 @@ skipped — `usage.concepts_processed = 0`, zero LLM calls, zero
 attributes added. The CLI prints a clear "no eligible concepts"
 note.
 
+### Phase C contracts — profile-declared attribute schemas
+
+Phase C adds a single dataclass and a single validation rule. No
+existing dataclass is mutated; no existing rule is mutated; no
+existing CLI flag is changed.
+
+**`ProfileAttribute` dataclass (new, frozen, in `core/profile.py`):**
+
+```python
+@dataclass(frozen=True)
+class ProfileAttribute:
+    name: str                                  # canonical attribute name
+    xsd_type: str                              # canonical XSD identifier
+    description: str = ""
+    required: bool = False                     # VR007 fires when missing
+    is_id: bool = False                        # at most one per entity_type
+    is_multivalued: bool = False               # informational in Phase C
+    enum_values: list[str] = field(default_factory=list)  # informational
+
+    @property
+    def name_key(self) -> str:
+        """Case-insensitive lookup key. Lowercased + stripped."""
+        return self.name.strip().lower()
+```
+
+Frozen for the same reason as `EntityType` / `Predicate`: profiles
+are configuration, passed around and never mutated. `name_key` is a
+computed property (no extra stored state) used by VR007 for
+case-insensitive matching against extracted `Attribute.name` values.
+
+**`EntityType` extension:**
+
+```python
+@dataclass(frozen=True)
+class EntityType:
+    name: str
+    required_fields: list[str] = field(default_factory=list)
+    optional_fields: list[str] = field(default_factory=list)
+    subtypes: list[str] = field(default_factory=list)
+    attributes: list[ProfileAttribute] = field(default_factory=list)  # NEW
+```
+
+Default `[]` preserves byte-identical parse output for any profile
+authored before Phase C. The new field is the only additive change
+to the `EntityType` contract.
+
+**Allowed `xsd_type` values:**
+
+The Phase C parser accepts only XSD identifiers that already appear
+in the Phase A XSD mapping table (§5, "XSD type mapping"). That is:
+
+```
+xsd:string, xsd:integer, xsd:decimal, xsd:double, xsd:date, xsd:time,
+xsd:dateTime, xsd:dateTimeStamp, xsd:duration, xsd:boolean,
+xsd:base64Binary, xsd:anyURI
+```
+
+Any other `xsd_type` raises `ProfileError` at load time with a
+message listing the accepted values. Rationale: keeping the
+profile-declarable set aligned with what extraction can produce
+means VR007 (and any future Phase E type-equality rule) never has
+to reconcile a profile-declared type that no extractor can ever
+emit.
+
+**Loader validation rules added by Phase C:**
+
+`core/profile.py::_parse_entity_types` (and a new
+`_parse_profile_attributes(name, raw)` helper) raise `ProfileError`
+for each of:
+
+- `attributes` is present but not a list.
+- An entry is missing `name` or `xsd_type`, or either is not a
+  non-empty string.
+- `xsd_type` is not in the accepted set above.
+- `required` / `is_id` / `is_multivalued` is present but not a bool.
+- `enum_values` is present but not a list of strings.
+- Two entries within the same entity type share a `name_key`
+  (case-insensitive duplicate).
+- More than one entry in the same entity type sets `is_id: true`.
+
+The loader does **not** cross-validate against `required_fields`
+/ `optional_fields`. They are independent contracts — `required`
+on `attributes` controls VR007, `required` in `required_fields`
+controls VR003. Authors may intentionally use both (declaring a
+field as required and also a typed property as required).
+
+**`ValidationFinding` shape for VR007:**
+
+```python
+ValidationFinding(
+    rule_id="VR007",
+    severity="warning",
+    target_kind="entity",
+    target_id=<entity_id_or_element_name>,
+    message=(
+        f"Entity {el.element_name!r} (type {entity_type!r}) is "
+        f"missing required attribute(s): {missing_names}."
+    ),
+    details={
+        "element_name": el.element_name,
+        "entity_type": entity_type,
+        "missing_required_attributes": ["customerId", "email"],
+    },
+)
+```
+
+One finding is emitted **per element per missing required
+attribute** — not one finding per element containing a list. This
+mirrors `VR005` (per relationship per domain violation) rather than
+`VR003` (one finding per element containing the missing-field list),
+because curators downstream typically filter / sort by individual
+finding rows and a per-attribute granularity is easier to triage.
+
+Severity is `warning` to match `VR003`'s "required field missing"
+sibling. Phase C does not introduce any new severity level.
+
+**When VR007 runs:**
+
+`validate()` calls `_check_vr007_required_attributes(elements,
+profile, result)` **after** `_check_vr003_required_fields(...)`
+and **before** the relationship-cascade-filter step. Ordering
+matters because VR007's input set is `elements` after VR001 /
+VR002 have already dropped any entities they would drop in filter
+mode. VR007 itself is **annotate-only** (never drops elements
+under any mode), matching VR003's behaviour.
+
+**"Present" definition:**
+
+A profile-declared required attribute with `name_key = K` is
+considered **present** on `FusedElement el` iff there exists at
+least one `Attribute a` in `el.attributes` such that
+`a.name.strip().lower() == K`. Empty-name attributes
+(`a.name == ""`) never count as present for any `K`. Type
+equality, multivaluedness, value-set membership, and `is_id`
+flag agreement are **not** part of the presence check in Phase C
+(Gate 3).
+
+**B-LLM attribute handling:**
+
+A B-LLM-sourced `Attribute` (`field_provenance[*].source == "B-LLM"`,
+confidence 0.5 per Phase B contracts) counts toward VR007 presence
+**identically** to deterministic Source C / D / B attributes. No
+downgrade, no separate severity, no per-source weighting.
+
+Rationale:
+
+- VR007 is a **structural** rule (does the slot have an entry?),
+  not a **confidence** rule. Per-source confidence already rides
+  on the attribute's `field_provenance` and is curator-visible
+  through the OWL exporter; mixing it into the validation severity
+  axis would duplicate the signal and break parity with VR003
+  (which doesn't grade required-field confidence either).
+- Gate 1 of Phase B (eligibility) already guarantees a B-LLM
+  attribute only exists on an element whose `attributes[]` was
+  empty after Phase A / D. So if VR007 is satisfied by a B-LLM
+  attribute, that signal is meaningful — it means the LLM
+  recovered an attribute the deterministic sources missed and the
+  profile says is required. Marking that as "warning" would
+  defeat Phase B's purpose.
+- Downstream consumers that care about confidence can filter the
+  fused output's `attributes[*].field_provenance` directly; they
+  don't need a special validation rule to surface it.
+
+If a future Phase E rule wants a stricter "B-LLM evidence
+insufficient for required" check, that rule lives alongside VR007
+rather than replacing its semantics.
+
 ---
 
 ## 6. Risks and Open Questions
@@ -891,6 +1159,20 @@ conflict resolution between reasoner-forms.
   D / E.** Tracked here as a separate backlog item; will get its
   own spec if curator feedback shows the unbound rules carry
   curator-relevant content.
+- **Phase C scope clarifications (5-gate lock — see §4 Phase C):**
+  Phase C ships only the `entity_types[*].attributes[]` parser
+  addition + VR007. The following are explicitly **out of Phase C
+  scope** and tracked as backlog:
+  - Profile-induction emission of suggested `attributes` blocks
+    on the auto-generated draft profile.
+  - Phase B SPIRES template using profile-declared attribute
+    names as priors.
+  - Per-attribute XSD-type / cardinality / multivalued / enum
+    equality checks on extracted attributes (Phase E surface).
+  - `owl:Restriction` / SHACL / SWRL emission from profile-declared
+    attributes (Phase E surface).
+  - Subtype-level attribute overrides distinct from the parent's
+    list.
 
 ---
 
@@ -964,3 +1246,31 @@ answers needed:
 
 The Phase B implementation plan lives in
 [PROPERTY_EXTRACTION_IMPLEMENTATION_PLAN.md §11](./PROPERTY_EXTRACTION_IMPLEMENTATION_PLAN.md#11-phase-b-implementation-plan-pending-codex-review).
+
+## 11. Decisions for Phase C (round 1 — pending Codex review)
+
+Phase A + Phase B + Phase D have shipped (PRs #14-#18, #19, #22,
+PR B1 #24, PR B2 #25 merged 2026-05-25 / 2026-05-26). Phase C was
+scoped 2026-05-26 with the 5-gate pre-spec lock per §4 Phase C to
+keep the deliverable to a single PR-pair (parser + validation rule
++ 3 acceptance fixtures). Reviewer answers needed:
+
+| § | Question | Default proposal |
+|---|---|---|
+| C1  | Approve Phase C scope (`entity_types[*].attributes[]` + VR007 only — no SHACL / SWRL / OWL restrictions / extraction priors / profile-induction emission)? | Yes |
+| C2  | Approve 5-gate scope lock (§4 Phase C)? | Yes — scope / opt-in / Phase-E independence / backward-compat / backlog isolation all stand. |
+| C3  | New `ProfileAttribute` dataclass shape (§5)? | Approved as drafted. Frozen. `name_key` computed property for case-insensitive matching. |
+| C4  | Accepted `xsd_type` set restricted to the Phase A XSD mapping table identifiers? | Yes. Unknown identifiers raise `ProfileError` at load time with the accepted set in the message. |
+| C5  | VR007 severity? | `warning` — matches VR003's "required field missing" sibling. No new severity level. |
+| C6  | VR007 output granularity (one finding per missing attribute vs one finding per element with a list)? | **Per missing attribute.** Mirrors VR005, easier curator triage. |
+| C7  | VR007 ordering inside `validate()`? | After VR003, before the relationship-cascade-filter step. Same input set as VR003. Annotate-only (never drops elements). |
+| C8  | "Present" definition (case-insensitive `name` match only; no type/multivalued/enum equality)? | Yes. Gate 3 places type / cardinality / enum equality in Phase E. |
+| C9  | B-LLM attribute handling — count toward presence identically to deterministic? | Yes. Structural rule, not a confidence rule. Confidence remains on `field_provenance`. |
+| C10 | Subtype inheritance of `attributes`? | Inherits parent's list, may not override in Phase C. Subtype-level overrides are out of scope. |
+| C11 | `profile_version` bump policy for adding `attributes`? | Not required by the engine. Author may bump per their own downstream policy. |
+| C12 | Phase C revert strategy? | Two revert units (PR C1 = parser additions, PR C2 = VR007). PR C2 alone reverts to "profile carries attribute specs but no rule consumes them" (harmless). Reverting PR C1 also requires reverting PR C2 (VR007 reads `EntityType.attributes`). |
+| C13 | Profile-induction emission of suggested `attributes` blocks in Phase C? | **No.** Backlog (Gate 5). Will get a separate workstream once Phase C v1 has shipped and there is real-domain feedback on attribute-spec ergonomics. |
+| C14 | Phase B SPIRES template uses profile-declared attribute names as priors? | **No** in Phase C v1. Backlog (Gate 5). Phase B v2 / Phase C v2 question, not Phase C v1. |
+
+The Phase C implementation plan lives in
+[PROPERTY_EXTRACTION_IMPLEMENTATION_PLAN.md §12](./PROPERTY_EXTRACTION_IMPLEMENTATION_PLAN.md#12-phase-c-implementation-plan-pending-codex-review).

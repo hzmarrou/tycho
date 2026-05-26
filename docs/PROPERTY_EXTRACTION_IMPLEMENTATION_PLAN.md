@@ -1090,3 +1090,356 @@ Final Phase B acceptance (after PR B2):
 - [ ] Default run (no flag) = byte-identical to pre-Phase-B for
       same inputs (regression guard).
 - [ ] CI passes on both PRs.
+
+---
+
+## 12. Phase C implementation plan (pending Codex review)
+
+**Status:** Draft 2026-05-26. Phase C (profile-declared attribute
+schemas + VR007) per
+[PROPERTY_EXTRACTION_DESIGN.md §4 Phase C](./PROPERTY_EXTRACTION_DESIGN.md#phase-c--profile-declared-attribute-schemas)
+with the 5-gate pre-spec scope lock baked in.
+
+**Reviewer answers needed** — see
+[PROPERTY_EXTRACTION_DESIGN.md §11 C1-C14](./PROPERTY_EXTRACTION_DESIGN.md#11-decisions-for-phase-c-round-1--pending-codex-review).
+
+### 12.1 Phase C deliverable summary
+
+A profile author adds an `attributes` block to their entity types:
+
+```json
+"entity_types": {
+  "Customer": {
+    "required": [],
+    "optional": [],
+    "attributes": [
+      { "name": "customerId", "xsd_type": "xsd:string", "is_id": true,  "required": true },
+      { "name": "email",      "xsd_type": "xsd:string",                  "required": true }
+    ]
+  }
+}
+```
+
+A user running:
+
+```bash
+ontozense validate \
+  --fused domains/<domain>/fused.json \
+  --profile domains/<domain>/profile
+```
+
+gets a `ValidationResult` whose `findings` list now contains zero or
+more `VR007` entries (`severity="warning"`, one per element per
+missing required attribute). All pre-existing rules (VR001-VR006)
+behave identically; no CLI flag is added.
+
+A user whose profile does **not** declare any `attributes` (the
+pre-Phase-C shape) gets validation output byte-identical to a
+pre-Phase-C run for the same inputs.
+
+### 12.2 File-level change list
+
+```
+src/ontozense/
+├── core/
+│   ├── profile.py                        EDIT  ProfileAttribute dataclass +
+│   │                                            EntityType.attributes field +
+│   │                                            _parse_profile_attributes helper +
+│   │                                            load-time validation rules
+│   └── validation.py                     EDIT  _check_vr007_required_attributes +
+│                                                wire into validate() after VR003 +
+│                                                ValidationFinding.rule_id doc
+│                                                comment updated to "VR001-VR007"
+└── (no cli.py changes — no new flags)
+
+tests/
+├── test_profile_attributes_parse.py      NEW   loader contract — happy path,
+│                                                unknown xsd_type, missing name,
+│                                                duplicate name, multiple is_id,
+│                                                non-bool flags, non-list
+│                                                attributes, empty attributes list,
+│                                                omitted attributes key
+├── test_validation_vr007.py              NEW   VR007 unit + integration tests
+└── fixtures/
+    └── phase_c/
+        ├── profile_required_missing/     NEW   schema.json with Customer.attrs[
+        │                                        customerId required: true,
+        │                                        email required: true]
+        ├── profile_complete/             NEW   same shape (re-used or symlinked)
+        ├── profile_no_attrs_default/     NEW   minimal profile, no attributes key
+        ├── fused_customer_missing.json   NEW   Customer with email only
+        ├── fused_customer_complete.json  NEW   Customer with both attrs
+        └── fused_no_attrs_baseline.json  NEW   pre-Phase-A fused (no attributes
+                                                 field on elements at all)
+```
+
+Estimated diff: ~500 LOC (≈ 200 prod, ≈ 300 tests + fixtures).
+
+### 12.3 PR breakdown
+
+**Two PRs** in two revert units. PR C2 depends on PR C1 (VR007
+reads `EntityType.attributes`); they must merge in order, and
+reverting PR C1 forces reverting PR C2 first.
+
+#### PR C1 — `feat(profile): entity_types[*].attributes[] schema parser + ProfileAttribute dataclass`
+
+PR C1 is a **pure additive parser change**. No behaviour change
+visible from `validate` / `draft` output. `EntityType` gains an
+`attributes` field that defaults to `[]`; nothing in the rest of
+the engine consumes it yet.
+
+- `core/profile.py`:
+  - New frozen `ProfileAttribute` dataclass per design §5 Phase C
+    contracts (name, xsd_type, description, required, is_id,
+    is_multivalued, enum_values, `name_key` computed property).
+  - New `EntityType.attributes: list[ProfileAttribute] = field(default_factory=list)`.
+  - New `_ACCEPTED_XSD_TYPES` module constant — frozenset of the 12
+    identifiers listed in the design doc.
+  - New `_parse_profile_attributes(entity_type_name, raw) -> list[ProfileAttribute]`
+    helper. Raises `ProfileError` on each loader violation listed
+    in design §5 Phase C contracts.
+  - `_parse_entity_types` extended to call
+    `_parse_profile_attributes(name, spec.get("attributes", []))`
+    and pass the result to `EntityType(...)`.
+- Tests in `test_profile_attributes_parse.py`:
+  - Happy path: profile with valid `attributes` parses; each
+    field arrives on the loaded `EntityType.attributes` list with
+    the documented defaults.
+  - Omitted `attributes` key parses to `attributes == []` (the
+    backward-compat regression guard).
+  - Empty list (`"attributes": []`) parses to `[]`.
+  - `attributes` not a list → `ProfileError`.
+  - Missing `name` or `xsd_type` → `ProfileError`.
+  - Empty `name` or `xsd_type` → `ProfileError`.
+  - Unknown `xsd_type` (e.g. `xsd:int`) → `ProfileError` whose
+    message includes the accepted set.
+  - Non-bool `required` / `is_id` / `is_multivalued` → `ProfileError`.
+  - `enum_values` not a list of strings → `ProfileError`.
+  - Duplicate `name` (case-insensitive) within the same entity
+    type → `ProfileError`.
+  - Two entries with `is_id: true` in the same entity type →
+    `ProfileError`.
+  - **Cross-test:** parsing an existing pre-Phase-C profile
+    fixture (e.g. `docs/profile-examples/esg/`) produces byte-
+    identical `Profile` object (modulo the new empty
+    `attributes` list) — covered by an explicit comparison test.
+
+**Acceptance (PR C1):**
+
+- All existing profile tests stay green (no shape regression).
+- New parser tests cover every rule in design §5.
+- `validate` output unchanged on every existing fixture (no rule
+  yet consumes `EntityType.attributes`).
+
+#### PR C2 — `feat(validation): VR007 required-attributes-present + acceptance fixtures`
+
+PR C2 wires the new rule. CLI surface unchanged; only the
+`ValidationResult.findings` list grows when a profile uses the
+new field.
+
+- `core/validation.py`:
+  - Module docstring updated — the rule list now reads
+    `"VR001 .. VR007"`; the doc comment on
+    `ValidationFinding.rule_id` updated to `"VR001 through VR007"`.
+  - New `_check_vr007_required_attributes(elements, profile,
+    result)` function. For each element of a known type, walk the
+    type's `attributes` list, collect the `name_key` of every
+    entry with `required: true`, and emit one
+    `ValidationFinding(rule_id="VR007", severity="warning", ...)`
+    per missing key (per design §5 "Per missing attribute"
+    granularity).
+  - `validate(...)` calls `_check_vr007_required_attributes(...)`
+    **after** `_check_vr003_required_fields(...)` and **before**
+    the cascade-filter step. Annotate-only — no element drop in
+    any mode.
+- Tests in `test_validation_vr007.py`:
+  - **Fixture 1** — required missing: load
+    `fused_customer_missing.json` + `profile_required_missing/`
+    → `validate(mode="flag")` produces exactly one VR007 finding
+    with `details["missing_required_attributes"] == ["customerId"]`
+    (only `email` is present in the fused fixture).
+  - **Fixture 2** — complete: load `fused_customer_complete.json`
+    + the same profile → zero VR007 findings.
+  - **Fixture 3** — no-attrs default regression: load any fused
+    fixture + `profile_no_attrs_default/` (minimal profile) →
+    `validate` output (findings list, surviving elements,
+    surviving relationships, summary counts) byte-identical to
+    the result obtained by calling `validate` with the same
+    inputs on a pre-Phase-C version of the function. (Equivalent
+    test: assert that no `ValidationFinding` has
+    `rule_id == "VR007"` and that the JSON-serialised
+    `ValidationResult.findings` matches a golden snapshot
+    captured before merging PR C2.)
+  - **Pre-Phase-A fused regression:** load
+    `fused_no_attrs_baseline.json` (no `attributes` key on any
+    element — the legacy shape from before Phase A) + any
+    profile that declares `attributes[*].required=true` → VR007
+    fires for every declared required attribute, with the same
+    finding shape (proves the rule handles the empty-list case
+    gracefully and produces a meaningful curator signal). This
+    is the only test that exercises the "fused output predates
+    Phase A" branch; the rule itself doesn't need a special
+    code path for it because `el.attributes` defaults to `[]`.
+  - **B-LLM presence test:** a fused element where the only
+    `Attribute` for the required name carries
+    `field_provenance[*].source == "B-LLM"` and `confidence == 0.5`.
+    VR007 produces zero findings — proves B-LLM attributes
+    count toward presence identically to deterministic ones
+    (design §5 Phase C contracts, "B-LLM attribute handling").
+  - **Per-attribute granularity test:** an element missing two
+    required attributes → two findings emitted (one per missing
+    name), each with the correct singleton
+    `missing_required_attributes` list.
+  - **Ordering test:** assert that in the returned
+    `ValidationResult.findings` list, every `VR003` finding
+    appears before every `VR007` finding for the same element
+    (proves the call order inside `validate()` is correct).
+  - **Filter mode no-drop test:** running `validate(mode="filter")`
+    on Fixture 1 still produces the VR007 finding, and the
+    `Customer` element is **not** dropped from
+    `result.elements` (VR007 is annotate-only regardless of
+    mode).
+
+**Acceptance (PR C2):**
+
+- All three acceptance fixtures behave as specified.
+- VR007 fires only when both (a) the profile declares
+  `attributes[*].required=true` for the element's type, and
+  (b) no matching extracted `Attribute` exists on the element.
+- Default (no attribute schema) regression: zero new findings on
+  any existing fixture.
+- Filter-mode parity: VR007 is annotate-only.
+
+### 12.4 Test strategy
+
+**New fixtures**
+
+- `tests/fixtures/phase_c/profile_required_missing/schema.json` —
+  declares one entity type (`Customer`) with two `required: true`
+  attributes (`customerId`, `email`). Includes the minimum
+  required `predicates: {}` block to satisfy the existing loader
+  contract.
+- `tests/fixtures/phase_c/profile_no_attrs_default/schema.json` —
+  the minimal profile from PROFILE_SPEC.md "Example: minimal
+  profile" verbatim. No `attributes` key on any entity type. Used
+  by Fixture 3 to lock in the backward-compat regression
+  guarantee.
+- `tests/fixtures/phase_c/fused_customer_missing.json` — fused
+  shape with one `Customer` element carrying
+  `attributes: [{name: "email", xsd_type: "xsd:string", ...}]`
+  (`customerId` deliberately absent).
+- `tests/fixtures/phase_c/fused_customer_complete.json` — same
+  `Customer` element with both `customerId` and `email` on
+  `attributes`.
+- `tests/fixtures/phase_c/fused_no_attrs_baseline.json` — fused
+  shape with one `Customer` element whose JSON omits the
+  `attributes` key entirely (pre-Phase-A shape). Used to prove
+  VR007 handles the legacy reload case gracefully.
+
+**LLM mocking**
+
+None required. Phase C is purely deterministic — the parser and
+the rule both run without any LLM call.
+
+**Coverage targets**
+
+- 90% line coverage on new code (matches project default).
+- 100% branch coverage on `_parse_profile_attributes` and
+  `_check_vr007_required_attributes` (each load-time error path
+  and each rule branch hit by an explicit test).
+
+**Existing test coverage to preserve**
+
+- `tests/test_profile_loader*.py` — must remain green; new
+  parser is additive.
+- `tests/test_validation*.py` — six existing rules unchanged;
+  must remain green.
+- `tests/test_domain_neutrality.py` — VR007's docstring /
+  message strings must not introduce banking jargon.
+- `tests/test_source_d_acceptance.py::test_ac11_no_shacl_or_swrl_emitter_added`
+  — VR007 does NOT introduce SHACL / SWRL tokens to `core/`.
+
+### 12.5 Backwards compatibility and migration
+
+- `EntityType.attributes` defaults to `[]`. Existing profile
+  fixtures load with the new empty list and behave identically
+  in every other respect.
+- `Profile` dataclass shape unchanged at the top level; only
+  `EntityType` grows a new field. Code that imports `Profile`
+  from `core.profile` and inspects only the top-level fields
+  continues to work.
+- `validate(...)` signature unchanged. The new rule runs
+  unconditionally, but produces zero findings on any profile
+  that has no `attributes[*].required=true` declaration.
+- No CLI flag added or changed.
+- No `profile_version` bump required for adding `attributes` to
+  an existing profile.
+- Pre-Phase-A `fused.json` files (no `attributes` key on
+  elements) load unchanged. If the profile declares
+  `required: true` attributes, VR007 fires for them as expected
+  — handled by the default `[]` on the element-level
+  `attributes` field.
+
+### 12.6 Rollback plan
+
+Two revert units. PR C2 depends on PR C1.
+
+| Unit | What it covers | Revert effect |
+|---|---|---|
+| **PR C1** | `ProfileAttribute` dataclass + `EntityType.attributes` field + `_parse_profile_attributes` helper + load-time validation | Loader stops accepting `attributes` on entity types — profiles that opted in fail to load with `ProfileError`. **Must revert PR C2 first** because VR007 reads `EntityType.attributes`. |
+| **PR C2** | `_check_vr007_required_attributes` + wiring into `validate()` + module docstring update | `validate()` stops emitting VR007 findings. `EntityType.attributes` continues to load (still parsed by PR C1), just no rule consumes it. Profile authors who opted in see no validation signal but no error either. |
+
+**Reverting in reverse merge order is the only supported path**:
+revert PR C2, then PR C1. Reverting PR C1 alone leaves VR007's
+`for et in profile.entity_types.values(): for a in et.attributes`
+walk pointing at a deleted field.
+
+No data migration. No external API impact (Tycho has no external
+API).
+
+### 12.7 Effort estimate
+
+| PR | Person-days (focused) |
+|----|-----------------------|
+| C1 | 1.0 (parser + dataclass + load-time validation + 10+ unit tests) |
+| C2 | 1.5 (VR007 + 3 acceptance fixtures + ordering test + B-LLM presence test + filter-mode parity) |
+| **Total Phase C** | **~2.5 PD** |
+
+Phase C is intentionally the smallest reviewable wedge. Phase D
+took ~1.5 PD (single PR) for comparison; Phase B took ~3.5 PD
+(two PRs with LLM wiring). Phase C lands between them.
+
+### 12.8 Sign-off checklist
+
+Before merging each Phase C PR:
+
+- [ ] All tests green (`pytest -q`).
+- [ ] No new warnings in `ruff check` on touched files.
+- [ ] `tests/test_domain_neutrality.py` passes — no banking
+      jargon in `src/`.
+- [ ] `tests/test_source_d_acceptance.py::test_ac11_no_shacl_or_swrl_emitter_added`
+      passes — Phase C does NOT introduce SHACL / SWRL tokens to
+      `core/`.
+- [ ] Diff reviewed against design doc §4 5-gate scope lock — no
+      gate violations (no SHACL / SWRL / restrictions / extraction
+      priors / profile-induction emission / subtype overrides).
+- [ ] PR description references the revert unit it belongs to
+      (PR C1 = parser only, PR C2 = VR007 + fixtures; PR C2
+      depends on PR C1).
+
+Final Phase C acceptance (after PR C2):
+
+- [ ] Fixture 1 (required missing) — VR007 fires with exact
+      expected `details["missing_required_attributes"]` list.
+- [ ] Fixture 2 (complete) — zero VR007 findings.
+- [ ] Fixture 3 (no-attrs default) — `validate` output byte-
+      identical to a pre-Phase-C run on the same inputs (regression
+      guard).
+- [ ] B-LLM presence test — VR007 counts B-LLM-sourced attributes
+      toward presence identically to deterministic ones.
+- [ ] CI passes on both PRs.
+- [ ] Tutorial follow-up PR queued (`PROFILE_SPEC.md` already
+      updated as part of this spec PR; the user-facing tutorial
+      under `docs/` only needs a one-paragraph note in the
+      "authoring a profile" section pointing at the new
+      `attributes` block).
