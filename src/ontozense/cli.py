@@ -3545,6 +3545,57 @@ def draft(
             'and currently rejected.'
         ),
     ),
+    property_induction: str = typer.Option(
+        "off", "--property-induction",
+        help=(
+            'Phase B LLM property induction. "off" (default) is a '
+            'no-op — pre-Phase-B behaviour preserved. "llm" runs '
+            'the PR B1 dry-run scaffold: scans for eligible '
+            'concepts and prints the budget plan. No LLM call, no '
+            'cache file, no new disk artifacts. Real LLM call '
+            'lands in PR B2.'
+        ),
+    ),
+    property_induction_max_concepts: int = typer.Option(
+        50, "--property-induction-max-concepts",
+        help=(
+            "Hard cap on eligible concepts processed in --property-"
+            "induction llm mode. Sorted by Source A confidence "
+            "descending; lower-confidence concepts skipped when "
+            "over budget. Default 50."
+        ),
+    ),
+    property_induction_max_calls: int = typer.Option(
+        100, "--property-induction-max-calls",
+        help=(
+            "Hard cap on total LLM calls (including retries in PR "
+            "B2). Default 100. In PR B1 this matches max-concepts "
+            "because dry-run does not call the LLM."
+        ),
+    ),
+    property_induction_token_budget: int = typer.Option(
+        0, "--property-induction-token-budget",
+        help=(
+            "Optional total input-token cap. 0 (default) disables "
+            "the cap. When set, processing stops once the "
+            "cumulative input-token estimate exceeds N."
+        ),
+    ),
+    property_induction_model: str = typer.Option(
+        "azure/gpt-5.4", "--property-induction-model",
+        help=(
+            "LiteLLM model identifier for Phase B (PR B2). Matches "
+            "the explicit default on extract-a / survey. Accepted "
+            "but unused in PR B1 (no LLM call)."
+        ),
+    ),
+    property_induction_refresh: bool = typer.Option(
+        False, "--property-induction-refresh",
+        help=(
+            "Force cache miss for every eligible class in PR B2. "
+            "Accepted but no-op in PR B1 (no cache exists yet)."
+        ),
+    ),
     plan: bool = typer.Option(
         False, "--plan",
         help="Print what would run; don't execute.",
@@ -3581,6 +3632,49 @@ def draft(
             f"{sorted(_emit_rules_valid | _emit_rules_deferred)}; "
             f"got {emit_rules!r}.",
             param_hint="--emit-rules",
+        )
+
+    # Phase B (PR B1): --property-induction validation. B1 ships
+    # only "off" and "llm" (dry-run). PR B2 may extend with future
+    # modes but the contract today is exactly these two.
+    _property_induction_valid = {"off", "llm"}
+    if property_induction not in _property_induction_valid:
+        raise typer.BadParameter(
+            f"--property-induction must be one of "
+            f"{sorted(_property_induction_valid)}; "
+            f"got {property_induction!r}.",
+            param_hint="--property-induction",
+        )
+
+    # Phase B (PR B1) — budget value validation.
+    # Codex r1 blocker: typer parses these as plain int with no
+    # lower bound, so a negative value would silently corrupt
+    # BudgetEnforcer's index/slice logic. Enforce at the CLI
+    # boundary so the contract is "hard cap, valid range only".
+    # max_concepts / max_calls: must be >= 1 (0 == "disable
+    # induction"; user has --property-induction off for that).
+    # token_budget: 0 is the documented "unbounded" sentinel
+    # (mapped to None below); negative is rejected.
+    if property_induction_max_concepts < 1:
+        raise typer.BadParameter(
+            f"--property-induction-max-concepts must be >= 1; "
+            f"got {property_induction_max_concepts}. "
+            f"Use --property-induction off to disable induction.",
+            param_hint="--property-induction-max-concepts",
+        )
+    if property_induction_max_calls < 1:
+        raise typer.BadParameter(
+            f"--property-induction-max-calls must be >= 1; "
+            f"got {property_induction_max_calls}. "
+            f"Use --property-induction off to disable induction.",
+            param_hint="--property-induction-max-calls",
+        )
+    if property_induction_token_budget < 0:
+        raise typer.BadParameter(
+            f"--property-induction-token-budget must be >= 0 "
+            f"(0 = unbounded); got "
+            f"{property_induction_token_budget}.",
+            param_hint="--property-induction-token-budget",
         )
 
     if plan:
@@ -3697,6 +3791,66 @@ def draft(
         source_d=source_d,
         discovery_dir=discovery_dir,
     )
+
+    # Phase B PR B2: real LLM property induction with cache.
+    # ``off`` (default) is a complete no-op — never touches the
+    # cache file, preserves Phase A regression byte-identity.
+    # ``llm`` runs eligibility + budget, reads the cache, calls the
+    # LLM for cache-miss concepts only, parses + merges the
+    # attributes onto matching FusedElements, writes the cache.
+    if property_induction == "llm":
+        from .core.property_induction import Budget, induce_attributes
+
+        token_budget = (
+            property_induction_token_budget
+            if property_induction_token_budget > 0
+            else None
+        )
+        b_plan = induce_attributes(
+            fused,
+            model=property_induction_model,
+            budget=Budget(
+                max_concepts=property_induction_max_concepts,
+                max_calls=property_induction_max_calls,
+                token_budget=token_budget,
+            ),
+            dry_run=False,
+            refresh=property_induction_refresh,
+            discovery_dir=discovery_dir,
+        )
+        console.print(
+            f"[bold blue]Property induction:[/] "
+            f"{len(b_plan.eligible)} eligible concept(s), "
+            f"{b_plan.cache_hits} cache hit(s), "
+            f"{b_plan.cache_misses} LLM call(s), "
+            f"{len(b_plan.skipped)} skipped by budget."
+        )
+        if b_plan.eligible:
+            for concept in b_plan.eligible[:10]:
+                attrs = b_plan.per_class.get(concept.class_uri, [])
+                console.print(
+                    f"    - {concept.element_name}  "
+                    f"(confidence={concept.confidence:.2f}, "
+                    f"attributes_induced={len(attrs)})"
+                )
+            if len(b_plan.eligible) > 10:
+                console.print(
+                    f"    ... and {len(b_plan.eligible) - 10} more"
+                )
+        for concept, reason in b_plan.skipped[:5]:
+            console.print(
+                f"  [yellow]{reason}[/] — {concept.element_name}"
+            )
+        if len(b_plan.skipped) > 5:
+            console.print(
+                f"  [yellow]... and {len(b_plan.skipped) - 5} more "
+                "skipped[/]"
+            )
+        if property_induction_refresh:
+            console.print(
+                "  [dim]--property-induction-refresh: cache misses "
+                "forced for every eligible concept.[/]"
+            )
 
     validation_report = run_validate(fused, loaded_profile, mode=mode)
     lint_report = run_lint(fused)
