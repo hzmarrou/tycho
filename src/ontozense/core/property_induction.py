@@ -1,4 +1,4 @@
-"""LLM SPIRES Pass-2 property induction — Phase B scaffold (PR B1).
+"""LLM SPIRES Pass-2 property induction — Phase B (PR B1 + PR B2).
 
 Phase B (per
 ``docs/PROPERTY_EXTRACTION_DESIGN.md §4 Phase B``) populates
@@ -15,24 +15,38 @@ design constrains this module:
   5. Backlog isolation — does not touch the fusion-layer
      unmatched-rules concern.
 
-**PR B1 ships the dry-run path only.** No cache file, no LLM call,
-no new disk artifacts. The entry point ``induce_attributes(...,
-dry_run=True)`` returns the eligible-concept plan plus the budget
-summary so the CLI can print it. ``dry_run=False`` raises
-``NotImplementedError("queued for PR B2")``.
-
-PR B2 will add the real SPIRES Pass-2 call, attribute parsing,
-``Attribute`` merge onto FusedElements, and the
-``discovery/source-a-properties.json`` cache.
+PR B1 shipped the dry-run scaffold (eligibility + budget + console
+plan; no cache; no LLM call). **PR B2 adds the real SPIRES Pass-2
+LLM call, attribute parsing, merge into gate-eligible empty
+attribute slots, and the discovery/source-a-properties.json
+cache.** Cache is consulted and written only when
+``--property-induction llm`` is explicitly set on the rerun —
+default-flag runs of ``draft`` never read or write the cache, so
+the Phase A "default output unchanged" guarantee holds.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from .attribute import Attribute
     from .fusion import FusedElement, FusionResult
+
+logger = logging.getLogger(__name__)
+
+
+# Cache schema version. Bump if the on-disk shape of
+# ``discovery/source-a-properties.json`` changes in a non-backwards-
+# compatible way. Mirrors the convention used in
+# :mod:`ontozense.core.source_c` and :mod:`ontozense.core.source_d`.
+CACHE_SCHEMA_VERSION = "1.0"
+CACHE_FILE_NAME = "source-a-properties.json"
 
 
 # Per-class input cap for SPIRES (per design §5). Concatenated
@@ -71,14 +85,25 @@ class Budget:
 
 @dataclass
 class InductionPlan:
-    """The output of a dry-run (PR B1). Carries the eligible-concept
-    list, the budget that would have been enforced, and the per-
-    budget skipped subset. PR B2 will extend this with a per-class
-    ``Attribute`` payload from the real LLM."""
+    """The output of an induction run.
+
+    PR B1 dry-run populates only ``eligible``, ``skipped``, and
+    ``budget``. PR B2 real-run additionally populates ``per_class``
+    (the induced attributes per class URI), ``model`` (the LLM
+    model that produced them), ``cache_hits`` / ``cache_misses``
+    (so the CLI can report cost), and ``refresh`` (whether the
+    user forced cache misses).
+    """
 
     eligible: list[EligibleConcept] = field(default_factory=list)
     skipped: list[tuple[EligibleConcept, str]] = field(default_factory=list)
     budget: Budget = field(default_factory=Budget)
+    # PR B2 additions; default to "no LLM happened" for dry-run.
+    per_class: dict[str, list[Any]] = field(default_factory=dict)
+    model: str = ""
+    cache_hits: int = 0
+    cache_misses: int = 0
+    refresh: bool = False
 
 
 # ─── Public API ─────────────────────────────────────────────────────────────
@@ -202,34 +227,401 @@ def induce_attributes(
     budget: Budget | None = None,
     dry_run: bool = True,
     refresh: bool = False,
+    discovery_dir: Path | None = None,
 ) -> InductionPlan:
     """Phase B entry point.
 
-    PR B1 supports only ``dry_run=True``: returns the eligibility
-    plan, applies the budget, and that's it. No file written. No
-    LLM call. PR B2 will implement ``dry_run=False`` with the real
-    SPIRES Pass-2 invocation + cache.
+    ``dry_run=True`` (default) returns the eligibility plan, applies
+    the budget, and stops. No file written. No LLM call. This is the
+    PR B1 path the CLI uses for `--property-induction llm` when the
+    user only wants to see what would happen.
 
-    ``refresh`` is accepted in PR B1 for forward-compat with the
-    cache-aware PR B2 implementation, but is a no-op here — there
-    is no cache to refresh. The CLI prints an explicit note when
-    the user passes ``--property-induction-refresh`` in B1.
+    ``dry_run=False`` (PR B2) reads the cache at
+    ``<discovery_dir>/source-a-properties.json`` (when
+    ``discovery_dir`` is supplied), calls the LLM for cache misses,
+    parses the response into typed ``Attribute`` records, merges
+    them onto the matching FusedElement's ``attributes`` list (gate
+    1 guarantees that slot is empty), and writes the updated cache
+    back. ``refresh=True`` forces a cache miss for every eligible
+    class.
+
+    ``discovery_dir`` is required for ``dry_run=False`` — that's
+    where the cache lives. When ``None``, callers run in
+    no-persistence mode (PR B2 will use this from tests).
     """
-    if not dry_run:
-        raise NotImplementedError(
-            "Real LLM induction is queued for PR B2. "
-            "PR B1 ships only the dry-run scaffold."
-        )
-
     budget = budget or Budget()
     eligible = find_eligible_concepts(fused)
     enforcer = BudgetEnforcer(budget)
     kept, skipped = enforcer.apply(eligible)
-    # `refresh` is accepted but ignored in PR B1 (no cache exists).
-    # `model` is accepted but unused in PR B1 (no LLM call). Both
-    # surface as recorded plan metadata in the future PR B2 cache.
-    _ = model, refresh
-    return InductionPlan(eligible=kept, skipped=skipped, budget=budget)
+
+    if dry_run:
+        # `refresh` is accepted but ignored in dry-run (no cache to
+        # refresh). `model` is accepted but unused. Both surface as
+        # recorded plan metadata in the PR B2 cache write below.
+        _ = model, refresh
+        return InductionPlan(eligible=kept, skipped=skipped, budget=budget)
+
+    # ── PR B2 real LLM call path ───────────────────────────────────
+    cache = PropertyInductionCache(discovery_dir) if discovery_dir else None
+    existing = (
+        {} if (cache is None or refresh)
+        else cache.load_per_class()
+    )
+
+    plan = InductionPlan(eligible=kept, skipped=skipped, budget=budget)
+    plan.model = model
+    plan.cache_hits = 0
+    plan.cache_misses = 0
+    plan.refresh = refresh
+
+    for concept in kept:
+        if concept.class_uri in existing:
+            # Cache hit. Re-merge the cached attributes onto the
+            # FusedElement so a rerun with the flag produces the
+            # same OWL output. No LLM call.
+            plan.cache_hits += 1
+            cached_attrs = [
+                _attribute_from_cache_dict(d)
+                for d in existing[concept.class_uri].get("attributes", [])
+            ]
+            _merge_into_fused(fused, concept, cached_attrs)
+            plan.per_class[concept.class_uri] = cached_attrs
+            continue
+
+        # Cache miss. Build the prompt, call the LLM, parse, merge,
+        # record. _call_llm is the mockable seam for tests.
+        plan.cache_misses += 1
+        prompt = _generate_prompt(concept)
+        raw = _call_llm(prompt=prompt, model=model)
+        attrs = _parse_llm_response(raw)
+        _merge_into_fused(fused, concept, attrs)
+        plan.per_class[concept.class_uri] = attrs
+
+    if cache is not None:
+        cache.write(
+            plan=plan,
+            existing_per_class=existing,
+        )
+
+    return plan
+
+
+# ─── Cache layer ────────────────────────────────────────────────────────────
+
+
+@dataclass
+class _CacheEntry:
+    """In-memory shape of one per-class cache entry. Used internally
+    by :class:`PropertyInductionCache`; not part of the public API.
+    """
+
+    attributes: list[dict]
+    input_truncated: bool = False
+    skipped_reason: str | None = None
+
+
+class PropertyInductionCache:
+    """Reader / writer for ``discovery/source-a-properties.json``.
+
+    Cache is consulted and written only when the caller opts in
+    (i.e. ``--property-induction llm`` on rerun). Default-flag
+    ``draft`` runs never instantiate this class, so the cache file
+    can sit on disk indefinitely without affecting downstream
+    behaviour.
+
+    Per design §5 Phase B contracts, the on-disk shape is:
+
+    .. code-block:: json
+
+       {
+         "schema_version": "1.0",
+         "model": "azure/gpt-5.4",
+         "generated_at": "2026-...Z",
+         "budget": {...},
+         "usage": {...},
+         "per_class": {
+           "{class_uri}": {
+             "attributes": [...Attribute serialised...],
+             "input_truncated": false,
+             "skipped_reason": null
+           }
+         },
+         "skipped": [...]
+       }
+    """
+
+    def __init__(self, discovery_dir: Path) -> None:
+        self.discovery_dir = Path(discovery_dir)
+        self.path = self.discovery_dir / CACHE_FILE_NAME
+
+    def load_per_class(self) -> dict[str, dict]:
+        """Return the ``per_class`` map from the cache file, or an
+        empty dict when the file doesn't exist / is malformed.
+
+        Malformed cache files are treated as empty rather than
+        raising — Phase B contract is "cache is best-effort
+        acceleration, never a correctness requirement". The
+        warning is logged for the curator.
+
+        Per-entry normalisation (Codex r1 blocker on PR B2):
+        each ``per_class[class_uri]`` value is also validated as a
+        dict. Non-dict entries are dropped from the returned map
+        with a per-entry WARNING. This protects the cache-hit code
+        path from raising ``AttributeError`` on ``.get(...)`` when
+        a hand-edited or version-skewed cache file carries
+        scalar / list values where a dict was expected.
+        """
+        if not self.path.exists():
+            return {}
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "Phase B cache at %s is unreadable (%s); treating "
+                "as empty.", self.path, exc,
+            )
+            return {}
+        per_class = raw.get("per_class")
+        if not isinstance(per_class, dict):
+            logger.warning(
+                "Phase B cache at %s has unexpected shape; treating "
+                "as empty.", self.path,
+            )
+            return {}
+
+        # Per-entry normalisation: drop non-dict values rather than
+        # letting the cache-hit path crash on .get(...).
+        normalised: dict[str, dict] = {}
+        for class_uri, entry in per_class.items():
+            if not isinstance(entry, dict):
+                logger.warning(
+                    "Phase B cache entry for %r has unexpected "
+                    "shape (%s); dropping. Cache miss will be "
+                    "treated as required for this class.",
+                    class_uri, type(entry).__name__,
+                )
+                continue
+            normalised[class_uri] = entry
+        return normalised
+
+    def write(
+        self,
+        *,
+        plan: "InductionPlan",
+        existing_per_class: dict[str, dict],
+    ) -> None:
+        """Write the cache. Merges newly-induced attributes with the
+        existing cache so unchanged classes' entries survive across
+        runs. ``plan.per_class`` may include cache-hit entries that
+        round-trip unchanged."""
+        merged_per_class: dict[str, dict] = dict(existing_per_class)
+        for class_uri, attrs in plan.per_class.items():
+            merged_per_class[class_uri] = {
+                "attributes": [a.to_json_dict() for a in attrs],
+                "input_truncated": False,
+                "skipped_reason": None,
+            }
+        # Record budget-skipped concepts so the curator can see what
+        # didn't make it into the cache.
+        for concept, reason in plan.skipped:
+            merged_per_class.setdefault(concept.class_uri, {
+                "attributes": [],
+                "input_truncated": False,
+                "skipped_reason": reason,
+            })
+
+        payload = {
+            "schema_version": CACHE_SCHEMA_VERSION,
+            "model": plan.model,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "budget": {
+                "max_concepts": plan.budget.max_concepts,
+                "max_calls": plan.budget.max_calls,
+                "token_budget": plan.budget.token_budget,
+            },
+            "usage": {
+                "concepts_processed": len(plan.per_class),
+                "cache_hits": plan.cache_hits,
+                "cache_misses": plan.cache_misses,
+                "refresh": plan.refresh,
+            },
+            "per_class": merged_per_class,
+            "skipped": [
+                {"class_uri": c.class_uri, "reason": r}
+                for c, r in plan.skipped
+            ],
+        }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+
+# ─── Prompt + LLM seam ──────────────────────────────────────────────────────
+
+
+_VALID_XSD_TYPES = frozenset({
+    "xsd:string",
+    "xsd:integer",
+    "xsd:decimal",
+    "xsd:double",
+    "xsd:date",
+    "xsd:dateTime",
+    "xsd:boolean",
+    "xsd:anyURI",
+})
+
+
+def _generate_prompt(concept: "EligibleConcept") -> str:
+    """Build the per-class SPIRES-style prompt.
+
+    Mirrors the simple ``litellm.completion``-based pattern used by
+    ``ontozense.core.bridging._call_llm`` — a flat prompt + flat
+    YAML-ish output is easier to parse + mock at test time than the
+    full LinkML / OntoGPT pipeline. The output contract is one
+    bullet per attribute on the format
+    ``- name :: xsd_type :: description`` so the parser stays small.
+    """
+    return (
+        f"You are extracting structured attributes for the class "
+        f"\"{concept.element_name}\" from a domain document.\n"
+        f"\n"
+        f"Class context:\n"
+        f"{concept.snippet}\n"
+        f"\n"
+        f"Return attributes as YAML, one per line, in the format:\n"
+        f"  - name :: xsd_type :: description\n"
+        f"\n"
+        f"xsd_type must be one of: "
+        f"{', '.join(sorted(_VALID_XSD_TYPES))}.\n"
+        f"Description is one short sentence.\n"
+        f"\n"
+        f"Only include attributes the source text explicitly mentions or "
+        f"strongly implies. Output only the YAML list. No prose, no "
+        f"headers, no code fences."
+    )
+
+
+def _call_llm(*, prompt: str, model: str) -> str:
+    """Call ``litellm.completion`` and return the content string.
+
+    Single seam — tests mock this at the module path
+    (``ontozense.core.property_induction._call_llm``). Mirrors the
+    pattern :mod:`ontozense.core.bridging` already uses, including
+    the import-inside-function pattern that keeps litellm out of
+    the import graph for code paths that don't need it.
+    """
+    import litellm
+
+    response = litellm.completion(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+        max_tokens=1500,
+    )
+    return response.choices[0].message.content
+
+
+def _parse_llm_response(raw: str) -> list["Attribute"]:
+    """Parse the per-class LLM output into typed Attribute records.
+
+    Output format (per ``_generate_prompt``):
+
+    .. code-block:: text
+
+       - account_id :: xsd:string :: Unique customer identifier.
+       - balance :: xsd:decimal :: Current outstanding balance.
+       - opened_at :: xsd:dateTime :: Account creation timestamp.
+
+    Lenient parser:
+
+      * lines without leading ``-`` are skipped (no error)
+      * fewer than 3 ``::``-separated tokens → line skipped
+      * unknown xsd_type → defaults to ``xsd:string`` (per design
+        Q12 fallback policy)
+      * malformed lines logged at WARNING but never abort the run
+
+    Returns the list of parsed ``Attribute`` records. Each carries
+    ``source="B-LLM"`` and ``confidence=0.5`` per design §5.
+    """
+    from .attribute import Attribute, FieldProvenance
+
+    out: list[Attribute] = []
+    for line in (raw or "").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("-"):
+            continue
+        body = stripped.lstrip("-").strip()
+        parts = [p.strip() for p in body.split("::")]
+        if len(parts) < 3:
+            logger.warning(
+                "Phase B LLM line skipped (need 3 fields): %r", body,
+            )
+            continue
+        name, xsd_type, description = parts[0], parts[1], "::".join(parts[2:]).strip()
+        if not name:
+            continue
+        if xsd_type not in _VALID_XSD_TYPES:
+            logger.warning(
+                "Phase B LLM returned unrecognised xsd_type %r for "
+                "attribute %r; defaulting to xsd:string.",
+                xsd_type, name,
+            )
+            xsd_type = "xsd:string"
+        out.append(Attribute(
+            name=name,
+            xsd_type=xsd_type,
+            description=description,
+            field_provenance=[FieldProvenance(
+                source="B-LLM",
+                artifact=f"discovery/{CACHE_FILE_NAME}",
+                line=0,
+                confidence=0.5,
+                extractor="spires-pass2",
+            )],
+            confidence=0.5,
+        ))
+    return out
+
+
+def _attribute_from_cache_dict(d: dict[str, Any]) -> "Attribute":
+    """Reconstruct an Attribute from a cache-file dict.
+
+    Thin wrapper around ``Attribute.from_json_dict`` so the cache
+    layer doesn't need to know the Attribute import path.
+    """
+    from .attribute import Attribute
+
+    return Attribute.from_json_dict(d)
+
+
+def _merge_into_fused(
+    fused: "FusionResult",
+    concept: "EligibleConcept",
+    attrs: list["Attribute"],
+) -> None:
+    """Attach ``attrs`` to the FusedElement whose name matches
+    ``concept.element_name``.
+
+    Gate 1 guard: this function only writes when the matching
+    element's ``attributes`` is empty. The eligibility filter at the
+    top of the pipeline already filters to ``attributes==[]``
+    elements, so this is a defensive belt-and-braces check that
+    protects against future code paths that mutate the list between
+    eligibility and merge. Non-empty → no-op + WARNING log.
+    """
+    for el in fused.elements:
+        if el.element_name == concept.element_name:
+            if el.attributes:
+                logger.warning(
+                    "Phase B merge skipped — FusedElement %r already "
+                    "carries attributes (gate 1 violation guard).",
+                    el.element_name,
+                )
+                return
+            el.attributes = list(attrs)
+            return
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
