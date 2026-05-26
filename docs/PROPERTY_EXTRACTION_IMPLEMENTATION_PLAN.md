@@ -833,3 +833,260 @@ scope for this plan. Pre-conditions for Phase E spec work:
 
 Phase E will get its own design doc section and its own plan section.
 Not in scope here.
+
+---
+
+## 11. Phase B implementation plan (pending Codex review)
+
+**Status:** Draft 2026-05-26. Phase B (LLM SPIRES Pass-2 for
+doc-only domains) per
+[PROPERTY_EXTRACTION_DESIGN.md §4 Phase B](./PROPERTY_EXTRACTION_DESIGN.md#phase-b--llm-property-extraction-spires-pass-2)
+with the 5-gate pre-spec scope lock baked in.
+
+**Reviewer answers needed** — see
+[PROPERTY_EXTRACTION_DESIGN.md §10 B1-B13](./PROPERTY_EXTRACTION_DESIGN.md#10-decisions-for-phase-b-round-1--pending-codex-review).
+
+### 11.1 Phase B deliverable summary
+
+A user running:
+
+```bash
+ontozense draft \
+  --domain-dir domains/<doc-only-domain> \
+  --source-b ... \
+  --source-d ... \
+  --format owl-xml \
+  --property-induction llm \
+  --property-induction-max-concepts 50 \
+  --output domains/<doc-only-domain>/draft.owl
+```
+
+on a domain that has Source A docs but no Source C SQL and no
+Source D code gets a `draft.owl` where every doc-discovered concept
+with at least one Source A `field_provenance` entry carries
+LLM-induced `owl:DatatypeProperty` declarations on the parent class
+(when the LLM extracted something).
+
+The same command WITHOUT the `--property-induction llm` flag
+produces a `draft.owl` byte-identical (graph-isomorphic) to
+pre-Phase-B for any input — Phase A regression guarantee preserved.
+
+A run with the flag on a deterministic-rich domain (Phase A
+already populated every `attributes[]`) produces output byte-
+identical to the no-flag run — gate 1 (eligibility) means Phase B
+is a no-op when nothing's empty.
+
+### 11.2 File-level change list
+
+```
+src/ontozense/
+├── core/
+│   ├── property_induction.py             NEW   Phase B orchestrator —
+│   │                                            template generator + SPIRES
+│   │                                            invocation + parser + cache
+│   ├── attribute.py                      READ-ONLY  reuses Phase A Attribute shape
+│   ├── fusion.py                         READ-ONLY  attribute slot already in place
+│   └── owl_export.py                     READ-ONLY  emission already in place
+└── cli.py                                EDIT  --property-induction* flags on draft
+
+tests/
+├── test_property_induction.py            NEW   per-component unit tests
+├── test_property_induction_budget.py     NEW   budget enforcement
+├── test_cli_draft_property_induction.py  NEW   CLI flag contract
+└── fixtures/
+    ├── synthetic_doc_only/               NEW   Source A only (no C/D)
+    └── synthetic_deterministic_rich.py   NEW   already-attributed fixture
+```
+
+Estimated diff: ~700 LOC (≈ 350 prod, ≈ 350 tests + fixtures).
+
+### 11.3 PR breakdown
+
+**Two PRs** in two independent revert units.
+
+**PR B1 — `feat(property-induction): scaffold + CLI flags + eligibility + budget (no cache, no LLM)`**
+
+PR B1 deliberately omits the cache file to avoid the conflict
+Codex r1 blocker 2 identified: a B1 "dry-run cache" written to the
+same path B11 says "cache hit always wins" on would cause B2's
+real LLM calls to silently skip every previously dry-run-visited
+class. PR B1 prints what would be called and writes nothing to
+disk. The cache is exclusively a PR B2 deliverable.
+
+- `core/property_induction.py`:
+  - `EligibleConcept` dataclass: `(fused_element, snippet, confidence)`.
+  - `find_eligible_concepts(fused) -> list[EligibleConcept]`:
+    implements gate 1 (attributes empty + Source A presence).
+    Returns sorted by Source A confidence descending so budget
+    skipping is deterministic.
+  - `Budget` dataclass + `BudgetEnforcer` helper enforcing
+    `max_concepts`, `max_calls`, `token_budget` per the design.
+  - `MAX_SPIRES_INPUT_CHARS = 8000` constant + `select_input_text`
+    helper that concatenates + truncates snippets.
+  - `induce_attributes(fused, model, budget, dry_run=True)`:
+    entry point. PR B1 only supports `dry_run=True`. Logs the
+    eligible-concept list + budget plan to the console and
+    returns; **does not write any file**. `dry_run=False` raises
+    `NotImplementedError("queued for PR B2")`.
+- `cli.py`: `--property-induction <mode>` flag with choices
+  `off|llm`. Default `off`. In PR B1 `llm` triggers the dry-run
+  path (console-only output). Plus the three budget flags +
+  `--property-induction-model` (default `azure/gpt-5.4`) +
+  `--property-induction-refresh` (accepted but a no-op in PR B1
+  because no cache to refresh). When the user passes
+  `--property-induction-refresh` to a PR-B1 build, the CLI prints
+  an explicit console note ("`--property-induction-refresh` ignored:
+  cache lands in PR B2") so the user doesn't assume cache behaviour
+  exists yet.
+- Tests: eligibility filter (`attributes==[]` + Source A
+  required); budget enforcement (max_concepts trims to N; max_calls
+  hard cap; token_budget cumulative); console output asserts what
+  would be called; CLI flag parsing + defaults; `--property-induction
+  llm` produces zero disk writes outside the existing draft
+  artefacts.
+
+**Acceptance (PR B1):**
+
+- `--property-induction llm` on the doc-only fixture identifies the
+  right eligible concepts and prints them with the budget summary.
+  **Zero actual LLM calls. Zero new files written.**
+- `--property-induction off` (default) is a complete no-op — no
+  eligibility scan, no draft.owl diff.
+- All Phase A + Phase D tests stay green.
+
+**PR B2 — `feat(property-induction): real SPIRES Pass-2 LLM call + attribute merge + cache`**
+
+PR B2 introduces the cache file. PR B1 did not write any cache to
+avoid the dry-run-vs-real-call collision Codex r1 flagged. Cache is
+**only consulted and only written when `--property-induction llm`
+is explicitly set on the rerun** (per design §4 / §10 B11). Default
+draft invocations (no flag) never touch the cache file, so the
+"default-flag run = byte-identical to pre-Phase-B" regression
+guarantee holds.
+
+- `core/property_induction.py`:
+  - `PropertyInductionCache` reader/writer for
+    `discovery/source-a-properties.json` per the §5 contract shape.
+  - `_generate_linkml_template(concept) -> str`: builds the SPIRES
+    template per §4 Mechanism step 1.
+  - `_call_spires(model, template, input_text) -> list[Attribute]`:
+    invokes the existing `extract-a`-style LiteLLM wrapper (reuses
+    the Source A SPIRES infra). Parses the YAML output into typed
+    `Attribute` records with `source="B-LLM"` and `confidence=0.5`.
+  - `_merge_into_fused(fused, induced_attributes)`: attaches the
+    parsed attributes to the matching FusedElement's
+    `attributes[]`. Per gate 1, the slot is guaranteed empty before
+    merge.
+  - `induce_attributes(...)` now supports `dry_run=False` (the
+    default for the `llm` CLI mode in B2): reads cache → calls LLM
+    for cache misses → writes updated cache → merges results.
+- `cli.py`: no flag changes (flags already shipped in PR B1).
+  `--property-induction-refresh` becomes meaningful in B2 — forces
+  cache miss for every eligible class.
+- Tests:
+  - LLM call is mocked at the LiteLLM seam; assertions cover
+    template shape, parsed `Attribute` records, B-LLM source code
+    on `field_provenance`, confidence=0.5.
+  - End-to-end on the doc-only fixture (with mocked LLM): every
+    eligible concept gains attributes; OWL emission picks them up
+    via the existing Phase A `owl:DatatypeProperty` path.
+  - Deterministic-rich fixture: graph-isomorphic to no-flag run
+    (Phase A guarantee).
+  - Default run (no flag) byte-identical to pre-Phase-B for the
+    same input. Cache file is not even read.
+  - Cache hit/miss matrix: first run populates cache; second run
+    with the flag re-uses cache (zero new LLM calls);
+    `--property-induction-refresh` forces cache miss.
+  - Default-flag run after a cache file is on disk does NOT emit
+    the cached attributes (regression guard for design §4 r1
+    cache opt-in clause).
+  - Budget overage: `--property-induction-max-concepts 3` results
+    in exactly 3 LLM calls; remaining concepts logged as
+    `skipped:budget:max_concepts` in the cache.
+
+**Acceptance (PR B2):**
+
+- Doc-only fixture run with `--property-induction llm` produces
+  `draft.owl` containing `owl:DatatypeProperty` declarations on the
+  top-5 eligible classes by Source A confidence.
+- B-LLM provenance visible in `fused.json` per-attribute
+  `field_provenance` array.
+- Deterministic-rich fixture run produces graph-isomorphic output
+  to no-flag run.
+- Default-flag run preserves byte-identity.
+
+### 11.4 Test strategy
+
+- **Fixture 1** `tests/fixtures/synthetic_doc_only/`: Source A
+  markdown declaring 5+ concepts with prose attribute descriptions
+  ("A Customer has an email, a name, and a join date"). No Source
+  C, no Source D. The end-to-end gold output proves Phase B fills
+  attributes.
+- **Fixture 2** `tests/fixtures/synthetic_deterministic_rich.py`:
+  reuses the existing Phase A SQL + Python fixture. Phase B is
+  guaranteed to be a no-op on it (gate 1).
+- LLM mocking via the existing `monkeypatch` pattern on the
+  LiteLLM seam (same pattern Source A SPIRES tests already use).
+  No live API calls in CI.
+- rdflib `compare.isomorphic` for the byte-identity regression
+  checks (graph comparison robust to literal order shifts across
+  rdflib versions).
+
+### 11.5 Backwards compatibility and migration
+
+- New CLI flags default off / unbounded. Old `draft` invocations
+  unchanged.
+- `Attribute` shape unchanged — Phase B reuses the Phase A
+  dataclass.
+- New discovery file `source-a-properties.json` written ONLY when
+  `--property-induction llm` runs. No file = pre-Phase-B behaviour.
+- Cache file shape versioned (`schema_version`) so future Phase B
+  upgrades don't silently break older caches.
+
+### 11.6 Rollback plan
+
+| Unit | What it covers | Revert effect |
+|---|---|---|
+| **PR B1** | Eligibility filter + budget + CLI flags (dry-run console output only — no cache file, no disk writes) | CLI loses `--property-induction*` flags; nothing else changes. |
+| **PR B2** | Cache reader/writer + real LLM call + attribute merge | Cache file (if present from earlier runs) is left on disk as harmless data — pre-PR-B2 readers don't consult it. No LLM-induced attributes reach `fused.json` / `draft.owl`. `--property-induction llm` falls back to PR B1's dry-run console output. |
+
+Reverting in reverse-merge order is the recommended path. PR B2
+revert leaves the CLI flag scaffold intact (`llm` mode becomes
+dry-run-console-only again). PR B1 revert removes the flag
+entirely.
+
+### 11.7 Effort estimate
+
+| PR | Person-days (focused) |
+|----|-----------------------|
+| B1 | 2.0 (scaffold + budget + cache + tests) |
+| B2 | 1.5 (LLM call wiring + parser + mocked end-to-end tests) |
+| **Total Phase B** | **~3.5 PD** |
+
+### 11.8 Sign-off checklist
+
+Before merging each Phase B PR:
+
+- [ ] All tests green (`pytest -q`).
+- [ ] No new warnings in `ruff check` on touched files.
+- [ ] `tests/test_domain_neutrality.py` passes — no banking jargon
+      in `src/`.
+- [ ] `tests/test_source_d_acceptance.py::test_ac11_no_shacl_or_swrl_emitter_added`
+      passes — Phase B does NOT introduce SHACL / SWRL tokens to
+      core/ (Phase B only emits annotations via Phase A's existing
+      DatatypeProperty path).
+- [ ] Diff reviewed against design doc §4 5-gate scope lock — no
+      gate violations.
+- [ ] No live LLM calls in CI (all mocked at the LiteLLM seam).
+- [ ] PR description references the revert unit it belongs to.
+
+Final Phase B acceptance (after PR B2):
+
+- [ ] Doc-only fixture run with `--property-induction llm` produces
+      `draft.owl` with ≥ 1 `owl:DatatypeProperty` per eligible
+      class.
+- [ ] Deterministic-rich fixture run with flag = graph-isomorphic
+      to no-flag run (gate 1 enforcement).
+- [ ] Default run (no flag) = byte-identical to pre-Phase-B for
+      same inputs (regression guard).
+- [ ] CI passes on both PRs.

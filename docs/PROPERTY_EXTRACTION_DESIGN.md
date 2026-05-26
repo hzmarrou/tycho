@@ -204,12 +204,60 @@ concept *and* Source A documents exist, run a second SPIRES extraction
 pass with a per-class LinkML template asking the LLM to enumerate
 attributes from the source text.
 
-**Trigger condition:**
+#### Pre-spec scope lock (5-gate)
 
-- `FusedElement.attributes` is empty after Phase A fusion, AND
-- the element has at least one `field_provenance` entry from Source A.
+This spec deliberately constrains Phase B so it cannot sprawl into
+adjacent concerns. Each gate is a hard limit, not a guideline.
 
-**Mechanism:**
+**Gate 1 — eligibility.** Phase B runs ONLY for FusedElements where
+`attributes == []` **after Phase A fusion AND after Phase D rule
+projection**. If anything deterministic (Source C / D / B) produced
+even one attribute, Phase B does NOT run for that element. No
+"top up" of partial attribute lists, no "improve descriptions"
+side-effect — Phase B fills empty cells only.
+
+**Gate 2 — opt-in only.** Triggered exclusively via the new CLI flag
+`--property-induction llm` on `draft`. Default off. No environment
+variable override, no per-domain YAML toggle. Two reasons: LLM cost
+is user-visible and per-run consent matters; reproducibility of the
+default `draft` invocation is a Phase A guarantee we don't break.
+
+**Gate 3 — no Phase C validation.** Phase B does not consult any
+profile-declared attribute schema (Phase C territory). It does not
+emit any `required` / cardinality assertions. It does not flag
+missing required attributes. The LLM-induced `Attribute` records
+look exactly like Source C / D ones in shape, with `field_provenance`
+source = `"B-LLM"` and lower confidence (default 0.5, see §5).
+Phase C, when it ships, can layer validation rules on top.
+
+**Gate 4 — no Phase E rule semantics.** Phase B extracts ATTRIBUTES
+(typed properties on entities), not rules. It does not produce
+`BusinessRule` records. It does not invent `ontozense:businessRule`
+annotations. If the LLM accidentally returns rule-shaped output the
+parser rejects it. Rule synthesis from prose is its own future
+phase, not Phase B.
+
+**Gate 5 — backlog isolation.** The 37/50 unmatched Source D rules
+discovered during PR D1 smoke testing (rules that fusion couldn't
+bind to any FusedElement) are a fusion-layer concern. They are
+explicitly **out of Phase B scope**. Tracked separately as a backlog
+item (§7).
+
+#### Trigger condition
+
+After Phase A fusion + Phase D rule attachment, for each
+`FusedElement`:
+
+- `attributes == []` AND
+- element has at least one `field_provenance` entry from Source A
+  (i.e. it was discovered in a doc, not synthesised from B/C/D
+  alone) AND
+- `--property-induction llm` flag passed on `draft`.
+
+Domain has zero Source A docs → Phase B is a no-op for every element
+(no source text to extract from).
+
+#### Mechanism
 
 1. `core/property_induction.py` (new) generates a LinkML template per
    eligible class with the SPIRES patterns from
@@ -228,27 +276,66 @@ attributes from the source text.
            multivalued: true
    ```
 2. Source text passed to SPIRES = the segments where the class was
-   originally discovered (use `field_provenance[*].anchor.snippet`).
-3. SPIRES output parsed into `Attribute` records and merged via the
-   same fusion path as Phase A, with `source: "A"` and a confidence
-   score derived from SPIRES grounding.
-4. Phase B is opt-in via `--property-induction llm` on `draft`. Default
-   off to control LLM cost.
+   originally discovered (use `field_provenance[*].anchor.snippet`,
+   capped to avoid exceeding model context — see §5 contracts).
+3. SPIRES output parsed into `Attribute` records via the existing
+   Phase A `Attribute` dataclass shape. Source set to `"B-LLM"`
+   (distinguishes from Source B governance) with `confidence = 0.5`
+   default. Each induced attribute lands on the FusedElement's
+   `attributes[]` list.
+4. Merged via the same Phase A fusion path. Phase B never overwrites:
+   if Phase A / D already produced an attribute (gate 1 above),
+   Phase B doesn't run for that element at all. No precedence
+   conflict possible by design.
 
-**Cost control:**
+#### Cost / safety controls
 
-- Triggered only for concepts with zero deterministic attributes.
-- Per-concept LLM call (not per-document) — bounded by concept count.
-- Result cached under `discovery/source-a-properties.json` so reruns
-  don't re-query.
+Per design §5 the `--property-induction llm` flag accepts three
+budget knobs (all optional, sensible defaults):
 
-**Acceptance:**
+| Knob | Default | Purpose |
+|---|---|---|
+| `--property-induction-max-concepts N` | 50 | Hard cap on eligible elements to query. Sorted by Source A confidence desc; lower-confidence concepts skipped when over budget. |
+| `--property-induction-max-calls N` | 100 | Hard cap on total LLM calls across the run (covers retries). |
+| `--property-induction-token-budget N` | unbounded | Optional total input-token cap. When set, run stops as soon as the cumulative input-token estimate exceeds N. Skipped concepts surface in the draft summary. |
 
-- For a doc-only fixture (Basel D403 only, no SQL or code), `draft.owl`
-  with `--property-induction llm` contains attributes on at least the
-  top 5 concepts by Source A confidence.
-- Without `--property-induction llm`, behaviour is identical to Phase
-  A.
+All three defaults can be overridden per call. The CLI prints the
+budget summary before running and the actual usage after, so the
+user sees both the upper bound and the realised cost.
+
+Per-run cache under `discovery/source-a-properties.json` records
+`{class_uri: [Attribute, ...]}` and is consulted **only when
+`--property-induction llm` is explicitly set on the rerun**. Reruns
+of `draft` WITHOUT the flag never read the cache and never emit the
+cached attributes — Gate 2 (opt-in) + the regression guard
+("default-flag run = byte-identical to pre-Phase-B") both depend on
+this. Reruns WITH the flag use the cache to skip already-induced
+classes (cache hit = skip the LLM call; refresh via
+`--property-induction-refresh`).
+
+#### Acceptance
+
+- **Fixture 1 — doc-only domain (gate 1+2 prove value):** a
+  fixture domain with Source A only (no SQL, no Python). Running
+  `draft --property-induction llm` produces a `draft.owl` where the
+  top-5 Source A concepts by confidence carry at least one
+  `owl:DatatypeProperty` each. Without the flag, those classes
+  remain property-blank.
+- **Fixture 2 — deterministic-rich domain (gate 1 prove no-op):** a
+  fixture domain identical to today's synthetic Phase A test set
+  (Source C SQL + Source D Python). Running
+  `draft --property-induction llm` produces a `draft.owl` byte-
+  identical (graph-isomorphic via `rdflib.compare.isomorphic`) to
+  the run WITHOUT the flag. Gate 1 means Phase B has nothing to do
+  when everything's already typed.
+- **Regression guard (Phase A default unchanged):** running `draft`
+  without `--property-induction llm` on any fixture produces output
+  byte-identical to pre-Phase-B for the same inputs. Default
+  behaviour preserved end-to-end.
+- **Budget enforcement:** when `--property-induction-max-concepts 3`
+  is set, the run executes exactly 3 LLM calls (one per eligible
+  concept). Concepts beyond budget land in
+  `draft-summary.md` under a "Skipped (budget)" section.
 
 ### Phase C — Profile-declared attribute schemas
 
@@ -582,6 +669,100 @@ and `all`. Until then those values are rejected by the CLI with a
 "not yet implemented (queued for Phase E)" error message that
 points at the future spec.
 
+### Phase B contracts — LLM-induced attribute projection
+
+Phase B reuses the existing `Attribute` dataclass shape (Phase A
+§5). The only contract additions are around provenance, source
+text selection, and budget enforcement.
+
+**`Attribute.field_provenance` source label:**
+
+Phase B adds a single source code: **`"B-LLM"`** (distinguishes
+from Source B governance which uses `"B"`). The `FieldProvenance`
+record carries:
+
+```python
+FieldProvenance(
+    source="B-LLM",
+    artifact="discovery/source-a-properties.json",   # cache path
+    line=0,                                          # not applicable
+    confidence=0.5,                                  # Phase B default
+    extractor="spires-pass2",
+)
+```
+
+Confidence default is 0.5 (intentionally lower than Source C/D's
+1.0 and Source B governance's 0.7) so reviewers immediately see
+which attributes came from the LLM and need closer scrutiny.
+
+**Source text selection (avoid context-window blowouts):**
+
+Per-class input to SPIRES = concatenation of
+`field_provenance[*].anchor.snippet` from the FusedElement's
+Source A entries, capped at `MAX_SPIRES_INPUT_CHARS` (default 8000
+chars ≈ ~2000 tokens for English prose). Cap is per-class, not
+per-run. When the cap fires, the run logs a per-class truncation
+record into `discovery/source-a-properties.json` so the curator
+sees that a longer snippet was available but Phase B chose to
+truncate.
+
+**Cache shape (`discovery/source-a-properties.json`):**
+
+```json
+{
+  "schema_version": "1.0",
+  "model": "azure/gpt-5.4",
+  "generated_at": "2026-05-26T...",
+  "budget": {
+    "max_concepts": 50,
+    "max_calls": 100,
+    "token_budget": null
+  },
+  "usage": {
+    "concepts_processed": 12,
+    "calls": 12,
+    "tokens_estimated": 4321
+  },
+  "per_class": {
+    "https://tycho.local/<domain>/customer": {
+      "attributes": [ {Attribute serialised}, ... ],
+      "input_truncated": false,
+      "skipped_reason": null
+    },
+    ...
+  },
+  "skipped": [
+    {"class_uri": "...", "reason": "budget:max_concepts"},
+    ...
+  ]
+}
+```
+
+**CLI flags:**
+
+- `--property-induction llm` — opt-in gate. Default off.
+- `--property-induction-max-concepts N` — default 50.
+- `--property-induction-max-calls N` — default 100.
+- `--property-induction-token-budget N` — default unbounded.
+- `--property-induction-model M` — default `azure/gpt-5.4` (literal,
+  matches the explicit default on `extract-a`, `survey`, and
+  related LLM-using commands in the current codebase — no env-var
+  indirection because no `EXTRACT_A_MODEL` env contract exists
+  today). Same LiteLLM-style identifier accepted by `--model` on
+  `extract-a` / `survey`.
+
+**Merge precedence with deterministic attributes:**
+
+None. Gate 1 (scope lock) makes precedence a non-issue: Phase B
+runs only when `attributes == []` after Phase A + D. There is
+nothing for B-LLM to overwrite or conflict with by construction.
+
+If a future user passes `--property-induction llm` on a domain
+where Phase A already attributed every concept, every element is
+skipped — `usage.concepts_processed = 0`, zero LLM calls, zero
+attributes added. The CLI prints a clear "no eligible concepts"
+note.
+
 ---
 
 ## 6. Risks and Open Questions
@@ -645,6 +826,32 @@ open questions for L2 restrictions + L3 SWRL: target reasoner,
 rule-to-class binding under richer payloads, SWRL URI stability,
 conflict resolution between reasoner-forms.
 
+### Phase B open questions
+
+10. **Phase B — confidence value for B-LLM attributes.** Default 0.5
+    proposed (intentionally below B-governance 0.7 + deterministic
+    1.0 so reviewers spot LLM-induced attrs at a glance). **Open:**
+    is 0.5 the right anchor, or do we want a per-class confidence
+    derived from the SPIRES grounding signal?
+11. **Phase B — source-text truncation policy.** `MAX_SPIRES_INPUT_CHARS`
+    default 8000. **Open:** acceptable, or should we drop snippets
+    by confidence instead of truncating the concatenated whole?
+12. **Phase B — XSD type default for LLM-induced attrs.** SPIRES
+    template asks for `xsd:string | xsd:integer | xsd:decimal |
+    xsd:date | xsd:dateTime | xsd:boolean | xsd:anyURI` or an
+    enum value set. **Open:** when the LLM returns a type Tycho
+    doesn't recognise, default to `xsd:string` (current Phase A
+    fallback) or skip the attribute entirely (fail safe)?
+13. **Phase B — cache invalidation.** `discovery/source-a-properties.json`
+    cache hit = skip the LLM call on rerun. **Open:** invalidate on
+    Source A change (file hash) or only when the user explicitly
+    passes `--property-induction-refresh`?
+14. **Phase B — budget overage behaviour.** When a budget knob fires
+    mid-run (e.g. token cap), the run stops. **Open:** stop
+    immediately or finish the in-flight call then stop? Finishing
+    keeps the partial cache consistent but spends one extra call
+    after the cap.
+
 ---
 
 ## 7. Out of Scope (this design)
@@ -672,6 +879,18 @@ conflict resolution between reasoner-forms.
 - **Reasoner integration:** Tycho still does NOT run a reasoner.
   Phase D / E emit axioms; downstream tools (Protégé reasoner,
   ROBOT, Pellet CLI) run inference. Same policy as Phase A.
+- **Fusion-layer Source D rule binding (backlog — discovered during
+  PR D1 smoke 2026-05-26):** the NPL smoke produced 50 extracted
+  Source D `CodeRule` records but fusion bound only 13 to
+  `FusedElement.business_rules`. 37 landed on
+  `FusionResult.unmatched_code_rules` and never reach `draft.owl`
+  (Phase D explicitly does not project unmatched rules — design
+  §9 D7). The binding gap is a fusion-layer concern (improving
+  `_merge_source_d`'s symbol-matching, attached_to_entity_id
+  resolution, or fuzzy fallback). **Out of scope for Phase B / C /
+  D / E.** Tracked here as a separate backlog item; will get its
+  own spec if curator feedback shows the unbound rules carry
+  curator-relevant content.
 
 ---
 
@@ -719,3 +938,29 @@ L1 annotations only; defers L2/L3 to a separate Phase E.
 
 The Phase D implementation plan lives in
 [PROPERTY_EXTRACTION_IMPLEMENTATION_PLAN.md §10](./PROPERTY_EXTRACTION_IMPLEMENTATION_PLAN.md#10-phase-d-implementation-plan-pending-codex-review).
+
+## 10. Decisions for Phase B (round 1 — pending Codex review)
+
+Phase A + Phase D have shipped (PRs #14-#19, #22 merged 2026-05-25/26).
+Phase B was scoped 2026-05-26 with a 5-gate pre-spec lock (per
+§4 Phase B) to prevent sprawl into Phase C / E territory. Reviewer
+answers needed:
+
+| § | Question | Default proposal |
+|---|---|---|
+| B1 | Approve Phase B scope (LLM SPIRES Pass-2 for `attributes == []` elements with Source A backing)? | Yes |
+| B2 | Approve 5-gate scope lock (§4)? | Yes — eligibility / opt-in / no Phase C / no Phase E / 37/50 unmatched-rules out-of-scope all stand. |
+| B3 | Opt-in CLI flag name `--property-induction llm`? | Yes. Match the Phase B section already approved in PR #21 (`P_E_DESIGN §9 D2`). |
+| B4 | B-LLM source code on `FieldProvenance.source`? | **`"B-LLM"`** — distinguishes from Source B governance (`"B"`). Confidence default 0.5. |
+| B5 | Budget knobs default? | `max_concepts=50`, `max_calls=100`, `token_budget=unbounded`. Override via per-flag CLI options. |
+| B6 | Cache file path and shape? | `discovery/source-a-properties.json` with the `schema_version` + `model` + `budget` + `usage` + `per_class` structure shown in §5. |
+| B7 | Model selection default? | **Closed (r1).** `azure/gpt-5.4` literal default — matches the explicit default on `extract-a` / `survey` / etc. (no `EXTRACT_A_MODEL` env contract exists in current code). Override via `--property-induction-model`. |
+| B8 | Open Q10 — B-LLM confidence value? | 0.5 default, per-class refinement deferred. |
+| B9 | Open Q11 — source-text truncation policy? | Truncate concatenated whole at `MAX_SPIRES_INPUT_CHARS=8000`. Per-class log entry when truncated. |
+| B10 | Open Q12 — unknown XSD type from LLM? | Default to `xsd:string` + log a per-class warning. Matches Phase A's unknown-type fallback policy. |
+| B11 | Open Q13 — cache invalidation policy? | Cache hit always wins on rerun. Force refresh via explicit `--property-induction-refresh`. |
+| B12 | Open Q14 — budget overage behaviour? | Finish in-flight call, then stop. Keeps cache consistent at the cost of one over-budget call. |
+| B13 | Phase B revert strategy? | Independent revert unit (no Phase A / D dependency since Phase B only fills empty `attributes[]` lists). Reverting Phase B loses LLM-induced attributes; deterministic ones unchanged. |
+
+The Phase B implementation plan lives in
+[PROPERTY_EXTRACTION_IMPLEMENTATION_PLAN.md §11](./PROPERTY_EXTRACTION_IMPLEMENTATION_PLAN.md#11-phase-b-implementation-plan-pending-codex-review).
