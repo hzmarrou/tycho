@@ -3,14 +3,16 @@
 Phase 4 of the constrained-extraction upgrade. Takes a fused output
 (``FusionResult``) and a loaded ``Profile`` and verifies the data
 conforms to the profile's schema. Six structural rules borrowed from
-OntoMetric's stage 3 validation:
+OntoMetric's stage 3 validation, plus VR007 added in Phase C
+(profile-declared typed attributes):
 
-  VR001  Entity uniqueness          (error)
-  VR002  Type membership            (error)
-  VR003  Required fields populated  (warning)
-  VR004  Predicate vocabulary       (error)
-  VR005  Predicate domain matching  (warning)
-  VR006  Cardinality respect        (warning)
+  VR001  Entity uniqueness                       (error)
+  VR002  Type membership                         (error)
+  VR003  Required fields populated               (warning)
+  VR004  Predicate vocabulary                    (error)
+  VR005  Predicate domain matching               (warning)
+  VR006  Cardinality respect                     (warning)
+  VR007  Required attributes present             (warning)
 
 Two operating modes:
 
@@ -18,6 +20,9 @@ Two operating modes:
   ``filter``           — drop entities that fail VR001/VR002 errors and
                          cascade-drop relationships referencing them;
                          drop relationships that fail VR004
+
+VR007 is annotate-only in both modes (matches VR003's sibling
+"required field missing" semantics).
 
 Phase 4 is **profile-required**: validating a fused output without a
 profile is meaningless because the rules are profile-defined. The CLI
@@ -47,7 +52,7 @@ class ValidationFinding:
     Mirrors the shape of LintFinding so downstream tooling can treat
     validation and lint findings uniformly when needed.
     """
-    rule_id: str          # "VR001" through "VR006"
+    rule_id: str          # "VR001" through "VR007"
     severity: str         # "error" / "warning" / "info"
     target_kind: str      # "entity" / "relationship"
     target_id: str        # entity ID, or "subject_id->predicate->object_id"
@@ -141,10 +146,11 @@ def validate(
 
     # Run rules in order. VR001-VR002 may drop entities (in filter mode);
     # VR003 only annotates. VR004 may drop relationships. VR005-VR006
-    # only annotate.
+    # only annotate. VR007 (Phase C) is annotate-only in both modes.
     elements = _check_vr001_uniqueness(elements, result, mode)
     elements = _check_vr002_type_membership(elements, profile, result, mode)
     _check_vr003_required_fields(elements, profile, result)
+    _check_vr007_required_attributes(elements, profile, result)
 
     # Build the surviving entity ID set BEFORE running relationship checks
     # so cascade filtering can drop dangling relationships.
@@ -556,6 +562,83 @@ def _check_vr006_cardinality(
                             },
                         )
                     )
+
+
+# ─── VR007: Required attributes present (Phase C) ────────────────────────────
+
+
+def _check_vr007_required_attributes(
+    elements: list[FusedElement],
+    profile: Profile,
+    result: ValidationResult,
+) -> None:
+    """Every entity of a known type must carry an extracted ``Attribute``
+    for each profile-declared ``attributes[*]`` entry marked
+    ``required: true``.
+
+    Presence definition (design §5 Phase C contracts): a profile-declared
+    required attribute with ``name_key = K`` is present on element ``el``
+    iff there exists at least one ``Attribute`` ``a`` in ``el.attributes``
+    such that ``a.name.strip().lower() == K``. Empty-name attributes
+    never count as present. XSD type, multivaluedness, value-set
+    membership, and ``is_id`` flag agreement are **not** part of the
+    presence check.
+
+    B-LLM-sourced attributes (``field_provenance[*].source == "B-LLM"``)
+    count toward presence identically to deterministic Source C/D/B
+    attributes — VR007 is a structural rule, not a confidence rule.
+
+    One finding is emitted per element per missing required attribute
+    name (matches VR005's per-relationship granularity rather than
+    VR003's one-finding-with-a-list shape).
+
+    No-op when the profile declares no ``attributes`` on any entity
+    type (the typical pre-Phase-C profile shape).
+    """
+    for el in elements:
+        entity_type = el.extra_fields.get("entity_type", "")
+        if not entity_type:
+            continue  # VR002 handled
+
+        et = profile.get_entity_type(entity_type)
+        if et is None:
+            continue  # VR002 handled
+
+        if not et.attributes:
+            continue  # nothing declared for this type — VR007 no-op
+
+        # Build the set of name_keys actually carried by the element's
+        # extracted attributes. Empty names never satisfy any required
+        # declaration (design §5 "Present" definition).
+        extracted_keys: set[str] = set()
+        for attr in el.attributes:
+            key = (attr.name or "").strip().lower()
+            if key:
+                extracted_keys.add(key)
+
+        for pa in et.attributes:
+            if not pa.required:
+                continue
+            if pa.name_key in extracted_keys:
+                continue
+            result.findings.append(
+                ValidationFinding(
+                    rule_id="VR007",
+                    severity="warning",
+                    target_kind="entity",
+                    target_id=_entity_id(el) or el.element_name,
+                    message=(
+                        f"Entity {el.element_name!r} (type "
+                        f"{entity_type!r}) is missing required "
+                        f"attribute(s): {[pa.name]}."
+                    ),
+                    details={
+                        "element_name": el.element_name,
+                        "entity_type": entity_type,
+                        "missing_required_attributes": [pa.name],
+                    },
+                )
+            )
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
