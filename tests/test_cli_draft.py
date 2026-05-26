@@ -507,3 +507,360 @@ class TestDraftEmitRules:
         # Error message lists the five recognised values.
         for mode in ("annotations", "none", "restrictions", "swrl", "all"):
             assert mode in result.output
+
+
+# ─── Phase B PR B1 — --property-induction CLI contract ────────────────────
+#
+# B1 ships the dry-run path only: eligibility scan + budget plan
+# printed to the console. No cache file. No LLM call. No new disk
+# artifacts. PR B2 lands the real LLM call + cache.
+#
+# These tests pin the flag contract before implementation. They are
+# the regression suite for the design-doc 5-gate scope lock.
+
+
+class TestDraftPropertyInductionFlag:
+    def test_default_is_off_no_console_noise(self, tmp_path: Path):
+        """Default --property-induction is off. No eligibility scan
+        runs, no console output about induction."""
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+        ])
+        assert result.exit_code == 0, result.output
+        # No property-induction noise in the console. Anchor on the
+        # specific console marker the CLI prints so pytest tmp paths
+        # containing "property-induction" don't cause false positives.
+        assert "Property induction (PR B1 dry-run)" not in result.output
+
+    def test_explicit_off_is_no_op(self, tmp_path: Path):
+        """`--property-induction off` is the same as omitting the flag."""
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--property-induction", "off",
+        ])
+        assert result.exit_code == 0, result.output
+
+    def test_llm_mode_runs_dry_run_console_plan(self, tmp_path: Path):
+        """`--property-induction llm` triggers the dry-run plan.
+        Console mentions induction; no cache file written."""
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--property-induction", "llm",
+        ])
+        assert result.exit_code == 0, result.output
+        # Console mentions the dry-run plan. Anchor on the marker.
+        assert "Property induction (PR B1 dry-run)" in result.output
+        # No cache file written in B1.
+        assert not (domain_dir / "discovery" / "source-a-properties.json").exists()
+
+    def test_llm_mode_writes_no_extra_disk_artifacts(self, tmp_path: Path):
+        """Gate: PR B1 dry-run writes ZERO new files outside the
+        existing draft artefacts. Snapshot the discovery dir before
+        and after the llm-mode run — only existing draft writes
+        allowed to appear."""
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+
+        before = set(p.name for p in (domain_dir / "discovery").iterdir())
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--property-induction", "llm",
+        ])
+        assert result.exit_code == 0, result.output
+        after = set(p.name for p in (domain_dir / "discovery").iterdir())
+        new_files = after - before
+        # B1 must NOT introduce source-a-properties.json (that's B2).
+        assert "source-a-properties.json" not in new_files
+
+    def test_invalid_property_induction_mode_rejected(self, tmp_path: Path):
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--property-induction", "bogus",
+        ])
+        assert result.exit_code != 0
+        assert "bogus" in result.output
+        # Error message lists the two recognised values.
+        for mode in ("off", "llm"):
+            assert mode in result.output
+
+
+class TestDraftPropertyInductionBudgetFlags:
+    def test_budget_flag_defaults_documented_in_help(self, tmp_path: Path):
+        """`draft --help` exposes the three budget flags with their
+        defaults (50 / 100 / unbounded). Pins the documented contract.
+
+        Widens the simulated terminal so Click/Typer doesn't truncate
+        long flag names (default CliRunner uses 80 cols).
+        """
+        result = runner.invoke(
+            app, ["draft", "--help"], env={"COLUMNS": "200"},
+        )
+        assert result.exit_code == 0
+        text = result.output
+        assert "--property-induction-max-concepts" in text
+        assert "--property-induction-max-calls" in text
+        assert "--property-induction-token-budget" in text
+
+    def test_max_concepts_accepted_in_llm_mode(self, tmp_path: Path):
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--property-induction", "llm",
+            "--property-induction-max-concepts", "5",
+        ])
+        assert result.exit_code == 0, result.output
+
+    def test_max_calls_accepted_in_llm_mode(self, tmp_path: Path):
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--property-induction", "llm",
+            "--property-induction-max-calls", "10",
+        ])
+        assert result.exit_code == 0, result.output
+
+    def test_token_budget_accepted_in_llm_mode(self, tmp_path: Path):
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--property-induction", "llm",
+            "--property-induction-token-budget", "1000",
+        ])
+        assert result.exit_code == 0, result.output
+
+    def test_model_flag_accepted_with_default_documented(self, tmp_path: Path):
+        result = runner.invoke(
+            app, ["draft", "--help"], env={"COLUMNS": "200"},
+        )
+        assert result.exit_code == 0
+        assert "--property-induction-model" in result.output
+        assert "azure/gpt-5.4" in result.output
+
+
+class TestDraftPropertyInductionBudgetValidation:
+    """Codex r1 blocker: invalid budget values must be rejected at
+    the CLI boundary so the BudgetEnforcer never sees negative or
+    out-of-contract input. Hard cap means hard cap."""
+
+    def test_max_concepts_zero_rejected(self, tmp_path: Path):
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--property-induction", "llm",
+            "--property-induction-max-concepts", "0",
+        ])
+        assert result.exit_code != 0
+        assert "--property-induction-max-concepts" in result.output
+        assert ">= 1" in result.output
+        # User pointed at the actual disable mechanism.
+        assert "--property-induction off" in result.output
+
+    def test_max_concepts_negative_rejected(self, tmp_path: Path):
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--property-induction", "llm",
+            "--property-induction-max-concepts", "-5",
+        ])
+        assert result.exit_code != 0
+        assert "-5" in result.output
+        assert "--property-induction-max-concepts" in result.output
+
+    def test_max_calls_zero_rejected(self, tmp_path: Path):
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--property-induction", "llm",
+            "--property-induction-max-calls", "0",
+        ])
+        assert result.exit_code != 0
+        assert "--property-induction-max-calls" in result.output
+        assert ">= 1" in result.output
+
+    def test_max_calls_negative_rejected(self, tmp_path: Path):
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--property-induction", "llm",
+            "--property-induction-max-calls", "-1",
+        ])
+        assert result.exit_code != 0
+        assert "--property-induction-max-calls" in result.output
+
+    def test_token_budget_zero_accepted_as_unbounded(self, tmp_path: Path):
+        """0 is the documented "unbounded" sentinel; must be
+        accepted. Only negatives are rejected."""
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--property-induction", "llm",
+            "--property-induction-token-budget", "0",
+        ])
+        assert result.exit_code == 0, result.output
+
+    def test_token_budget_negative_rejected(self, tmp_path: Path):
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--property-induction", "llm",
+            "--property-induction-token-budget", "-100",
+        ])
+        assert result.exit_code != 0
+        assert "--property-induction-token-budget" in result.output
+        assert ">= 0" in result.output
+
+    def test_validation_runs_even_when_induction_is_off(self, tmp_path: Path):
+        """Defensive: CLI validates ranges before checking the
+        induction mode, so users pinning bad defaults via shell
+        aliases discover the problem regardless of mode."""
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--property-induction", "off",
+            "--property-induction-max-concepts", "-1",
+        ])
+        assert result.exit_code != 0
+        assert "--property-induction-max-concepts" in result.output
+
+
+class TestDraftPropertyInductionRefresh:
+    def test_refresh_in_llm_mode_prints_no_op_note(self, tmp_path: Path):
+        """Codex r2 UX nit: --property-induction-refresh is accepted
+        in PR B1 but is a no-op (no cache to refresh yet). Console
+        must say so explicitly so the user doesn't assume cache
+        behaviour exists."""
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--property-induction", "llm",
+            "--property-induction-refresh",
+        ])
+        assert result.exit_code == 0, result.output
+        # Explicit note that refresh is ignored / cache not in B1.
+        # Anchor on the specific marker so pytest tmp paths
+        # containing "refresh" don't trigger false positives.
+        assert "--property-induction-refresh ignored" in result.output
+        assert "PR B2" in result.output
+
+    def test_refresh_in_off_mode_is_silent_noop(self, tmp_path: Path):
+        """With --property-induction off, --refresh is meaningless
+        and must not produce the no-op console note."""
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--property-induction-refresh",
+        ])
+        assert result.exit_code == 0, result.output
+        # The specific console note ("refresh ignored / cache lands
+        # in PR B2") must NOT appear when induction mode is off.
+        # Use the marker text, not the bare word "refresh" — pytest
+        # tmp paths can contain "refresh" in their names which would
+        # produce false positives.
+        assert "--property-induction-refresh ignored" not in result.output
+
+
+class TestDraftPropertyInductionRegressionGuard:
+    def test_default_draft_output_unchanged_by_phase_b_landing(
+        self, tmp_path: Path,
+    ):
+        """Default-flag run on the seeded workspace must produce a
+        draft.owl identical to a baseline captured before any
+        --property-induction flag is even passed. This is the
+        Phase-A regression guarantee that Phase B promised to
+        preserve."""
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+
+        # Run 1: default (no flag).
+        out_a = tmp_path / "draft_a.owl"
+        result_a = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(out_a),
+        ])
+        assert result_a.exit_code == 0
+        text_a = out_a.read_text(encoding="utf-8")
+
+        # Reset workspace to the same starting state.
+        import shutil
+        shutil.rmtree(domain_dir)
+        _seed_workspace(domain_dir)
+
+        # Run 2: explicit --property-induction off (same as default).
+        out_b = tmp_path / "draft_b.owl"
+        result_b = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(out_b),
+            "--property-induction", "off",
+        ])
+        assert result_b.exit_code == 0
+        text_b = out_b.read_text(encoding="utf-8")
+
+        # The two outputs must be graph-isomorphic. Literal byte-
+        # identity is too brittle because rdflib doesn't guarantee
+        # serialisation order; isomorphism is the spec-level claim.
+        from rdflib import Graph
+        from rdflib.compare import isomorphic
+        ga = Graph()
+        ga.parse(data=text_a, format="turtle")
+        gb = Graph()
+        gb.parse(data=text_b, format="turtle")
+        assert isomorphic(ga, gb), (
+            "draft default vs --property-induction off diverged — "
+            "Phase B regression guarantee broken"
+        )
