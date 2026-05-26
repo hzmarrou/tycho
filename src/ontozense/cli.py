@@ -3535,6 +3535,16 @@ def draft(
         "turtle", "--format",
         help='OWL serialisation: "turtle" (default) | "json-ld" | "owl-xml".',
     ),
+    emit_rules: str = typer.Option(
+        "annotations", "--emit-rules",
+        help=(
+            'Phase D rule projection. "annotations" (default) emits '
+            'ontozense:businessRule annotation clusters for every '
+            'BusinessRule. "none" matches pre-Phase-D behaviour. '
+            '"restrictions", "swrl", "all" are reserved for Phase E '
+            'and currently rejected.'
+        ),
+    ),
     plan: bool = typer.Option(
         False, "--plan",
         help="Print what would run; don't execute.",
@@ -3550,6 +3560,28 @@ def draft(
     """
     _load_env()
     from .core.profile import ProfileError, load_profile
+
+    # Phase D (PR D1): --emit-rules validation. Phase D ships
+    # "annotations" and "none" only. "restrictions", "swrl", "all"
+    # are reserved for Phase E and rejected here so the user gets a
+    # clear error rather than silent fallback. No doc link in the
+    # message — Phase E design doc does not exist yet.
+    _emit_rules_valid = {"annotations", "none"}
+    _emit_rules_deferred = {"restrictions", "swrl", "all"}
+    if emit_rules in _emit_rules_deferred:
+        raise typer.BadParameter(
+            f"--emit-rules {emit_rules!r} is not yet implemented "
+            f"(queued for Phase E). Phase D supports only "
+            f"{sorted(_emit_rules_valid)}.",
+            param_hint="--emit-rules",
+        )
+    if emit_rules not in _emit_rules_valid:
+        raise typer.BadParameter(
+            f"--emit-rules must be one of "
+            f"{sorted(_emit_rules_valid | _emit_rules_deferred)}; "
+            f"got {emit_rules!r}.",
+            param_hint="--emit-rules",
+        )
 
     if plan:
         _print_draft_plan(domain_dir, profile, output)
@@ -3679,6 +3711,7 @@ def draft(
 
     owl_text = fused_to_owl(
         fused, profile=loaded_profile, format=rdflib_format,
+        emit_rules=emit_rules,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(owl_text, encoding="utf-8")

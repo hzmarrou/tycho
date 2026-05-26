@@ -395,3 +395,115 @@ def test_draft_without_source_c_works_unchanged(tmp_path: Path):
     )
     assert result.exit_code == 0
     assert "--source-c on `draft` is deprecated" not in result.stdout
+
+
+# ─── Phase D PR D1 — --emit-rules CLI contract ─────────────────────────────
+#
+# Pins the user-facing flag contract for the Phase D annotation
+# emission. Default emits annotations; "none" suppresses; reserved
+# Phase E values reject cleanly with "queued for Phase E"; bogus
+# values reject with a clear "must be one of" list.
+
+
+class TestDraftEmitRules:
+    def test_default_emit_rules_is_annotations(self, tmp_path: Path):
+        """No --emit-rules flag = annotations behaviour. We don't
+        seed BusinessRules in this fixture (empty fused), so the
+        assertion focuses on the exit code and absence of any
+        Phase E rejection message."""
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        out = tmp_path / "draft.owl"
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(out),
+        ])
+        assert result.exit_code == 0, result.output
+        assert "queued for Phase E" not in result.output
+
+    def test_explicit_emit_rules_annotations_succeeds(self, tmp_path: Path):
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        out = tmp_path / "draft.owl"
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(out),
+            "--emit-rules", "annotations",
+        ])
+        assert result.exit_code == 0, result.output
+
+    def test_emit_rules_none_succeeds(self, tmp_path: Path):
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        out = tmp_path / "draft.owl"
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(out),
+            "--emit-rules", "none",
+        ])
+        assert result.exit_code == 0, result.output
+
+    def test_emit_rules_restrictions_rejected_queued_for_phase_e(
+        self, tmp_path: Path,
+    ):
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--emit-rules", "restrictions",
+        ])
+        assert result.exit_code != 0
+        assert "queued for Phase E" in result.output
+        assert "restrictions" in result.output
+
+    def test_emit_rules_swrl_rejected_queued_for_phase_e(
+        self, tmp_path: Path,
+    ):
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--emit-rules", "swrl",
+        ])
+        assert result.exit_code != 0
+        assert "queued for Phase E" in result.output
+
+    def test_emit_rules_all_rejected_queued_for_phase_e(
+        self, tmp_path: Path,
+    ):
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--emit-rules", "all",
+        ])
+        assert result.exit_code != 0
+        assert "queued for Phase E" in result.output
+
+    def test_emit_rules_invalid_value_rejected_with_choices_list(
+        self, tmp_path: Path,
+    ):
+        """Bogus value (typo) rejected with a clear listing of the
+        five recognised modes — gives the user something to fix."""
+        domain_dir = tmp_path / "domain"
+        _seed_workspace(domain_dir)
+        result = runner.invoke(app, [
+            "draft",
+            "--domain-dir", str(domain_dir),
+            "--output", str(tmp_path / "draft.owl"),
+            "--emit-rules", "annotationz",  # deliberate typo
+        ])
+        assert result.exit_code != 0
+        assert "annotationz" in result.output
+        # Error message lists the five recognised values.
+        for mode in ("annotations", "none", "restrictions", "swrl", "all"):
+            assert mode in result.output
