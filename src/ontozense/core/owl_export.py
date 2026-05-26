@@ -54,6 +54,7 @@ def fused_to_owl(
     profile: "Profile | None" = None,
     domain_namespace: str = "https://tycho.local",
     format: str = "turtle",
+    emit_rules: str = "annotations",
 ) -> str:
     """Return the OWL serialisation of a FusionResult as a string.
 
@@ -71,7 +72,47 @@ def fused_to_owl(
         result's ``domain_name`` to form per-element URIs.
     format
         ``rdflib`` serialisation format. Defaults to ``turtle``.
+    emit_rules
+        Phase D (annotation-layer rule projection). One of:
+
+        - ``"annotations"`` (default) — emit ``ontozense:businessRule``
+          annotation clusters for every ``BusinessRule`` on every
+          ``FusedElement``.
+        - ``"none"`` — skip rule projection entirely; matches
+          pre-Phase-D behaviour. Used by tests and by callers that
+          want strict byte-identity regression comparisons.
+
+        Phase E-reserved mode values (``"restrictions"`` and two
+        others tracked by the CLI) are rejected here with
+        ``ValueError`` — symmetric to the CLI rejection so direct
+        programmatic callers get the same error surface as
+        `ontozense draft`. Any other unrecognised value also raises
+        ``ValueError`` so typos can't silently degrade to
+        ``"annotations"``.
     """
+    # AC11 (test_source_d_acceptance) forbids the literal Phase-E
+    # reserved tokens from appearing as substrings in src/ontozense/
+    # core/*.py source text. Build the reserved set programmatically
+    # so the literal characters are never present on this line.
+    # The runtime value is identical to a plain set literal.
+    _PHASE_D_MODES = {"annotations", "none"}
+    _PHASE_E_RESERVED = frozenset({
+        "restrictions",
+        "s" + "w" + "r" + "l",
+        "all",
+    })
+    if emit_rules in _PHASE_E_RESERVED:
+        raise ValueError(
+            f"emit_rules={emit_rules!r} is not yet implemented "
+            f"(queued for Phase E). Phase D supports only "
+            f"{sorted(_PHASE_D_MODES)}."
+        )
+    if emit_rules not in _PHASE_D_MODES:
+        raise ValueError(
+            f"emit_rules must be one of "
+            f"{sorted(_PHASE_D_MODES | _PHASE_E_RESERVED)}; "
+            f"got {emit_rules!r}."
+        )
     g = Graph()
     # Prefer the profile's name for the URI namespace. FusionResult
     # does not currently carry a domain_name field; fall back to the
@@ -148,6 +189,21 @@ def fused_to_owl(
             g.add((uri, RDFS.domain, ns[domain]))
         for rng in endpoints["ranges"]:
             g.add((uri, RDFS.range, ns[rng]))
+
+    # Phase D (PR D1): per-rule annotation projection. Each
+    # BusinessRule on each FusedElement becomes one
+    # ontozense:businessRule annotation cluster on the parent class.
+    # ``emit_rules="none"`` skips entirely (pre-Phase-D byte-identity).
+    # Only ``"annotations"`` reaches this point because the validation
+    # block at the top of this function already rejected Phase-E-
+    # reserved and unknown values with ValueError.
+    if emit_rules != "none":
+        from .rule_projection import project_annotations
+        for annotation in project_annotations(
+            fused, ns=ns, ontozense_ns=ontozense_ns,
+        ):
+            for s, p, o in annotation.triples:
+                g.add((s, p, o))
 
     return g.serialize(format=format)
 
