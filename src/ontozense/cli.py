@@ -3792,28 +3792,21 @@ def draft(
         discovery_dir=discovery_dir,
     )
 
-    # Phase B (PR B1): dry-run property-induction plan.
-    # ``off`` (default) is a complete no-op — preserves Phase A
-    # regression byte-identity. ``llm`` triggers the eligibility +
-    # budget scan and prints the plan to the console. No LLM call,
-    # no cache file, no fused.json mutation in PR B1.
+    # Phase B PR B2: real LLM property induction with cache.
+    # ``off`` (default) is a complete no-op — never touches the
+    # cache file, preserves Phase A regression byte-identity.
+    # ``llm`` runs eligibility + budget, reads the cache, calls the
+    # LLM for cache-miss concepts only, parses + merges the
+    # attributes onto matching FusedElements, writes the cache.
     if property_induction == "llm":
         from .core.property_induction import Budget, induce_attributes
-
-        # Codex r2 UX nit: surface the refresh no-op explicitly so
-        # the user doesn't assume cache behaviour exists in PR B1.
-        if property_induction_refresh:
-            console.print(
-                "[yellow]--property-induction-refresh ignored:[/] "
-                "cache lands in PR B2; nothing to refresh in PR B1."
-            )
 
         token_budget = (
             property_induction_token_budget
             if property_induction_token_budget > 0
             else None
         )
-        b1_plan = induce_attributes(
+        b_plan = induce_attributes(
             fused,
             model=property_induction_model,
             budget=Budget(
@@ -3821,40 +3814,43 @@ def draft(
                 max_calls=property_induction_max_calls,
                 token_budget=token_budget,
             ),
-            dry_run=True,
+            dry_run=False,
             refresh=property_induction_refresh,
+            discovery_dir=discovery_dir,
         )
         console.print(
-            f"[bold blue]Property induction (PR B1 dry-run):[/] "
-            f"{len(b1_plan.eligible)} eligible concept(s), "
-            f"{len(b1_plan.skipped)} skipped by budget."
+            f"[bold blue]Property induction:[/] "
+            f"{len(b_plan.eligible)} eligible concept(s), "
+            f"{b_plan.cache_hits} cache hit(s), "
+            f"{b_plan.cache_misses} LLM call(s), "
+            f"{len(b_plan.skipped)} skipped by budget."
         )
-        if b1_plan.eligible:
-            console.print(
-                "  Eligible (top-of-list = highest Source A confidence):"
-            )
-            for concept in b1_plan.eligible[:10]:
+        if b_plan.eligible:
+            for concept in b_plan.eligible[:10]:
+                attrs = b_plan.per_class.get(concept.class_uri, [])
                 console.print(
                     f"    - {concept.element_name}  "
                     f"(confidence={concept.confidence:.2f}, "
-                    f"snippet_chars={concept.snippet_chars})"
+                    f"attributes_induced={len(attrs)})"
                 )
-            if len(b1_plan.eligible) > 10:
+            if len(b_plan.eligible) > 10:
                 console.print(
-                    f"    ... and {len(b1_plan.eligible) - 10} more"
+                    f"    ... and {len(b_plan.eligible) - 10} more"
                 )
-        for concept, reason in b1_plan.skipped[:5]:
+        for concept, reason in b_plan.skipped[:5]:
             console.print(
                 f"  [yellow]{reason}[/] — {concept.element_name}"
             )
-        if len(b1_plan.skipped) > 5:
+        if len(b_plan.skipped) > 5:
             console.print(
-                f"  [yellow]... and {len(b1_plan.skipped) - 5} more "
+                f"  [yellow]... and {len(b_plan.skipped) - 5} more "
                 "skipped[/]"
             )
-        console.print(
-            "  [dim]No LLM call. No cache. PR B1 dry-run only.[/]"
-        )
+        if property_induction_refresh:
+            console.print(
+                "  [dim]--property-induction-refresh: cache misses "
+                "forced for every eligible concept.[/]"
+            )
 
     validation_report = run_validate(fused, loaded_profile, mode=mode)
     lint_report = run_lint(fused)

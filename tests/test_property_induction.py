@@ -17,7 +17,6 @@ budget enforcement + console-printable plan. Tests cover:
 
 from __future__ import annotations
 
-import pytest
 
 from ontozense.core.attribute import Attribute
 from ontozense.core.fusion import (
@@ -307,13 +306,26 @@ def test_induce_attributes_dry_run_applies_budget():
     assert [c.element_name for c, _ in plan.skipped] == ["C"]
 
 
-def test_induce_attributes_dry_run_false_raises():
-    """PR B1 must not silently land a half-implemented LLM path.
-    dry_run=False raises NotImplementedError pointing at PR B2."""
-    fused = FusionResult(elements=[_element("A")])
-    with pytest.raises(NotImplementedError) as exc:
-        induce_attributes(fused, dry_run=False)
-    assert "PR B2" in str(exc.value)
+def test_induce_attributes_dry_run_false_supported_in_b2(monkeypatch):
+    """PR B2: dry_run=False is the supported real-LLM path. Mocks
+    the LLM seam to keep the test deterministic and CI-safe (no
+    live API call). Asserts the merge wrote attributes onto the
+    target element."""
+    from ontozense.core import property_induction as pi
+
+    monkeypatch.setattr(
+        pi, "_call_llm",
+        lambda *, prompt, model: (
+            "- name :: xsd:string :: Customer's full name.\n"
+            "- email :: xsd:string :: Login email address.\n"
+        ),
+    )
+    fused = FusionResult(elements=[_element("Customer")])
+    plan = induce_attributes(fused, dry_run=False)
+    customer = fused.elements[0]
+    assert {a.name for a in customer.attributes} == {"name", "email"}
+    assert plan.cache_misses == 1
+    assert plan.cache_hits == 0
 
 
 def test_induce_attributes_refresh_ignored_in_dry_run():

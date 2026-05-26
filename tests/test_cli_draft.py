@@ -548,9 +548,20 @@ class TestDraftPropertyInductionFlag:
         ])
         assert result.exit_code == 0, result.output
 
-    def test_llm_mode_runs_dry_run_console_plan(self, tmp_path: Path):
-        """`--property-induction llm` triggers the dry-run plan.
-        Console mentions induction; no cache file written."""
+    def test_llm_mode_runs_induction_console_plan(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        """`--property-induction llm` runs the eligibility scan +
+        real LLM call (mocked) + cache write. Console mentions
+        induction. PR B2 onwards the cache file IS written when the
+        domain has eligible concepts; the seeded workspace has none
+        (Borrower already carries no Source A snippet anchor) so the
+        scan yields zero eligible and the cache is created empty."""
+        from ontozense.core import property_induction as pi
+        monkeypatch.setattr(
+            pi, "_call_llm",
+            lambda *, prompt, model: "",  # no attributes returned
+        )
         domain_dir = tmp_path / "domain"
         _seed_workspace(domain_dir)
         result = runner.invoke(app, [
@@ -560,20 +571,21 @@ class TestDraftPropertyInductionFlag:
             "--property-induction", "llm",
         ])
         assert result.exit_code == 0, result.output
-        # Console mentions the dry-run plan. Anchor on the marker.
-        assert "Property induction (PR B1 dry-run)" in result.output
-        # No cache file written in B1.
-        assert not (domain_dir / "discovery" / "source-a-properties.json").exists()
+        assert "Property induction:" in result.output
 
-    def test_llm_mode_writes_no_extra_disk_artifacts(self, tmp_path: Path):
-        """Gate: PR B1 dry-run writes ZERO new files outside the
-        existing draft artefacts. Snapshot the discovery dir before
-        and after the llm-mode run — only existing draft writes
-        allowed to appear."""
+    def test_llm_mode_writes_cache_file_in_b2(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        """PR B2 writes ``discovery/source-a-properties.json`` when
+        --property-induction llm runs. The cache file is the
+        durable record of what the LLM induced + budget metadata."""
+        from ontozense.core import property_induction as pi
+        monkeypatch.setattr(
+            pi, "_call_llm",
+            lambda *, prompt, model: "",  # zero eligible in seeded fixture
+        )
         domain_dir = tmp_path / "domain"
         _seed_workspace(domain_dir)
-
-        before = set(p.name for p in (domain_dir / "discovery").iterdir())
         result = runner.invoke(app, [
             "draft",
             "--domain-dir", str(domain_dir),
@@ -581,10 +593,9 @@ class TestDraftPropertyInductionFlag:
             "--property-induction", "llm",
         ])
         assert result.exit_code == 0, result.output
-        after = set(p.name for p in (domain_dir / "discovery").iterdir())
-        new_files = after - before
-        # B1 must NOT introduce source-a-properties.json (that's B2).
-        assert "source-a-properties.json" not in new_files
+        # PR B2 writes the cache (empty per_class is fine here —
+        # seeded fixture has no eligible concepts).
+        assert (domain_dir / "discovery" / "source-a-properties.json").exists()
 
     def test_invalid_property_induction_mode_rejected(self, tmp_path: Path):
         domain_dir = tmp_path / "domain"
@@ -772,11 +783,17 @@ class TestDraftPropertyInductionBudgetValidation:
 
 
 class TestDraftPropertyInductionRefresh:
-    def test_refresh_in_llm_mode_prints_no_op_note(self, tmp_path: Path):
-        """Codex r2 UX nit: --property-induction-refresh is accepted
-        in PR B1 but is a no-op (no cache to refresh yet). Console
-        must say so explicitly so the user doesn't assume cache
-        behaviour exists."""
+    def test_refresh_in_llm_mode_prints_active_note_in_b2(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        """PR B2: --property-induction-refresh is now meaningful.
+        Console prints the "cache misses forced" marker rather than
+        the PR B1 "ignored" placeholder."""
+        from ontozense.core import property_induction as pi
+        monkeypatch.setattr(
+            pi, "_call_llm",
+            lambda *, prompt, model: "",
+        )
         domain_dir = tmp_path / "domain"
         _seed_workspace(domain_dir)
         result = runner.invoke(app, [
@@ -787,11 +804,9 @@ class TestDraftPropertyInductionRefresh:
             "--property-induction-refresh",
         ])
         assert result.exit_code == 0, result.output
-        # Explicit note that refresh is ignored / cache not in B1.
-        # Anchor on the specific marker so pytest tmp paths
-        # containing "refresh" don't trigger false positives.
-        assert "--property-induction-refresh ignored" in result.output
-        assert "PR B2" in result.output
+        assert "cache misses forced" in result.output
+        # The old B1 "ignored" note must NOT fire any more.
+        assert "--property-induction-refresh ignored" not in result.output
 
     def test_refresh_in_off_mode_is_silent_noop(self, tmp_path: Path):
         """With --property-induction off, --refresh is meaningless
