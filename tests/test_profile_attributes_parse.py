@@ -519,15 +519,19 @@ class TestPreCThreeBackwardCompat:
         assert p.alias_map["concept-1"] == "Concept One"
         assert p.canonical_verbs["applies to"] == "AppliesTo"
 
-    def test_entity_type_is_still_hashable_and_frozen(self):
-        """``EntityType`` is declared frozen so it can be put in sets /
-        used as dict keys downstream. Adding a list-typed default field
-        must not break that contract — unhashable mutable defaults
-        would surface as ``TypeError`` on hash, which we explicitly
-        forbid here. (If hash is ever needed downstream it can be
-        added; for now we only require frozen-immutability.)"""
+    def test_entity_type_remains_frozen(self):
+        """``EntityType`` is declared frozen so callers cannot mutate a
+        loaded ``Profile`` after construction. Adding the new
+        ``attributes`` list field must not relax that contract:
+        attribute reassignment must still raise.
+
+        Hashability is **not** asserted here — the list-typed
+        ``required_fields`` / ``optional_fields`` / ``subtypes`` /
+        ``attributes`` defaults already prevent the default
+        ``__hash__`` from succeeding, and no downstream code uses
+        ``EntityType`` as a set member or dict key.
+        """
         et = EntityType(name="X")
-        # Frozen — attribute assignment raises
         with pytest.raises(Exception):
             et.name = "Y"  # type: ignore[misc]
 
