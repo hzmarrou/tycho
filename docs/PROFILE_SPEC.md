@@ -338,15 +338,28 @@ documented above:
 Severity, output shape, ordering, and B-LLM handling are specified in
 detail in [PROPERTY_EXTRACTION_DESIGN.md §5 Phase C contracts](./PROPERTY_EXTRACTION_DESIGN.md#phase-c-contracts--profile-declared-attribute-schemas).
 
-VR007 is a **no-op** when:
+VR007 is a **no-op** when either of the following holds:
 
 - The profile declares no `attributes` on any entity type, or
-- No entity type has any attribute with `required: true`, or
-- The fused result carries no `attributes[]` on any element (e.g.
-  pre-Phase-A `fused.json` reload).
+- No entity type has any attribute with `required: true`.
 
-In all three cases, validation output is byte-identical to a
-pre-Phase-C run on the same inputs.
+In both cases, validation output is byte-identical to a pre-Phase-C
+run on the same inputs.
+
+**Pre-Phase-A fused.json reload behaviour:** when a fused result
+predates Phase A and therefore carries no `attributes[]` on any
+element (the legacy shape from before
+`FusedElement.attributes: list[Attribute] = []` was introduced), the
+element-level field defaults to `[]` on reload. If the loaded
+profile declares `required: true` attributes for that element's
+type, VR007 **fires** for each declared required attribute that has
+no matching entry on the (empty) `el.attributes[]` list. Same shape,
+same severity, same finding granularity as for any other empty
+attribute list. This is the intended Phase C contract — see
+[PROPERTY_EXTRACTION_DESIGN.md §5 Phase C contracts](./PROPERTY_EXTRACTION_DESIGN.md#phase-c-contracts--profile-declared-attribute-schemas)
+("Present" definition) and the
+[Phase C implementation plan §12.3 / §12.4 pre-Phase-A regression
+test](./PROPERTY_EXTRACTION_IMPLEMENTATION_PLAN.md#12-phase-c-implementation-plan-pending-codex-review).
 
 ## Example: minimal profile
 
