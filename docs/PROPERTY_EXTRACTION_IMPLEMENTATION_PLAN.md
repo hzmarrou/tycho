@@ -592,3 +592,244 @@ Final Phase A acceptance (after PR3):
       Basel-only fixture run).
 - [ ] CI passes on all four PRs.
 - [ ] Updated tutorial PR queued.
+
+**Phase A status (2026-05-25):** all four PRs merged (PRs #14-#18),
+umbrella PR #13 merged to main at `5b19925`, cosmic-pattern OWL fixes
+PR #19 merged to main at `b621069`, tutorial update PR #20 merged at
+`25a9494`. `public` branch synced at `2257ad5`. Final integrated
+suite green: 1419 passed, 4 skipped, 0 failed.
+
+---
+
+## 10. Phase D implementation plan (revised r1 — Codex round-1)
+
+**Status:** Draft 2026-05-26. r0 proposed a four-PR delivery with
+L1 annotations + L2 OWL restrictions + L3 SWRL emission. Codex
+round-1 review (REJECT) flagged a contract-level blocker:
+`BusinessRule` (per `src/ontozense/core/fusion.py:148`) lacks the
+`subject_attribute` / `predicate` / `object_value` / `condition`
+fields that L2 / L3 mechanical projection requires. The richer
+`RuleFact` shape exists in `src/ontozense/core/ingest/source_d/ir.py:74`
+but does not reach `FusedElement.business_rules` today.
+
+**r1 scope:** Phase D ships **L1 annotations only** (single PR D1).
+L2 / L3 reasoner-form emission moves to a separate Phase E with its
+own design doc + plan, blocked on a future contract upgrade that
+routes the richer rule payload into fusion.
+
+Depends on
+[PROPERTY_EXTRACTION_DESIGN.md §4 Phase D](./PROPERTY_EXTRACTION_DESIGN.md#phase-d--source-d-business-rule-projection-to-owl-annotation-layer)
++ §5 Phase D contracts + §9 decisions (round 1 closed).
+
+### 10.1 Phase D deliverable summary
+
+A user running:
+
+```bash
+ontozense draft \
+  --domain-dir domains/npl \
+  --source-b domains/npl/sources/governance.json \
+  --source-d domains/npl/sources/npl-code \
+  --format owl-xml \
+  --output domains/npl/draft.owl
+```
+
+gets a `draft.owl` where every `BusinessRule` on every fused element
+projects to one `ontozense:businessRule` annotation on the parent
+class, plus structured siblings (`ontozense:ruleType`,
+`ontozense:ruleAnchor`, `ontozense:ruleConfidence`,
+`ontozense:ruleValue` when the rule is a constant,
+`ontozense:ruleReferencedSymbols` when non-empty, and one
+`dc:source` per citation).
+
+`--emit-rules annotations` is the **default** (r1 — revised from
+r0's `all`) so existing draft invocations get the new annotations
+transparently. `--emit-rules none` matches pre-Phase-D behaviour
+exactly. The other r0 modes (`restrictions`, `swrl`, `all`) are
+accepted by the CLI parser but rejected at runtime with a
+"not yet implemented (queued for Phase E)" error. No doc link is
+promised in the error message because the Phase E design doc does
+not exist yet — Phase E will be scoped separately after Phase D
+ships.
+
+### 10.2 File-level change list
+
+```
+src/ontozense/
+├── core/
+│   ├── rule_projection.py                NEW   RuleAnnotation dataclass +
+│   │                                            per-rule_type L1 projectors +
+│   │                                            project_annotations() entry point
+│   ├── owl_export.py                     EDIT  call project_annotations + emit
+│   │                                            triples + bind ontozense:
+│   │                                            properties added by Phase D
+│   └── fusion.py                         READ-ONLY  BusinessRule shape unchanged
+│                                                    (contract upgrade is Phase E)
+└── cli.py                                EDIT  --emit-rules flag on draft command
+
+tests/
+├── test_rule_projection.py               NEW   per-rule_type L1 projection
+│                                                unit tests
+├── test_owl_export_rules.py              NEW   end-to-end: BusinessRule on
+│                                                FusedElement -> ontozense:
+│                                                triples on parent class
+└── fixtures/
+    └── synthetic_business_rules.py       NEW   one BusinessRule per
+                                                 CodeExtractor rule_type
+```
+
+Estimated diff: ~450 LOC (≈ 200 prod, ≈ 250 tests + fixtures).
+
+### 10.3 PR breakdown — single PR D1
+
+**PR D1 — `feat(rule-projection): Phase D — L1 annotation emission for BusinessRule`**
+
+- `core/rule_projection.py`:
+  - `RuleAnnotation` dataclass (rule + parent_class_uri + triples).
+  - `project_annotations(fused, ontozense_ns) → list[RuleAnnotation]`
+    entry point. Walks every `FusedElement.business_rules` and emits
+    one `RuleAnnotation` per rule per parent class.
+  - Per-rule_type triple builders for `constant`, `conditional`,
+    `function`, `sql_check`, `sql_where`, `sql_view`,
+    `comment_citation` (the seven types CodeExtractor actually emits
+    per `extractors/code_extractor.py:77`). Each builder returns the
+    list of `(s, p, o)` tuples for that rule's annotation cluster.
+  - Truncation guard: `ontozense:businessRule` literal capped at
+    2000 chars; longer expressions truncate with trailing `"..."`
+    and the full text remains addressable via the
+    `ontozense:ruleAnchor` (file:line click-through). Open Q7 in
+    design §6.
+  - `BusinessRule.value` coerced to str via `repr()` for
+    `ontozense:ruleValue` on constants. Open Q8 in design §6.
+- `core/owl_export.py`:
+  - Bind new annotation properties in the graph header:
+    `ontozense:businessRule`, `ontozense:ruleType`,
+    `ontozense:ruleAnchor`, `ontozense:ruleConfidence`,
+    `ontozense:ruleValue`, `ontozense:ruleReferencedSymbols`.
+  - After the existing per-element class emission loop (which Phase A
+    already populates), call `project_annotations` when
+    `emit_rules == "annotations"` and add the returned triples to
+    the graph.
+  - `dc:source` emitted per entry in `rule.citations`. Matches
+    existing class-level emission at `core/owl_export.py:114` per
+    design §9 D5 (closed r2).
+- `cli.py`:
+  - `--emit-rules <mode>` flag on `draft` with choices
+    `annotations|restrictions|swrl|all|none`. Default `annotations`.
+    `restrictions|swrl|all` raise `typer.BadParameter` with
+    "not yet implemented (queued for Phase E)". No doc link in the
+    error message — Phase E design doc does not exist yet.
+    `annotations` and `none` are honoured.
+- Tests:
+  - `test_rule_projection.py`: per-rule_type L1 triple shape for
+    each of the seven CodeExtractor rule_types; truncation guard
+    fires at the 2000-char boundary; `BusinessRule` with empty
+    `citations` emits zero `dc:source` triples; `BusinessRule`
+    with multiple citations emits one triple each; constant
+    `value=None` does not emit `ontozense:ruleValue`.
+  - `test_owl_export_rules.py`: end-to-end with a fixture
+    FusionResult carrying mixed rule types; assert per-class
+    annotation cluster shape; assert `--emit-rules none` regenerates
+    a `draft.owl` byte-identical (modulo rdflib serialisation
+    quirks — compare graph isomorphism via `rdflib.compare.isomorphic`)
+    to a pre-Phase-D run; assert `--emit-rules annotations` adds
+    only the expected triples and breaks nothing else.
+  - `test_owl_export_datatype.py` (existing): must remain green —
+    Phase D does not touch the Phase A DatatypeProperty path.
+  - Coverage targets: 90% line on new code; 100% per-rule_type
+    branch in `project_annotations`.
+
+**Acceptance (Phase D / PR D1):**
+
+- Every `BusinessRule` in NPL's `fused.json` (~50 today) carries
+  exactly one `ontozense:businessRule` annotation in the regenerated
+  `draft.owl`.
+- `--emit-rules none` regenerates `draft.owl` graph-isomorphic to
+  pre-Phase-D for the same inputs.
+- `--emit-rules restrictions|swrl|all` rejected at the CLI with a
+  clear "queued for Phase E" error.
+- Curator opens NPL `draft.owl` in Protégé and sees per-class
+  `ontozense:businessRule` annotations in the class info pane.
+
+### 10.4 Backwards compatibility and migration
+
+- `--emit-rules annotations` is the **default**. Existing draft
+  invocations get the new annotations transparently — pure additions,
+  no triple deletion, no URI break.
+- Strict pre-Phase-D byte-identity (graph isomorphism) available via
+  `--emit-rules none`.
+- No `fused.json` shape change — `business_rules` already there
+  (Phase A r0). `BusinessRule` contract unchanged.
+- No URI break for existing classes / datatype / object properties.
+  L1 emission attaches new triples to existing class URIs only — no
+  new URIs introduced in Phase D (rule URIs are a Phase E concern
+  for reasoner-form emission).
+- Existing test fixtures with empty `business_rules` produce zero
+  new triples.
+
+### 10.5 Rollback plan
+
+Single revert unit, independent of Phase A:
+
+| Unit | What it covers | Revert effect |
+|---|---|---|
+| **PR D1** | `RuleAnnotation` scaffold + L1 annotation projectors + `--emit-rules` CLI flag | `draft.owl` loses all `ontozense:businessRule` annotations and the structured siblings. `fused.json` unchanged (rules still attached to FusedElements). CLI loses the `--emit-rules` flag entirely. |
+
+Reverting PR D1 has zero side effects on Phase A behaviour. No
+ordering constraint with future Phase E PRs.
+
+### 10.6 Effort estimate
+
+| PR | Person-days (focused) |
+|----|-----------------------|
+| D1 | **~1.5 PD** (revised from r0's ~4 PD across two PRs) |
+
+Phase E (L2 + L3) is a separate effort, will get its own estimate
+when scoped.
+
+### 10.7 Sign-off checklist
+
+Before merging PR D1:
+
+- [ ] All tests green (`pytest -q`).
+- [ ] No new warnings in `ruff check` on touched files.
+- [ ] `tests/test_domain_neutrality.py` passes — docstring /
+      comment examples use neutral terms (no banking jargon in `src/`).
+- [ ] Diff reviewed against design doc §5 Phase D contracts (L1 only).
+- [ ] Manual smoke: regenerate NPL `draft.owl`, import in Protégé,
+      verify `ontozense:businessRule` annotations show on entity-card
+      info pane.
+- [ ] PR description references PR D1 as a single revert unit and
+      explicitly notes Phase E (L2 + L3) is deferred.
+
+Final Phase D acceptance:
+
+- [ ] NPL `draft.owl` contains ≥ 1 `ontozense:businessRule`
+      annotation per `BusinessRule` in `fused.json`.
+- [ ] `--emit-rules none` produces `draft.owl` graph-isomorphic to
+      pre-Phase-D for the same inputs (regression guard via
+      `rdflib.compare.isomorphic`).
+- [ ] `--emit-rules restrictions|swrl|all` rejected at CLI parse
+      time with a clear "queued for Phase E" error message. No doc
+      link required (Phase E design doc does not exist yet).
+- [ ] CI passes on PR D1.
+- [ ] Tutorial follow-up PR queued (Step 3 "What you'll see"
+      section gets an L1 rules paragraph).
+
+### 10.8 Phase E placeholder
+
+Phase E (L2 OWL restrictions + L3 SWRL Horn-clause rules) is out of
+scope for this plan. Pre-conditions for Phase E spec work:
+
+- A `BusinessRule` contract upgrade or a parallel typed channel that
+  surfaces `RuleFact` fields (`subject_attribute`, `predicate`,
+  `object_value`, `condition`) on `FusedElement`.
+- Real-domain feedback on which `rule_type` shapes most need
+  reasoner-form coverage (constants? sql_checks? conditionals?).
+  Phase D shipping first gives us this signal.
+- A decision on SWRL raw-triple emission (rdflib has no native SWRL
+  serialiser — Phase E will need ~150 LOC of triple-builder code per
+  the W3C SWRL submission shape).
+
+Phase E will get its own design doc section and its own plan section.
+Not in scope here.
